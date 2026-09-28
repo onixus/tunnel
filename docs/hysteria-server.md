@@ -1,5 +1,7 @@
 # Hysteria 2 и H UI
 
+Текущая Hysteria использует [Let’s Encrypt и домен onixus-rf.duckdns.org](hysteria-letsencrypt.md); прежние инструкции с самоподписанным CA относятся к старой конфигурации.
+
 В действующей установке ядро запускает **H UI**, а не прежняя `hysteria-server.service`. Не запускайте обе службы на UDP 443.
 
 ## Установка с нуля

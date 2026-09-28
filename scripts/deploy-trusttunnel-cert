@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+lineage=/etc/letsencrypt/live/onixus-rf.duckdns.org
+[ "${RENEWED_LINEAGE:-$lineage}" = "$lineage" ] || exit 0
+openssl x509 -in "$lineage/fullchain.pem" -noout -checkend 86400 >/dev/null
+out=/opt/trusttunnel-web/certs/live/onixus-rf.duckdns.org
+install -d -o 10001 -g 10001 -m 0750 "$out"
+install -o 10001 -g 10001 -m 0644 "$lineage/fullchain.pem" "$out/fullchain.pem.new"
+install -o 10001 -g 10001 -m 0640 "$lineage/privkey.pem" "$out/privkey.pem.new"
+mv "$out/privkey.pem.new" "$out/privkey.pem"
+mv "$out/fullchain.pem.new" "$out/fullchain.pem"
+# The panel certificate watcher detects the new files and reloads the endpoint.
