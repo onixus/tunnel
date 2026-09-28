@@ -14,6 +14,7 @@ Hysteria отправляет `.ru`, `.рф` и выбранные GeoIP-стр�
 ## С чего начать
 
 - [Архитектура, адреса, порты и маршруты](docs/architecture.md)
+- [Резервный выход и переключение маршрутов](docs/reserve-exit.md)
 - [Установка WireGuard и выходного SOCKS5](docs/interserver.md)
 - [Установка Hysteria и H UI](docs/hysteria-server.md)
 - [Установка TrustTunnel и панели](docs/trusttunnel-server.md)
