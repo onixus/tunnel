@@ -1,0 +1,171 @@
+--- a/app/mailer.py
++++ b/app/mailer.py
+@@ -1,5 +1,6 @@
+ """Отправка почты по SMTP-настройкам из БД. Используется для писем сброса пароля."""
+ import smtplib
++import ssl
+ from email.message import EmailMessage
+ 
+ from . import db
+@@ -9,7 +10,7 @@
+     return bool(db.get_setting("smtp_host"))
+ 
+ 
+-def send_mail(to: str, subject: str, body: str) -> None:
++def send_mail(to: str, subject: str, body: str, attachments: list[tuple[str, str]] | None = None) -> None:
+     """Синхронная отправка (роут выполняется в threadpool). Бросает при ошибке."""
+     host = db.get_setting("smtp_host")
+     if not host:
+@@ -25,14 +26,16 @@
+     msg["To"] = to
+     msg["Subject"] = subject
+     msg.set_content(body)
++    for filename, content in attachments or []:
++        msg.add_attachment(content.encode("utf-8"), maintype="application", subtype="octet-stream", filename=filename)
+ 
+     if tls == "ssl":
+-        server: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=15)
++        server: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=15, context=ssl.create_default_context())
+     else:
+         server = smtplib.SMTP(host, port, timeout=15)
+     try:
+         if tls == "starttls":
+-            server.starttls()
++            server.starttls(context=ssl.create_default_context())
+         if user:
+             server.login(user, password)
+         server.send_message(msg)
+--- a/app/routes_admin.py
++++ b/app/routes_admin.py
+@@ -2,7 +2,7 @@
+ from fastapi import APIRouter, Form, Request
+ from fastapi.responses import HTMLResponse, RedirectResponse
+ 
+-from . import conninfo, db, endpoint, security, webauth
++from . import conninfo, db, endpoint, security, webauth, mailer, config_mail
+ from .templating import templates
+ 
+ router = APIRouter(prefix="/admin")
+@@ -108,6 +108,8 @@
+     return templates.TemplateResponse(
+         request, "admin_user_detail.html",
+         _ctx(request, admin, user=user, configs=configs,
++             mail_token=config_mail.token(request.cookies.get(webauth.ADMIN_COOKIE, ""), user_id),
++             mail_ready=mailer.is_configured(),
+              msg=request.query_params.get("msg"), err=request.query_params.get("err")),
+     )
+ 
+@@ -308,3 +310,19 @@
+         conn.execute("UPDATE admins SET email = ? WHERE id = ?", (email, admin["id"]))
+         
+     return RedirectResponse("/admin/dashboard?msg=Профиль успешно обновлён", 302)
++
++
++@router.post("/users/{user_id}/send-configs")
++def email_configs(request: Request, user_id: int, mail_token: str = Form(""), config_id: int = Form(0)):
++    if not webauth.current_admin(request):
++        return RedirectResponse("/admin/login", 302)
++    from fastapi import HTTPException
++    from urllib.parse import urlencode
++    if not config_mail.valid_token(request.cookies.get(webauth.ADMIN_COOKIE, ""), user_id, mail_token):
++        raise HTTPException(status_code=403, detail="Invalid form token")
++    try:
++        count = config_mail.send(user_id, config_id)
++        query = urlencode({"msg": f"Отправлено профилей: {count}. Письмо принято SMTP-сервером."})
++    except config_mail.MailError as exc:
++        query = urlencode({"err": str(exc)})
++    return RedirectResponse(f"/admin/users/{user_id}?{query}", 303)
+--- a/app/templates/admin_user_detail.html
++++ b/app/templates/admin_user_detail.html
+@@ -69,6 +69,13 @@
+       <button type="submit" class="sm">{{ icon('plus', 15) }} Добавить</button>
+     </form>
+   </div>
++  <p class="mut">Отправка на <b>{{ user['email'] }}</b>: TOML-файлы и ссылки импорта TrustTunnel.</p>
++  {% if configs and mail_ready and user['status'] == 'active' %}
++  <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:14px;" onsubmit="this.querySelector('button').disabled=true">
++    <input type="hidden" name="mail_token" value="{{ mail_token }}">
++    <button type="submit">{{ icon('mail', 15) }} Отправить все конфиги на email</button>
++  </form>
++  {% elif not mail_ready %}<p class="mut">Для отправки настройте SMTP в настройках панели.</p>{% endif %}
+   {% if not configs %}<p class="mut" style="margin:0;">Конфигов нет.</p>{% endif %}
+   {% for c in configs %}
+   <div class="cfg">
+@@ -78,6 +85,13 @@
+         <button class="danger sm" type="submit">{{ icon('trash', 14) }}</button>
+       </form>
+     </div>
++    {% if mail_ready and user['status'] == 'active' %}
++    <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:10px;" onsubmit="this.querySelector('button').disabled=true">
++      <input type="hidden" name="mail_token" value="{{ mail_token }}">
++      <input type="hidden" name="config_id" value="{{ c.id }}">
++      <button class="sm" type="submit">{{ icon('mail', 14) }} Отправить на email</button>
++    </form>
++    {% endif %}
+     <div class="kv-list">
+       <div class="kv"><span class="kv-name">Username</span><code>{{ c.username }}</code>
+         <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.username }}', this)">{{ icon('copy', 13) }}</button></div>
+--- /dev/null
++++ b/app/config_mail.py
+@@ -0,0 +1,61 @@
++"""Administrator-triggered delivery to the profile owner's stored email."""
++import hashlib
++import hmac
++import logging
++import threading
++import time
++from email.headerregistry import Address
++from . import config, db, conninfo, mailer
++from .client_config import build_client_toml
++
++_lock = threading.Lock()
++_last = {}
++
++class MailError(Exception):
++    pass
++
++def token(session, user_id):
++    return hmac.new(config.SECRET_KEY.encode(), f'config-mail:{user_id}:{session}'.encode(), hashlib.sha256).hexdigest()
++
++def valid_token(session, user_id, supplied):
++    return bool(session) and hmac.compare_digest(token(session, user_id), supplied)
++
++def send(user_id, config_id=0):
++    user = db.get_user(user_id)
++    if not user or user['status'] != 'active':
++        raise MailError('Пользователь не найден или заблокирован.')
++    try:
++        email = user['email'].strip()
++        addr = Address(addr_spec=email)
++        if not addr.username or not addr.domain or '\r' in email or '\n' in email:
++            raise ValueError()
++    except ValueError:
++        raise MailError('Проверьте email пользователя.') from None
++    if not mailer.is_configured():
++        raise MailError('SMTP не настроен.')
++    configs = db.list_user_configs(user_id)
++    if config_id:
++        configs = [c for c in configs if c['id'] == config_id]
++    if not configs:
++        raise MailError('Нет выбранных конфигов для отправки.')
++    with _lock:
++        now = time.monotonic()
++        if now - _last.get(user_id, -1000) < 60:
++            raise MailError('Повторная отправка доступна через минуту.')
++        _last[user_id] = now
++    try:
++        settings = db.get_settings()
++        lines = ['Ваши профили TrustTunnel.', 'Импортируйте ссылку в приложение TrustTunnel или используйте приложенный TOML в официальном клиенте.', 'Профили содержат данные доступа. Не передавайте их другим людям.', '']
++        attachments = []
++        for cfg in configs:
++            info = conninfo.connection_info(cfg, settings)
++            lines += [str(info['label']), info['deeplink'], '']
++            attachments.append((f'trusttunnel-{cfg["id"]}.toml', build_client_toml(info)))
++        mailer.send_mail(email, 'Ваши конфигурации TrustTunnel', '\n'.join(lines), attachments=attachments)
++    except Exception as exc:
++        with _lock:
++            _last.pop(user_id, None)
++        logging.getLogger(__name__).warning('Config email failed user_id=%s error_type=%s', user_id, type(exc).__name__)
++        raise MailError('Не удалось отправить письмо. Проверьте SMTP и повторите попытку.') from None
++    logging.getLogger(__name__).info('Config email accepted user_id=%s count=%s', user_id, len(configs))
++    return len(configs)
