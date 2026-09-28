@@ -1,0 +1,28 @@
+services:
+  trusttunnel-web:
+    image: trusttunnel-web:local-fd8c6ef-v1.1.0
+    container_name: trusttunnel-web
+    restart: unless-stopped
+    env_file: .env
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    ports:
+      - "127.0.0.1:18082:8000"
+      - "8443:8443/tcp"
+      - "8443:8443/udp"
+    volumes:
+      - ./data:/data
+      - ./certs:/certs:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

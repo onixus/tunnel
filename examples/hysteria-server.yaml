@@ -1,0 +1,58 @@
+# Reference only: h-ui owns the running configuration. Replace placeholders before use.
+acl:
+  geoip: /var/lib/h-ui/geo/geoip.dat
+  inline:
+  - local(10.254.77.1, tcp/18082, 127.0.0.1)
+  - local(10.254.77.1, tcp/8081, 127.0.0.1)
+  - reject(geoip:private)
+  - local(suffix:ru)
+  - local(suffix:xn--p1ai)
+  - local(geoip:ru)
+  - local(geoip:by)
+  - local(geoip:kz)
+  - local(geoip:kg)
+  - local(geoip:tj)
+  - local(geoip:uz)
+  - local(geoip:am)
+  - local(geoip:az)
+  - local(geoip:md)
+  - local(geoip:tm)
+  - onixus(all)
+auth:
+  http:
+    insecure: false
+    url: http://127.0.0.1:8081/hui/hysteria2/auth
+  type: http
+listen: :443
+obfs:
+  salamander:
+    password: REPLACE_LOCALLY_OBFS_PASSWORD
+  type: salamander
+outbounds:
+- name: onixus
+  socks5:
+    addr: 10.254.77.2:1080
+    password: REPLACE_LOCALLY_SOCKS_PASSWORD
+    username: hysteria
+  type: socks5
+- direct:
+    mode: '4'
+  name: local
+  type: direct
+resolver:
+  https:
+    addr: https://1.1.1.1/dns-query
+    timeout: 5s
+  type: https
+sniff:
+  enable: true
+  rewriteDomain: false
+  tcpPorts: 80,443
+  timeout: 2s
+  udpPorts: '443'
+tls:
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key
+trafficStats:
+  listen: 127.0.0.1:9999
+  secret: REPLACE_LOCALLY_SECRET

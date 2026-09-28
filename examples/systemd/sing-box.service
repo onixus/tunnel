@@ -1,0 +1,21 @@
+# /etc/systemd/system/sing-box.service
+[Unit]
+Description=System Hysteria tunnel with RU domain bypass
+After=network-online.target
+Wants=network-online.target
+Conflicts=hysteria-client.service
+[Service]
+ExecStartPre=/usr/local/bin/sing-box check -c /etc/sing-box/config.json
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=3
+StateDirectory=sing-box
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target

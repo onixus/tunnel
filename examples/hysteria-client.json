@@ -1,0 +1,18 @@
+{
+  "server": "139.100.233.173:443",
+  "auth": "REPLACE_LOCALLY_HYSTERIA_PASSWORD",
+  "tls": {
+    "sni": "139.100.233.173",
+    "insecure": false,
+    "ca": "/etc/hysteria/server.crt"
+  },
+  "obfs": {
+    "type": "salamander",
+    "salamander": {
+      "password": "REPLACE_LOCALLY_OBFS_PASSWORD"
+    }
+  },
+  "socks5": {
+    "listen": "127.0.0.1:18080"
+  }
+}

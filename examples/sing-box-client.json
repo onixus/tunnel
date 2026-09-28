@@ -1,0 +1,192 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "dns-direct",
+        "server": "1.1.1.1",
+        "detour": "direct"
+      },
+      {
+        "type": "https",
+        "tag": "dns-proxy",
+        "server": "1.1.1.1",
+        "detour": "hysteria"
+      },
+      {
+        "type": "fakeip",
+        "tag": "fakeip",
+        "inet4_range": "198.18.0.0/15",
+        "inet6_range": "fc00::/18"
+      }
+    ],
+    "rules": [
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "action": "route",
+        "server": "fakeip"
+      },
+      {
+        "domain_suffix": [
+          "ru",
+          "xn--p1ai"
+        ],
+        "action": "route",
+        "server": "dns-direct"
+      }
+    ],
+    "final": "dns-proxy",
+    "strategy": "ipv4_only",
+    "reverse_mapping": true
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "hy-tun",
+      "address": [
+        "172.30.255.1/30",
+        "fd7a:115c:a1e0::1/126"
+      ],
+      "mtu": 1400,
+      "auto_route": true,
+      "auto_redirect": true,
+      "strict_route": true,
+      "dns_mode": "hijack",
+      "route_exclude_address": [
+        "192.168.0.0/16",
+        "10.0.0.0/9",
+        "10.128.0.0/10",
+        "10.192.0.0/11",
+        "10.224.0.0/12",
+        "10.240.0.0/13",
+        "10.248.0.0/14",
+        "10.252.0.0/15",
+        "10.255.0.0/16",
+        "10.254.128.0/17",
+        "10.254.0.0/18",
+        "10.254.96.0/19",
+        "10.254.80.0/20",
+        "10.254.64.0/21",
+        "10.254.72.0/22",
+        "10.254.78.0/23",
+        "10.254.76.0/24",
+        "10.254.77.128/25",
+        "10.254.77.64/26",
+        "10.254.77.32/27",
+        "10.254.77.16/28",
+        "10.254.77.8/29",
+        "10.254.77.4/30",
+        "10.254.77.2/31",
+        "10.254.77.0/32",
+        "172.16.0.0/12",
+        "139.100.233.173/32",
+        "fe80::/10"
+      ],
+      "stack": "mixed"
+    },
+    {
+      "type": "mixed",
+      "tag": "local-proxy",
+      "listen": "127.0.0.1",
+      "listen_port": 10808
+    },
+    {
+      "type": "mixed",
+      "tag": "local-http",
+      "listen": "127.0.0.1",
+      "listen_port": 10809
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hysteria",
+      "server": "139.100.233.173",
+      "server_port": 443,
+      "password": "REPLACE_LOCALLY_HYSTERIA_PASSWORD",
+      "obfs": {
+        "type": "salamander",
+        "password": "REPLACE_LOCALLY_OBFS_PASSWORD"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "139.100.233.173",
+        "certificate_path": "/etc/hysteria/server.crt"
+      },
+      "bind_interface": "enp6s0"
+    },
+    {
+      "type": "direct",
+      "tag": "direct",
+      "bind_interface": "enp6s0",
+      "domain_resolver": {
+        "server": "dns-direct",
+        "strategy": "ipv4_only"
+      }
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "dns-proxy",
+      "strategy": "ipv4_only"
+    },
+    "rules": [
+      {
+        "ip_cidr": [
+          "10.254.77.1/32"
+        ],
+        "port": 18082,
+        "action": "route",
+        "outbound": "hysteria"
+      },
+      {
+        "ip_cidr": [
+          "10.254.77.1/32"
+        ],
+        "port": 8081,
+        "action": "route",
+        "outbound": "hysteria"
+      },
+      {
+        "port": 53,
+        "action": "hijack-dns"
+      },
+      {
+        "action": "sniff"
+      },
+      {
+        "domain_suffix": [
+          "ru",
+          "xn--p1ai"
+        ],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "direct"
+      }
+    ],
+    "final": "hysteria"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "/var/lib/sing-box/cache.db",
+      "store_fakeip": true
+    }
+  }
+}
