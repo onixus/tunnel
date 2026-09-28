@@ -1,0 +1,16 @@
+[Unit]
+Description=Private Telegram VPN control
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/vpn-telegram
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=read-only
+ReadWritePaths=/root/hysteria-route-backups
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
