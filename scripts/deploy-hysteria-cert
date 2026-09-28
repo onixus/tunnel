@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+lineage=/etc/letsencrypt/live/onixus-rf.duckdns.org
+[ "${RENEWED_LINEAGE:-$lineage}" = "$lineage" ] || exit 0
+openssl x509 -in "$lineage/fullchain.pem" -noout -checkend 86400 >/dev/null
+install -o root -g hysteria -m 0644 "$lineage/fullchain.pem" /etc/hysteria/server.crt.new
+install -o root -g hysteria -m 0640 "$lineage/privkey.pem" /etc/hysteria/server.key.new
+mv /etc/hysteria/server.key.new /etc/hysteria/server.key
+mv /etc/hysteria/server.crt.new /etc/hysteria/server.crt
+systemctl try-restart h-ui.service

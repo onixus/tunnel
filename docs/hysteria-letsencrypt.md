@@ -1,0 +1,32 @@
+# Hysteria: Let’s Encrypt
+
+Действующий адрес: **onixus-rf.duckdns.org:443/UDP** (`139.100.233.173`). Hysteria переведена с самоподписанного сертификата на Let’s Encrypt. Первоначальный сертификат действителен до 27 декабря 2026, 18:47:14 UTC. TrustTunnel использует отдельный сертификат; эта миграция относится к Hysteria.
+
+## Клиенты
+
+Обновите страницу H UI и импортируйте новый QR/ссылку своей учётной записи. Экспорт использует домен и `insecure=0` для всех аккаунтов, включая Android. Старые профили с IP в качестве имени TLS или закреплённым старым сертификатом необходимо заменить.
+
+Параметры: сервер `onixus-rf.duckdns.org`, порт `443`, SNI `onixus-rf.duckdns.org`, проверка TLS включена. Ручной CA, сертификат и fingerprint больше не задаются: используется системное хранилище доверия. Пароль пользователя и salamander не изменены. Можно оставить IP адресом сервера, если SNI явно задан доменом.
+
+Профиль Hiddify на рабочем Mac обновлён. Linux-клиент `192.168.68.120` при миграции ответил Connection refused на SSH: его конфигурация не обновлена. Для sing-box необходимо заменить TLS-блок Hysteria outbound на `{"enabled":true,"server_name":"onixus-rf.duckdns.org","insecure":false}`, удалив прежние `certificate`, `certificate_path` и pin; затем перезапустить клиент. Сохраните существующие исключения маршрутов.
+
+## Выпуск и продление
+
+Certbot установлен из пакетов Ubuntu; используется standalone HTTP-01, для него разрешён TCP 80. Порт не публикует админку. DNS домена должен указывать на VPN-сервер.
+
+```sh
+certbot certonly --standalone --non-interactive --agree-tos \
+  --email onixus@live.ru -d onixus-rf.duckdns.org
+certbot renew --dry-run --no-random-sleep-on-renew --cert-name onixus-rf.duckdns.org
+systemctl list-timers certbot.timer
+```
+
+Источник сертификата и ключа — `/etc/letsencrypt/live/onixus-rf.duckdns.org/`. [Deploy-hook](../scripts/deploy-hysteria-cert) установлен в `/etc/letsencrypt/renewal-hooks/deploy/hysteria`, root, `0750`. Он копирует fullchain и ключ в существующие `/etc/hysteria/server.crt` и `server.key` с правами `root:hysteria`, `0644/0640`, затем перезапускает H UI. При успешном продлении VPN-клиенты кратко переподключаются. Глобальные права каталога Let’s Encrypt не расширены. См. [Certbot deploy hooks](https://eff-certbot.readthedocs.io/en/stable/using.html#renewing-certificates).
+
+`certbot.timer` включён. H UI по-прежнему читает TLS из штатных путей; ACL, SOCKS-выходы и резервный маршрут сохранены. В `/etc/systemd/system/h-ui.service.d/hiddify-export.conf` заданы `H_UI_PUBLIC_HOST=onixus-rf.duckdns.org` и пустой `H_UI_HIDDIFY_ACCOUNT`: обычный URI теперь работает без JSON с вложенным сертификатом.
+
+Служебный native-клиент `/etc/hysteria/client.json` обновлён на домен и системные CA. Сквозная проверка через Hysteria с `insecure=false` вернула выходной IP `151.241.234.124`. Фактический экспорт H UI проверен: схема hysteria2, новый домен, insecure=0.
+
+## Восстановление
+
+Предыдущие сертификат, ключ, служебный клиент и drop-in сохранены в `/root/hysteria-before-letsencrypt/` (root-only). Возврат к ним потребует также вернуть старые клиентские профили. Не восстанавливайте самоподписанный сертификат поверх действующего без необходимости.
