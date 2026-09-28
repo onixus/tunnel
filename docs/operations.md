@@ -1,0 +1,65 @@
+# Эксплуатация, обновления и восстановление
+
+## Регулярные проверки
+
+Проверяйте службы, свободное место, актуальность WG handshake, срок TLS-сертификатов, внешний IP через каждый VPN и доступность DNS/HTTPS. Автоматические обновления GeoIP/сертификатов и внешний мониторинг не настроены.
+
+```sh
+openssl x509 -in /etc/hysteria/server.crt -noout -dates
+openssl x509 -in /opt/trusttunnel-web/certs/live/trusttunnel.internal/fullchain.pem -noout -dates
+df -h
+journalctl -u h-ui -n 50 --no-pager
+```
+
+Перезапуск `h-ui` прерывает Hysteria-сессии. Перезапуск TrustTunnel-контейнера и изменение его VPN credentials прерывают TrustTunnel-сессии. Планируйте работы с доступным SSH-каналом.
+
+## Что резервировать
+
+| Узел | Данные |
+|---|---|
+| Вход | `/var/lib/h-ui/`, `/etc/hysteria/`, `/etc/wireguard/`, units H UI/WG, firewall |
+| Вход | `/opt/trusttunnel-web/`: исходники patch, `.env`, `data`, `certs`, `access.json`, Compose; рабочий Docker image |
+| Выход | `/etc/hysteria-exit/`, `/etc/wireguard/`, unit `hysteria-exit`, `/etc/nftables.conf` и связанные includes |
+| Клиент | `/etc/sing-box/`, публичный `/etc/hysteria/server.crt`, unit sing-box |
+
+Копии содержат секреты: права `0700/0600`, шифрование при переносе, хранение отдельно от Git и самого сервера. Срок хранения задаётся администратором.
+
+Для простого согласованного backup H UI остановите `h-ui`, скопируйте состояние, затем запустите. Для TrustTunnel — `docker compose -f compose.yaml stop`, архив каталога, `up -d`. Сделайте это в окно обслуживания. Живой SQLite копируйте через `.backup`/Python `sqlite3.Connection.backup`, а не обычный `cp` файла с активным WAL. Одновременно меняющиеся сертификаты и runtime требуют согласованной копии, поэтому остановка проще.
+
+Ранее созданные локальные копии не заменяют полный backup:
+
+- `/root/hysteria-before-panel/` — Hysteria до H UI;
+- `/root/h-ui-before-client-panel.db`, `/root/h-ui-before-trusttunnel-panel.db` — промежуточные SQLite snapshots;
+- `/root/hysteria-exit-backup/nftables.conf` на onixus.ru — прежний firewall;
+- `.before-panel-access` / `.before-trusttunnel-panel` рядом с конфигом `.120` — конфигурации до добавления UI-маршрутов.
+
+## Восстановление после потери сервера
+
+1. Восстановите SSH и firewall, убедитесь в доступности консоли провайдера.
+2. Восстановите WireGuard **с прежними ключами** и узкими /32 AllowedIPs; проверьте peer handshake.
+3. На onixus.ru восстановите sing-box SOCKS, service и точечные nft rules, проверьте private bind.
+4. Восстановите H UI, бинарники и SQLite/сертификаты с правильными владельцами; старую native Hysteria оставьте выключенной.
+5. Восстановите TrustTunnel image/исходники, данные и сертификаты; выполните `docker compose -f compose.yaml up -d`.
+6. Проверьте оба VPN реальным клиентом, затем выдавайте новые профили. Смена ключей/сертификатов без обновления клиентов нарушит их подключения.
+
+## Обновление программ
+
+Сначала сохраните конфигурации, согласованные базы и бинарники/image ID. Скачайте конкретную версию, проверьте её release notes, SHA256 и совместимость конфигурации. Новую конфигурацию sing-box проверьте `sing-box check -c …` до restart. После изменения выполните весь короткий [набор приёмки](troubleshooting.md).
+
+H UI запускает копию `/var/lib/h-ui/bin/hysteria-linux-amd64`: замена одного `/usr/local/bin/hysteria` не обновит работающий core. Не обновляйте сразу панель и ядро без промежуточной проверки.
+
+Для TrustTunnel сохраните patch и не заменяйте локальный образ произвольным `latest`: это потеряет корректный экспорт TLS-профилей и ограничения контейнера. Новая upstream-версия может требовать адаптации patch. Обновление Docker не должно удалять persistent `data` и `certs`.
+
+## Обновление GeoIP
+
+В защищённом временном каталоге скачайте из одного release Loyalsoldier `geoip.dat` и `geoip.dat.sha256sum`, выполните `sha256sum -c geoip.dat.sha256sum`. Сохраните старый файл. Установите новый через временный файл на той же файловой системе и атомарный `mv`, владелец hysteria:hysteria. Перезапустите H UI, проверьте и прямой, и SOCKS-маршрут. При ошибке верните прежнюю базу и перезапустите. Не перезаписывайте рабочий файл незавершённой загрузкой.
+
+## Откат
+
+**H UI → прежняя Hysteria:** на входном сервере `/usr/local/sbin/hysteria-panel-rollback` отключает H UI и включает `hysteria-server`. Это возвращает старую схему с прямым выходом и убирает UI, а не только предыдущую версию панели. Используйте осознанно.
+
+**TrustTunnel:** в `/opt/trusttunnel-web` команда `docker compose -f compose.yaml stop` выключает только TrustTunnel. Для отката версии восстановите предыдущий image/config; при миграциях SQLite может потребоваться согласованная старая база.
+
+**Клиент `.120`:** `/usr/local/sbin/hysteria-routing-rollback` возвращает прежний прокси. Для сохранения системного туннеля восстановите проверенный backup `/etc/sing-box/config.json`, выполните `sing-box check`, затем restart. При восстановлении старого backup добавленные позднее маршруты панелей могут пропасть.
+
+Не делайте `docker compose down -v`, очистку firewall или удаление ключей частью обычного отката.

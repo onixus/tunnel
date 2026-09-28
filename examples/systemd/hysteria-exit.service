@@ -1,0 +1,19 @@
+# /etc/systemd/system/hysteria-exit.service
+[Unit]
+Description=Private Hysteria exit via onixus.ru
+Requires=wg-quick@wg-private.service
+After=network-online.target wg-quick@wg-private.service
+[Service]
+User=hy-exit
+Group=hy-exit
+ExecStart=/usr/local/bin/sing-box run -c /etc/hysteria-exit/config.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+[Install]
+WantedBy=multi-user.target

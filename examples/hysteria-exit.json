@@ -1,0 +1,49 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "private-socks",
+      "listen": "10.254.77.2",
+      "listen_port": 1080,
+      "users": [
+        {
+          "username": "hysteria",
+          "password": "REPLACE_LOCALLY_SOCKS_PASSWORD"
+        }
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct",
+      "bind_interface": "ens1",
+      "domain_resolver": {
+        "server": "dns",
+        "strategy": "ipv4_only"
+      }
+    }
+  ],
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "dns",
+        "server": "1.1.1.1",
+        "bind_interface": "ens1"
+      }
+    ]
+  },
+  "route": {
+    "rules": [
+      {
+        "ip_is_private": true,
+        "action": "reject"
+      }
+    ],
+    "final": "direct"
+  }
+}

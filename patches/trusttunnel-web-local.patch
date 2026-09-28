@@ -1,0 +1,169 @@
+diff --git a/Dockerfile b/Dockerfile
+index e4bb7cb..6ea2275 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,49 +1,11 @@
+-# ─────────────────────────────────────────────────────────────────────────────
+-# trusttunnel-web — панель + VPN-endpoint в ОДНОМ образе.
+-#   • FastAPI/uvicorn отдаёт кабинет (/) и админку (/admin);
+-#   • тот же процесс супервизит trusttunnel_endpoint (data-plane);
+-#   • certbot нужен только для режима сертификатов "letsencrypt".
+-# ─────────────────────────────────────────────────────────────────────────────
+ FROM python:3.12-slim
+-
+ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+-
+-# Версия официального endpoint'а TrustTunnel (статический бинарь из releases).
+-ARG ENDPOINT_VERSION=1.0.33
+-
+ WORKDIR /app
+-
+-RUN apt-get update \
+-    && apt-get install -y --no-install-recommends ca-certificates curl certbot \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-# Скачиваем и распаковываем бинарь endpoint'а (в репозиторий не коммитим).
+-RUN mkdir -p /opt/trusttunnel \
+-    && curl -fsSL -o /tmp/tt.tar.gz \
+-        "https://github.com/TrustTunnel/TrustTunnel/releases/download/v${ENDPOINT_VERSION}/trusttunnel-v${ENDPOINT_VERSION}-linux-x86_64.tar.gz" \
+-    && tar -xzf /tmp/tt.tar.gz -C /tmp \
+-    && find /tmp -name trusttunnel_endpoint -exec cp {} /opt/trusttunnel/trusttunnel_endpoint \; \
+-    && chmod +x /opt/trusttunnel/trusttunnel_endpoint \
+-    && rm -rf /tmp/*
+-
+ COPY requirements.txt .
+ RUN pip install --no-cache-dir -r requirements.txt
+-
+ COPY app ./app
+-# Утилиты обслуживания (сброс пароля админа) — их запускают через docker exec,
+-# когда в панель уже не войти. Без них документированный способ не работает.
+ COPY scripts ./scripts
+-
+-ENV DATA_DIR=/data \
+-    ENDPOINT_BIN=/opt/trusttunnel/trusttunnel_endpoint \
+-    ENDPOINT_WORKDIR=/opt/trusttunnel \
+-    CERT_DIR=/etc/letsencrypt
+-
+-EXPOSE 8000 8443
+-VOLUME ["/data"]
+-
+-# --proxy-headers: контейнер стоит за обратным прокси, и без учёта
+-# X-Forwarded-Proto request.base_url отдаёт http-схему внутреннего порта —
+-# сгенерированные ссылки упирались бы в редирект.
+-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", \
+-     "--proxy-headers", "--forwarded-allow-ips", "*"]
++COPY trusttunnel_endpoint /opt/trusttunnel/trusttunnel_endpoint
++ENV DATA_DIR=/data ENDPOINT_BIN=/opt/trusttunnel/trusttunnel_endpoint ENDPOINT_WORKDIR=/data/runtime CERT_DIR=/certs
++USER 10001:10001
++CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+diff --git a/app/client_config.py b/app/client_config.py
+index 1b85565..fbbfb8d 100644
+--- a/app/client_config.py
++++ b/app/client_config.py
+@@ -1,3 +1,6 @@
++import json
++import os
++from pathlib import Path
+ """Сборка client.toml для официального trusttunnel_client.exe.
+ 
+ Формат — эталонный, сверен на живом setup_wizard v1.0.49 (не «по докам»).
+@@ -13,7 +16,7 @@
+ 
+ 
+ def _q(v: str) -> str:
+-    return '"' + (v or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
++    return json.dumps(v or "", ensure_ascii=False)
+ 
+ 
+ def _upstream_protocol(protocol: str) -> str:
+@@ -27,6 +30,7 @@ def build_client_toml(info: dict, killswitch: bool = False) -> str:
+     address = f"{info['address']}:{info['port']}"
+     custom_sni = (info.get("sni") or "").strip()
+     return _TEMPLATE.format(
++        certificate=_q(Path(os.environ["CLIENT_CA_FILE"]).read_text()) if os.environ.get("CLIENT_CA_FILE") else _q(""),
+         killswitch="true" if killswitch else "false",
+         hostname=_q(hostname),
+         addresses=_q(address),
+@@ -51,12 +55,12 @@ exclusions = []
+ hostname = {hostname}
+ addresses = [{addresses}]
+ custom_sni = {custom_sni}
+-has_ipv6 = true
++has_ipv6 = false
+ username = {username}
+ password = {password}
+ client_random = ""
+ skip_verification = false
+-certificate = ""
++certificate = {certificate}
+ upstream_protocol = {upstream}
+ anti_dpi = false
+ dns_upstreams = []
+diff --git a/app/deeplink.py b/app/deeplink.py
+index 47961c2..2be8c1d 100644
+--- a/app/deeplink.py
++++ b/app/deeplink.py
+@@ -1,7 +1,17 @@
+-"""tt:// deeplink — компактная строка подключения для QR (совместимо с исходной панелью)."""
+-import base64
++"""Export links using the official endpoint, including TLS trust settings."""
++import subprocess
++from . import config
+ 
+ 
+ def build_deeplink(username: str, password: str, host: str, port: int) -> str:
+-    raw = f"{username}:{password}@{host}:{port}"
+-    return "tt://" + base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
++    result = subprocess.run(
++        [config.ENDPOINT_BIN, "vpn.toml", "hosts.toml", "--client_config", username,
++         "--address", f"{host}:{port}", "--format", "deeplink", "--name", "Onixus TrustTunnel"],
++        cwd=config.ENDPOINT_WORKDIR, capture_output=True, text=True, timeout=10,
++    )
++    if result.returncode != 0:
++        raise RuntimeError("TrustTunnel profile export failed")
++    for line in result.stdout.splitlines():
++        if line.startswith("tt://"):
++            return line.strip()
++    raise RuntimeError("TrustTunnel profile export returned no link")
+diff --git a/app/endpoint.py b/app/endpoint.py
+index 123e6e9..b929990 100644
+--- a/app/endpoint.py
++++ b/app/endpoint.py
+@@ -23,7 +23,7 @@ _VPN_TOML_TEMPLATE = """# Generated by trusttunnel-web. Do not edit by hand.
+ listen_address = "0.0.0.0:{port}"
+ credentials_file = "credentials.toml"
+ rules_file = "rules.toml"
+-ipv6_available = true
++ipv6_available = false
+ allow_private_network_connections = false
+ tls_handshake_timeout_secs = 10
+ client_listener_timeout_secs = 600
+diff --git a/app/routes_client.py b/app/routes_client.py
+index 6ba15e2..3c88b5f 100644
+--- a/app/routes_client.py
++++ b/app/routes_client.py
+@@ -445,7 +445,10 @@ def download_config(request: Request, config_id: int, fmt: str = "txt"):
+     info = conninfo.connection_info(cfg, db.get_settings())
+     raw_name = cfg["label"] or cfg["tt_username"]
+     safe = "".join(ch for ch in raw_name if ch.isascii() and (ch.isalnum() or ch in "-_")) or cfg["tt_username"]
+-    if fmt == "json":
++    if fmt == "toml":
++        from .client_config import build_client_toml
++        body, media, ext = build_client_toml(info), "text/plain", "toml"
++    elif fmt == "json":
+         body, media, ext = conninfo.as_download_json(info), "application/json", "json"
+     else:
+         body, media, ext = conninfo.as_download_text(info, _brand()), "text/plain; charset=utf-8", "txt"
+diff --git a/app/templates/dashboard.html b/app/templates/dashboard.html
+index 33b68c5..7691a1c 100644
+--- a/app/templates/dashboard.html
++++ b/app/templates/dashboard.html
+@@ -105,7 +105,7 @@
+     <div class="cfg-head">
+       <b style="font-size:15px;">{{ c.label }}</b>
+       <div style="display:flex;gap:8px;">
+-        <a class="btn ghost sm" href="/config/{{ c.id }}/download?fmt=txt">{{ icon('download', 14) }} Скачать</a>
++        <a class="btn ghost sm" href="/config/{{ c.id }}/download?fmt=toml">{{ icon('download', 14) }} Скачать TOML</a>
+         <form method="post" action="/configs/{{ c.id }}/delete" onsubmit="return confirm('Отозвать конфиг? Подключение перестанет работать.');">
+           <button class="danger sm" type="submit">{{ icon('trash', 14) }} Отозвать</button>
+         </form>

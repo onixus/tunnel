@@ -1,0 +1,22 @@
+# Credentials and runtime state: never commit these.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.tar.gz
+*.zip
+access.json
+h-ui-access.json
+client.toml
+import-link.txt
+backups/
+data/
+certs/
+__pycache__/
+.DS_Store
