@@ -30,3 +30,5 @@ systemctl list-timers certbot.timer
 ## Восстановление
 
 Предыдущие сертификат, ключ, служебный клиент и drop-in сохранены в `/root/hysteria-before-letsencrypt/` (root-only). Возврат к ним потребует также вернуть старые клиентские профили. Не восстанавливайте самоподписанный сертификат поверх действующего без необходимости.
+
+Тест продления `certbot renew --dry-run --no-random-sleep-on-renew --cert-name onixus-rf.duckdns.org` завершился успешно. Deploy-hook проверен при первичной установке действующего сертификата.
