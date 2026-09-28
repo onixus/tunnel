@@ -63,3 +63,5 @@ journalctl -u maddy --since '10 minutes ago'
 Установленный образ: `trusttunnel-web:config-mail-20260928`. Дополнительный [патч](../patches/trusttunnel-config-email.patch) применяется после базового патча TrustTunnel из этого репозитория. Он также включает проверку TLS-сертификата SMTP. Предыдущая конфигурация и исходники сохранены на VPN-сервере в `/root/trusttunnel-before-config-mail/`.
 
 Проверены шесть изолированных тестов, действующая страница и отказ при неверном токене формы. Тестовое вложение без VPN-секретов отправлено на `onixus@live.ru`; реальные пользовательские профили автоматически при обновлении не рассылались.
+
+При проверке обновления обнаружено несовпадение настроек TLS: `panel_domain=onixus-rf.duckdns.org`, `connection_hidden=0`, `cert_mode=letsencrypt`, но сертификат был только для `trusttunnel.internal`. Восстановлен выбор существующего сертификата (`connection_hidden=1`, `cert_mode=external`), домен панели сохранён. VPN endpoint снова запущен; TLS-handshake с проверкой сертификата успешен. Предыдущие значения — `/opt/trusttunnel-web/data/tls-settings-before-config-mail-fix.json`.
