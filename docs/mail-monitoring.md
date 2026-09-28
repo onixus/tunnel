@@ -51,3 +51,5 @@ journalctl -u maddy --since '10 minutes ago'
 ```
 
 Отключить уведомления: `systemctl disable --now vpn-report-check.timer vpn-report-daily.timer` на VPN-сервере и `systemctl disable --now vpn-report-check.timer` на onixus.ru. Это не отключает почту панели.
+
+Шаблоны systemd: [check.service](../examples/systemd/vpn-report-check.service), [check.timer](../examples/systemd/vpn-report-check.timer), [daily.service](../examples/systemd/vpn-report-daily.service), [daily.timer](../examples/systemd/vpn-report-daily.timer). Перед установкой создайте `/var/lib/vpn-report` с правами `0700`. Нужен Python 3, на VPN-узле также PyYAML. JSON-конфигурация содержит `host`, `port`, `user`, `password`, `from`, `to`, `role` (`vpn` или `observer`); значения секретов задаются локально.
