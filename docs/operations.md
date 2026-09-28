@@ -63,3 +63,7 @@ H UI запускает копию `/var/lib/h-ui/bin/hysteria-linux-amd64`: з�
 **Клиент `.120`:** `/usr/local/sbin/hysteria-routing-rollback` возвращает прежний прокси. Для сохранения системного туннеля восстановите проверенный backup `/etc/sing-box/config.json`, выполните `sing-box check`, затем restart. При восстановлении старого backup добавленные позднее маршруты панелей могут пропасть.
 
 Не делайте `docker compose down -v`, очистку firewall или удаление ключей частью обычного отката.
+
+## Переключение на резерв
+
+См. [runbook резервного выхода](reserve-exit.md). Добавьте в backup `/etc/hysteria/exits.json`, оба новых WG-конфига, скрипт переключения и состояние firewalld резервного узла.

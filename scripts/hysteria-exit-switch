@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Select the Hysteria catch-all exit. Root only; local/CIS rules are untouched."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import yaml
+
+DB = '/var/lib/h-ui/data/h_ui.db'
+PROFILES = Path('/etc/hysteria/exits.json')
+BACKUPS = Path('/root/hysteria-route-backups')
+
+
+def command(args, **kwargs):
+    return subprocess.run(args, check=True, timeout=40, **kwargs)
+
+
+def get_config():
+    with sqlite3.connect(DB) as db:
+        return db.execute('SELECT value FROM config WHERE key=?', ('HYSTERIA2_CONFIG',)).fetchone()[0]
+
+
+def write_config(value):
+    with sqlite3.connect(DB) as db:
+        db.execute('UPDATE config SET value=? WHERE key=?', (value, 'HYSTERIA2_CONFIG'))
+
+
+def curl_ip(proxy, username=None, password=None):
+    config = 'proxy = ' + json.dumps('socks5h://' + proxy) + '\n'
+    if username is not None:
+        config += 'proxy-user = ' + json.dumps(username + ':' + password) + '\n'
+    # Credentials go through stdin, never process arguments or terminal output.
+    result = command(['curl', '--config', '-', '--noproxy', '', '--silent', '--show-error',
+                      '--fail', '--connect-timeout', '6', '--max-time', '12',
+                      'https://api.ipify.org'], input=config, text=True, capture_output=True)
+    return result.stdout.strip()
+
+
+def check_exit(profile):
+    socks = profile['outbound']['socks5']
+    got = curl_ip(socks['addr'], socks['username'], socks['password'])
+    if got != profile['expected_ip']:
+        raise RuntimeError('Exit IP mismatch: expected ' + profile['expected_ip'] + ', got ' + got)
+    return got
+
+
+def probe_hysteria(expected):
+    # Existing native profile has the same credentials as the existing-clients account.
+    # Refresh /etc/hysteria/client.json if that account is ever rotated.
+    config = json.loads(Path('/etc/hysteria/client.json').read_text())
+    for key in ['http', 'tun', 'tcpForwarding', 'udpForwarding']:
+        config.pop(key, None)
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]
+    config['socks5'] = {'listen': '127.0.0.1:' + str(port)}
+    with tempfile.TemporaryDirectory(prefix='hysteria-exit-probe-') as tmp:
+        path = Path(tmp) / 'client.json'
+        path.write_text(json.dumps(config)); path.chmod(0o600)
+        with (Path(tmp) / 'client.log').open('w') as log:
+            proc = subprocess.Popen(['/usr/local/bin/hysteria', 'client', '-c', str(path)],
+                                    stdout=log, stderr=log)
+            try:
+                last = 'probe not ready'
+                for attempt in range(3):
+                    time.sleep(1)
+                    if proc.poll() is not None:
+                        raise RuntimeError('Native probe client exited; check profile/certificate')
+                    try:
+                        got = curl_ip('127.0.0.1:' + str(port))
+                        if got == expected:
+                            return got
+                        last = 'unexpected egress IP ' + got
+                    except (subprocess.SubprocessError, OSError):
+                        last = 'probe request failed'
+                raise RuntimeError(last)
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill(); proc.wait()
+
+
+def restore(path):
+    value = Path(path).read_text()
+    yaml.safe_load(value)
+    command(['systemctl', 'stop', 'h-ui'])
+    try:
+        write_config(value)
+    finally:
+        command(['systemctl', 'start', 'h-ui'])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['status', 'check', 'primary', 'reserve', '_restore'])
+    parser.add_argument('restore_path', nargs='?')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit('Run as root')
+    os.umask(0o077)
+    if args.action == '_restore':
+        if not args.restore_path or Path(args.restore_path).parent != BACKUPS:
+            raise SystemExit('Invalid rollback path')
+        restore(args.restore_path)
+        print('Previous Hysteria route restored by watchdog')
+        return
+    profiles = json.loads(PROFILES.read_text())
+    with open('/run/hysteria-exit-switch.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        current = yaml.safe_load(get_config())
+        if args.action == 'status':
+            final = current['acl']['inline'][-1]
+            active = next((name for name, p in profiles.items()
+                           if final == p['outbound']['name'] + '(all)'), 'custom')
+            print('Selected:', active, '| catch-all:', final)
+            for name, profile in profiles.items():
+                print(name + ':', profile['outbound']['socks5']['addr'], '->', profile['expected_ip'])
+            return
+        if args.action == 'check':
+            failed = False
+            for name, profile in profiles.items():
+                try:
+                    print(name + ': OK, egress ' + check_exit(profile))
+                except Exception as exc:
+                    print(name + ': FAILED (' + type(exc).__name__ + ')')
+                    failed = True
+            if failed:
+                raise SystemExit(1)
+            return
+        profile = profiles[args.action]
+        print('Preflight:', args.action, check_exit(profile), flush=True)
+        target = profile['outbound']['name'] + '(all)'
+        known = {p['outbound']['name'] + '(all)' for p in profiles.values()}
+        if current['acl']['inline'][-1] not in known:
+            raise RuntimeError('Unknown catch-all rule; refusing to replace custom configuration')
+        if current['acl']['inline'][-1] == target:
+            print('Already selected; Hysteria egress:', probe_hysteria(profile['expected_ip']))
+            return
+        BACKUPS.mkdir(mode=0o700, exist_ok=True)
+        backup = BACKUPS / (time.strftime('%Y%m%d-%H%M%S') + '-' + str(os.getpid()) + '.yaml')
+        watchdog = 'hysteria-route-rollback-' + str(os.getpid())
+        old = get_config()
+        backup.write_text(old); backup.chmod(0o600)
+        armed = False
+        try:
+            command(['systemd-run', '--quiet', '--unit=' + watchdog, '--on-active=180s',
+                     '/usr/local/sbin/hysteria-exit-switch', '_restore', str(backup)])
+            armed = True
+            # Stop before the final read so the panel cannot overwrite the selection.
+            command(['systemctl', 'stop', 'h-ui'])
+            old = get_config()
+            backup.write_text(old)
+            new = yaml.safe_load(old)
+            if new['acl']['inline'][-1] not in known:
+                raise RuntimeError('Catch-all changed during switch; aborting')
+            new['acl']['inline'][-1] = target
+            names = {p['outbound']['name'] for p in profiles.values()}
+            # Preserve unrelated outbounds and every exception rule.
+            new['outbounds'] = [o for o in new['outbounds'] if o['name'] not in names]
+            new['outbounds'] += [p['outbound'] for p in profiles.values()]
+            write_config(yaml.safe_dump(new, sort_keys=False))
+            command(['systemctl', 'start', 'h-ui'])
+            ip = probe_hysteria(profile['expected_ip'])
+        except BaseException:
+            restore(backup)
+            if armed:
+                command(['systemctl', 'stop', watchdog + '.timer'])
+            raise
+        command(['systemctl', 'stop', watchdog + '.timer'])
+        print('Selected:', args.action, '| Hysteria egress:', ip)
+        print('Backup:', backup)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print('FAILED:', type(exc).__name__ + ':', str(exc), file=sys.stderr)
+        sys.exit(1)
