@@ -2,12 +2,51 @@
 
 | Панель | Через SSH на рабочем компьютере | Через Hysteria | Администратор |
 |---|---|---|---|
-| H UI | http://127.0.0.1:18081 | http://10.254.77.1:8081 | `sysadmin` |
-| TrustTunnel | http://127.0.0.1:18082/admin | http://10.254.77.1:18082/admin | `admin@onixus.ru` |
+| H UI | [H UI](http://127.0.0.1:18081/#/login) | [H UI через VPN](http://10.254.77.1:8081/#/login) | `sysadmin` |
+| TrustTunnel | [TrustTunnel](http://127.0.0.1:18082/admin/login) | [TrustTunnel через VPN](http://10.254.77.1:18082/admin/login) | `admin@onixus.ru` |
 
 Команда для обоих SSH-туннелей приведена в [README](../README.md). HTTP защищён SSH или Hysteria на участке от клиента до сервера. Не открывайте порты панелей в интернет без отдельного HTTPS-прокси и проверки модели доступа.
 
 На сервере H UI администраторские данные сохранены в `/root/h-ui-admin.json`; TrustTunnel — `/opt/trusttunnel-web/access.json`. Доступ к этим файлам — только root. При новой установке bootstrap-файлы могут иметь другое имя, см. инструкции. Старые сохранённые пароли могут стать неактуальны после ротации.
+
+## Где хранятся пароли
+
+Основные файлы находятся на сервере `139.100.233.173`:
+
+| Назначение | Файл на сервере |
+|---|---|
+| Вход администратора H UI (`sysadmin`) | `/root/h-ui-admin.json` |
+| Администратор и пользователь TrustTunnel | `/opt/trusttunnel-web/access.json` |
+| Отдельная учётная запись Android (`hiddifyandroid`) | `/root/hiddify-android-account.json` |
+
+Локальные копии на рабочем Mac:
+
+- H UI: `/Users/onixus/Documents/Codex/2026-09-28/gj/outputs/h-ui-access.json`.
+- TrustTunnel: `/Users/onixus/Documents/Codex/2026-09-28/gj/outputs/trusttunnel/access.json`.
+
+Читайте файлы на доверенном терминале после входа `ssh root@139.100.233.173`. Пароль входа в панель и пароль VPN-подключения — разные данные. После смены пароля сохранённые копии нужно обновить; сами секреты в Git не добавляются.
+
+## Восстановление SSH-доступа к панелям
+
+На рабочем компьютере выполните:
+
+```sh
+ssh -fNT -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:18081:127.0.0.1:8081 \
+  -L 127.0.0.1:18082:127.0.0.1:18082 root@139.100.233.173
+```
+
+Процесс остаётся в фоне. После перезагрузки компьютера или обрыва SSH повторите команду. Это не автоматическое переподключение. Адреса `127.0.0.1` работают только на компьютере с запущенным туннелем.
+
+Проверка:
+
+```sh
+curl --noproxy '*' --max-time 10 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/
+curl --noproxy '*' --max-time 10 -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18082/admin/login
+```
+
+Ожидается HTTP 200. При ошибке занятого порта проверьте `lsof -nP -iTCP:18081 -iTCP:18082 -sTCP:LISTEN`: если существующий туннель отвечает, повторный процесс не нужен.
 
 ## H UI
 

@@ -1,0 +1,8 @@
+[Unit]
+Description=VPN report at 09:00 Moscow time
+[Timer]
+OnCalendar=*-*-* 09:00:00 Europe/Moscow
+Persistent=true
+AccuracySec=1min
+[Install]
+WantedBy=timers.target

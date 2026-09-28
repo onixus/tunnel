@@ -1,0 +1,12 @@
+[Unit]
+Description=VPN health email check
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpn-report check
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vpn-report

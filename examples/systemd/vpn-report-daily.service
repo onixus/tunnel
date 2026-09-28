@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily VPN resource and ban report
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vpn-report daily
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vpn-report
+Restart=on-failure
+RestartSec=300
