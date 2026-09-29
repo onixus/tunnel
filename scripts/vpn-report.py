@@ -11,11 +11,15 @@ def cmd(args):
   r=subprocess.run(args,capture_output=True,text=True,timeout=12)
   return r.returncode,(r.stdout+r.stderr).strip()
  except Exception as e:return 1,type(e).__name__
+class DNSRelaySMTP(smtplib.SMTP_SSL):
+ def _get_socket(self,host,port,timeout):
+  raw=socket.create_connection((CFG.get("connect_host") or host,port),timeout)
+  return self.context.wrap_socket(raw,server_hostname=host)
 def send(subject,body):
  from email.message import EmailMessage
  m=EmailMessage();m['From']=CFG['from'];m['To']=CFG['to'];m['Subject']=subject
  m['Date']=email.utils.formatdate(localtime=False);m['Message-ID']=email.utils.make_msgid(domain='onixus.ru');m.set_content(body)
- with smtplib.SMTP_SSL(CFG['host'],CFG['port'],timeout=20,context=ssl.create_default_context()) as s:
+ with DNSRelaySMTP(CFG['host'],CFG['port'],timeout=20,context=ssl.create_default_context()) as s:
   s.login(CFG['user'],CFG['password']);s.send_message(m)
  print('SMTP accepted',m['Message-ID'])
 def save(p,d):
@@ -46,7 +50,7 @@ def collect():
   except Exception as e:issues.append('Hysteria stats unavailable');lines.append('Hysteria check: '+type(e).__name__)
  else:
   try:
-   with socket.create_connection(('139.100.233.173',22),timeout=5) as s:
+   with socket.create_connection(('onixus-rf.duckdns.org',22),timeout=5) as s:
     if not s.recv(100).startswith(b'SSH-'):raise RuntimeError('SSH banner absent')
    lines.append('External check of VPN server: SSH reachable')
   except Exception:issues.append('VPN server unreachable from onixus.ru')

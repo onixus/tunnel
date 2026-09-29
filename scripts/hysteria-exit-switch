@@ -114,6 +114,9 @@ def main():
         print('Previous Hysteria route restored by watchdog')
         return
     profiles = json.loads(PROFILES.read_text())
+    for profile in profiles.values():
+        if profile.get('expected_host'):
+            profile['expected_ip'] = socket.gethostbyname(profile['expected_host'])
     with open('/run/hysteria-exit-switch.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         current = yaml.safe_load(get_config())
