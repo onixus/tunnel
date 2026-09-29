@@ -166,6 +166,7 @@ def main():
             if new['acl']['inline'][-1] not in known:
                 raise RuntimeError('Catch-all changed during switch; aborting')
             new['acl']['inline'][-1] = target
+            new['acl']['inline'] = [profile['outbound']['name'] + '(suffix:hostkey.ru)' if r.endswith('(suffix:hostkey.ru)') else r for r in new['acl']['inline']]
             names = {p['outbound']['name'] for p in profiles.values()}
             # Preserve unrelated outbounds and every exception rule.
             new['outbounds'] = [o for o in new['outbounds'] if o['name'] not in names]

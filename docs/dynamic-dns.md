@@ -35,3 +35,7 @@ Local Mac SSH configuration resolves the ingress hostname and uses the previousl
 ## Validation
 
 Mocked address-change tests cover all three firewall backends, preserve the peer identity, and reject private or failed DNS responses without applying changes. Live checks cover both exit nodes, Hysteria traffic from `.116`, SMTP from both monitors and the TrustTunnel panel. TrustTunnel HTTP/2 native client checks returned HTTP 200 for both panels by hostname. QUIC initially failed while the client used a FakeIP for the endpoint; after adding direct DNS/routing rules, QUIC returned the correct public egress and HTTP 200 for the admin panel. Both transports used strict TLS. No real public-address change was performed during deployment.
+
+## Forced tunnel domain exception
+
+`hostkey.ru` and its subdomains use Hysteria on client `.116` before the `.ru` direct rule. Server ACL routes `suffix:hostkey.ru` through the selected exit before RU/CIS bypass rules. `hysteria-exit-switch` moves this explicit exception with the catch-all when selecting primary/reserve. DNS queries outside FakeIP use the proxy resolver for this suffix. A live request through the client SOCKS listener returned HTTP 200. Other clients with their own `.ru` bypass need the same higher-priority client exception.
