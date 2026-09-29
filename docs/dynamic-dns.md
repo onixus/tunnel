@@ -16,7 +16,7 @@ All three run `wg-dns-refresh.timer` every minute. `/etc/wg-dns-refresh.json` co
 
 The ingress `/usr/local/sbin/vpn-local-address` adjusts panel firewall destinations and `trusttunnel-panel.socket` when its own address changes. State is `/var/lib/vpn-local-address.json`. It requires the detected address to be assigned locally; a transition to NAT or a floating address not assigned to the host needs manual review. The Docker bridge name and subnet remain deployment-specific.
 
-`/etc/hysteria/exits.json` uses `expected_host` for exit checks. The internal SOCKS addresses stay on WireGuard. Linux client `192.168.68.116` resolves the Hysteria endpoint through its direct DNS resolver. TrustTunnel exports use the ingress hostname and strict public CA validation. Existing imported profiles containing numeric addresses must be reimported.
+`/etc/hysteria/exits.json` uses `expected_host` for exit checks. The internal SOCKS addresses stay on WireGuard. Linux client `192.168.68.116` resolves the three node hostnames through its direct DNS resolver, before the FakeIP rule. Those domains use direct routing on ports 22, 443, 8443, 51830 and 51831 to prevent nested VPN connections. Hysteria also has an explicit direct outbound domain resolver. TrustTunnel exports use the ingress hostname and strict public CA validation. Existing imported profiles containing numeric addresses must be reimported.
 
 ## Mail
 
@@ -34,4 +34,4 @@ Local Mac SSH configuration resolves the ingress hostname and uses the previousl
 
 ## Validation
 
-Mocked address-change tests cover all three firewall backends, preserve the peer identity, and reject private or failed DNS responses without applying changes. Live checks cover both exit nodes, Hysteria traffic from `.116`, SMTP from both monitors and the TrustTunnel panel. TrustTunnel HTTP/2 native client checks returned HTTP 200 for both panels by hostname; its public internet egress was the ingress server. No real public-address change was performed during deployment.
+Mocked address-change tests cover all three firewall backends, preserve the peer identity, and reject private or failed DNS responses without applying changes. Live checks cover both exit nodes, Hysteria traffic from `.116`, SMTP from both monitors and the TrustTunnel panel. TrustTunnel HTTP/2 native client checks returned HTTP 200 for both panels by hostname. QUIC initially failed while the client used a FakeIP for the endpoint; after adding direct DNS/routing rules, QUIC returned the correct public egress and HTTP 200 for the admin panel. Both transports used strict TLS. No real public-address change was performed during deployment.
