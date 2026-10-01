@@ -138,7 +138,8 @@ def apply_routes(data):
         prefix=['local(10.254.77.1, tcp/18082, 127.0.0.1)','local(10.254.77.1, tcp/8081, 127.0.0.1)','reject(geoip:private)']
         if original[:3]!=prefix: raise Rejected('Защищённые правила изменились; требуется проверка оператора')
         names={k:p['outbound']['name'] for k,p in profiles.items()}
-        c['acl']['inline']=prefix+[f'{names.get(t,t)}({v})' for t,v in rules]+[names[target]+'(all)']
+        protected=[r for r in original[3:] if r in ('local(all, udp/53, 127.0.0.1)','local(all, tcp/53, 127.0.0.1)')]
+        c['acl']['inline']=prefix+protected+[f'{names.get(t,t)}({v})' for t,v in rules]+[names[target]+'(all)']
         BACKUPS.mkdir(mode=0o700,exist_ok=True)
         backup=BACKUPS/(time.strftime('%Y%m%d-%H%M%S')+'-console-'+secrets.token_hex(4)+'.yaml')
         backup.write_text(old); backup.chmod(0o600)
@@ -280,15 +281,27 @@ def telegram(data):
     if not result.get('ok'): raise Rejected('Telegram отклонил сообщение')
     return {'message_id':result['result']['message_id']}
 
+def adblock_snapshot():
+    state=json.loads(Path('/opt/vpn-adblock/status.json').read_text())
+    state['running']=run(['docker','inspect','vpn-adblock','--format','{{.State.Running}}'])=='true' and run(['dig','@127.0.0.1','ads.example.invalid','+short','+time=1','+tries=1'],3)=='0.0.0.0'
+    state['dns_interception']=run(['systemctl','is-active','vpn-adblock-dns'])=='active'
+    state['next_update']=run(['systemctl','show','vpn-adblock-update.timer','--property=NextElapseUSecRealtime','--value'])
+    return state
+
 def dispatch(op,data):
     if op=='snapshot':
         result={}
         for key,fn in [('routing',route_snapshot),('updates',updates),('hysteria_users',lambda:read_db("SELECT id,username,quota,download,upload,expire_time,device_no,deleted,remark FROM account WHERE role='user' ORDER BY id")),
+                       ('adblock',adblock_snapshot),
                        ('telegram',lambda:{'configured':TG.is_file(),'owner':json.loads(TG.read_text())['owner'],'running':run(['systemctl','is-active','vpn-telegram'])=='active'}),
                        ('services',lambda:{'hysteria':run(['systemctl','is-active','h-ui']),'trusttunnel':run(['docker','inspect','trusttunnel-web','--format','{{.State.Status}}']),'hysteria_version':run(['/var/lib/h-ui/bin/hysteria-linux-amd64','version'])[:200]})]:
             try: result[key]=fn()
             except Exception: result[key]={'error':'Источник временно недоступен'}
         return result
+    if op=='adblock.refresh':
+        if data: raise Rejected('Некорректные параметры')
+        run(['systemctl','start','--no-block','vpn-adblock-update.service'])
+        return {'message':'Обновление локальных списков запущено. Результат — в разделе фильтрации.'}
     if op=='routes.check':
         return {'message':run(['/usr/local/sbin/hysteria-exit-switch','check'],60)}
     if op=='routes.apply': return apply_routes(data)

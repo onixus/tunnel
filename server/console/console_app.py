@@ -108,7 +108,7 @@ def source_user(source,id):
     raise HTTPException(422,'Неизвестный источник')
 
 def perform(action,data,admin):
-    if action.startswith(('routes.','updates.','hysteria.')): return agent(action,data)
+    if action.startswith(('routes.','updates.','hysteria.','adblock.')): return agent(action,data)
     if action=='trusttunnel.create':
         # Password is generated at execution, never stored in the job or audit.
         return legacy(admin,'users/create',{'email':data['email'],'password':secrets.token_urlsafe(24)})
@@ -208,7 +208,7 @@ def state(request:Request):
     snapshot['observed_at']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     return snapshot
 
-ACTIONS={'routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
+ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
          'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send'}
 
 def validate_action(action,data):
@@ -232,7 +232,9 @@ def validate_action(action,data):
         with connect() as c: row=c.execute('SELECT state FROM campaigns WHERE id=?',(data.get('id'),)).fetchone()
         if not row or row['state']!='draft': raise HTTPException(409,'Рассылка уже отправлялась или не существует')
         return {'id':data['id']}
-    if action=='routes.check': return {}
+    if action in ('routes.check','adblock.refresh'):
+        if data: raise HTTPException(422,'Некорректные параметры')
+        return {}
     # Agent repeats validation at the privilege boundary.
     allowed={'routes.apply':{'exit','rules','revision'},'updates.promote':{'sequence'},'updates.server':{'package'}}[action]
     if set(data)!=allowed: raise HTTPException(422,'Некорректные параметры')

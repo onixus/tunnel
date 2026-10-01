@@ -150,3 +150,7 @@ script without its explicit isolation flag. Neither test suite sends real messag
 Tests use isolated SQLite and synthetic identities. The original profile exchange
 codec tests use the real built `rtrust-codec`. See [deployment acceptance](../../docs/unified-console.md) for the
 live acceptance record and unexercised operations.
+
+## Local advertising and tracking filters
+
+The routing view reports the private resolver health, source counts, last update/error, DNS interception service and next timer run. `adblock.refresh` schedules the fixed systemd updater; source URLs and domains are not accepted from a job payload. Routing changes retain the two protected DNS rules. See [local filtering operations](../../docs/local-adblock.md).

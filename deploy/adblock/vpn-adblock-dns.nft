@@ -1,0 +1,18 @@
+# Hysteria's UDP transport retains the packet target after ACL connection setup.
+# Limit DNS destination NAT to the existing unprivileged Hysteria service UID.
+table ip vpn_adblock_dns {
+    chain prerouting {
+        type nat hook prerouting priority -110; policy accept;
+        ip saddr 172.18.0.0/16 ip saddr != 172.18.0.53 ip daddr != 172.18.0.53 udp dport 53 counter dnat to 172.18.0.53:53
+        ip saddr 172.18.0.0/16 ip saddr != 172.18.0.53 ip daddr != 172.18.0.53 tcp dport 53 counter dnat to 172.18.0.53:53
+    }
+    chain postrouting {
+        type nat hook postrouting priority 90; policy accept;
+        ct status dnat ip saddr 172.18.0.0/16 ip saddr != 172.18.0.53 ip daddr 172.18.0.53 udp dport 53 counter snat to 172.18.0.1
+        ct status dnat ip saddr 172.18.0.0/16 ip saddr != 172.18.0.53 ip daddr 172.18.0.53 tcp dport 53 counter snat to 172.18.0.1
+    }
+    chain output {
+        type nat hook output priority -110; policy accept;
+        meta skuid "hysteria" ip daddr != 127.0.0.1 udp dport 53 counter dnat to 127.0.0.1:53
+    }
+}

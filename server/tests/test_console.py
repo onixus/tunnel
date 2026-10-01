@@ -139,12 +139,15 @@ class AgentTests(unittest.TestCase):
     def test_route_probe_failure_restores_and_disarms_watchdog(self):
         from unittest.mock import MagicMock, mock_open
         prefix=['local(10.254.77.1, tcp/18082, 127.0.0.1)','local(10.254.77.1, tcp/8081, 127.0.0.1)','reject(geoip:private)']
-        old=json.dumps({'acl':{'inline':prefix+['reserve(all)']}})
+        protected=['local(all, udp/53, 127.0.0.1)','local(all, tcp/53, 127.0.0.1)']
+        old=json.dumps({'acl':{'inline':prefix+protected+['reserve(all)']}})
         m=MagicMock();m.get_config.return_value=old;m.probe_hysteria.side_effect=RuntimeError('probe failed')
         temp=Path(TMP.name)/secrets.token_hex(8);temp.mkdir();exits=temp/'exits.json'
         exits.write_text(json.dumps({'primary':{'outbound':{'name':'primary'},'expected_ip':'192.0.2.1'}}))
         with patch('builtins.open',mock_open()),patch.object(agent.fcntl,'flock'),patch.object(agent,'route_snapshot',return_value={'revision':'known'}),patch.object(agent,'module_switch',return_value=m),patch.object(agent,'EXITS',exits),patch.object(agent,'BACKUPS',temp/'backups'),patch.object(agent,'run') as run:
             with self.assertRaises(RuntimeError):agent.apply_routes({'exit':'primary','rules':[],'revision':'known'})
+            changed=agent.yaml.safe_load(m.write_config.call_args.args[0])
+            self.assertEqual(changed['acl']['inline'][:5],prefix+protected)
             m.restore.assert_called_once()
             self.assertEqual(m.restore.call_args.args[0].read_text(),old)
             self.assertTrue(any(c.args[0][0]=='systemd-run' for c in run.call_args_list))
