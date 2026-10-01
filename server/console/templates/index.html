@@ -8,7 +8,9 @@
     <link rel="stylesheet" href="/console/static/console.css" />
     <link rel="stylesheet" href="/console/static/config-export.css" />
     <script src="/console/static/config-export.js" defer></script>
+    <link rel="stylesheet" href="/console/static/routing.css" />
     <script src="/console/static/console.js" defer></script>
+    <script src="/console/static/routing-ui.js" defer></script>
   </head>
   <body>
     <aside>
@@ -57,7 +59,7 @@
         <span>Управление через существующие сервисы</span>
       </footer>
     </div>
-    <dialog id="modal">
+    <dialog id="modal" aria-labelledby="modal-title">
       <form method="dialog" class="dialog-top">
         <b id="modal-title"></b><button aria-label="Закрыть">×</button>
       </form>
