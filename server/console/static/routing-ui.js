@@ -82,8 +82,10 @@
     button.disabled = true;
     try {
       const plan = await api("routing/preview", data);
+      if (!form.isConnected || !document.querySelector("#modal").open) return;
       confirmation(data, plan);
     } catch (e) {
+      if (!form.isConnected || !document.querySelector("#modal").open) return;
       form.querySelector(".route-error").textContent = e.message;
       button.disabled = false;
     }

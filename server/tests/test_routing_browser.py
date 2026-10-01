@@ -62,7 +62,7 @@ def site():
             # Optional compatibility assets for isolated extension development. CI uses repository files.
             if not source.exists() and os.environ.get('TUNNEL_LEGACY_ASSETS'):
                 source = Path(os.environ['TUNNEL_LEGACY_ASSETS']) / name
-            if source.is_file() and name in ('console.js', 'console.css', 'routing-ui.js', 'routing.css'):
+            if source.is_file() and name in ('console.js', 'console.css', 'routing-ui.js', 'routing.css', 'config-export.js', 'config-export.css'):
                 return self.send(source.read_bytes(), kind='text/javascript' if name.endswith('.js') else 'text/css')
             self.send({'detail': 'not found'}, 404)
         def do_POST(self):
@@ -219,3 +219,29 @@ def test_escape_hosts_and_responsive_screenshots(browser_page, site):
     expect(page.locator('[data-exit-node=reserve]')).to_contain_text('<img')
     assert page.locator('.network-board img').count() == 0
     assert page.evaluate('window.bad || 0') == 0
+
+
+@pytest.mark.parametrize('replacement', [False, True])
+def test_cancelled_preview_cannot_reopen_or_replace_dialog(browser_page, site, replacement):
+    page = browser_page
+    visit(page, site)
+    pending = []
+    page.route('**/console/api/routing/preview', lambda route: pending.append(route))
+    page.locator('[data-exit-node="reserve"]').click()
+    page.locator('#map-route-form [type=submit]').click()
+    expect(page.locator('#map-route-form [type=submit]')).to_be_disabled()
+    page.keyboard.press('Escape')
+    if replacement:
+        page.locator('[data-service-node="trusttunnel"]').click()
+        expect(page.locator('#service-route-form')).to_be_visible()
+    assert len(pending) == 1
+    plan = make_plan(pending[0].request.post_data_json, internal(site['state']))
+    pending[0].fulfill(json=plan)
+    # Flush the delivered fetch response and rendering before checking absence.
+    page.wait_for_timeout(200)
+    expect(page.locator('#confirm-service-routes')).to_have_count(0)
+    if replacement:
+        expect(page.locator('#service-route-form')).to_be_visible()
+    else:
+        expect(page.locator('#modal')).not_to_be_visible()
+    assert not queued(site)
