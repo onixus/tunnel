@@ -52,7 +52,23 @@ def probe(endpoint, protocol):
         path = Path(tmp) / 'client.toml'
         path.write_text(text)
         path.chmod(0o600)
-        proc = subprocess.Popen([str(CLIENT), '--config', str(path)], stdin=subprocess.DEVNULL,
+        # Linux binds native endpoint sockets to its default interface. A bridge
+        # namespace can reach this host's public endpoint without the eth0/lo conflict.
+        image = subprocess.check_output(
+            ['docker', 'inspect', '--format', '{{.Image}}', 'trusttunnel-web'], text=True).strip()
+        name = 'tt-routing-probe-' + secrets.token_hex(8)
+        command = ['docker', 'run', '--rm', '--name', name, '--network', 'bridge',
+                   '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                   '--user', '0:0', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
+                   '-p', address + ':' + address.rsplit(':', 1)[1],
+                   '--mount', f'type=bind,src={CLIENT},dst=/probe-client,readonly',
+                   '--mount', f'type=bind,src={path},dst=/probe.toml,readonly',
+                   '--entrypoint', '/probe-client', image, '--config', '/probe.toml']
+        # The listener is private to the bridge namespace and requires a random secret.
+        text = text.replace('address = ' + json.dumps(address),
+                            'address = ' + json.dumps('0.0.0.0:' + address.rsplit(':', 1)[1]))
+        path.write_text(text)
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             for _ in range(3):
@@ -67,6 +83,8 @@ def probe(endpoint, protocol):
                     return str(ipaddress.IPv4Address(result.stdout.strip()))
             raise RuntimeError('Native egress check failed')
         finally:
+            subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15)
             proc.terminate()
             try:
                 proc.wait(timeout=3)
