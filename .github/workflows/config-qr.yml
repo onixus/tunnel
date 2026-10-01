@@ -1,0 +1,34 @@
+name: Config QR export
+on:
+  pull_request:
+  push:
+    branches: [main, codex/fix-config-qr-export]
+permissions:
+  contents: read
+jobs:
+  isolated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: python -m pip install 'qrcode==8.2' pytest fastapi httpx Jinja2 cairosvg opencv-python-headless playwright
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Syntax checks
+        run: |
+          python -m compileall -q server/console
+          node --check server/console/static/console.js
+          node --check server/console/static/config-export.js
+      - name: QR decoding, export API and browser regression tests
+        run: python -m pytest -q server/tests/test_config_qr.py server/tests/test_config_qr_browser.py
+      - name: Upload screenshots with fictional credentials only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-qr-ui
+          path: test-results/config-qr
+          if-no-files-found: ignore
