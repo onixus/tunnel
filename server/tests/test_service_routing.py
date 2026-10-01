@@ -384,3 +384,63 @@ def test_pending_blocks_legacy_rule_edit(tmp_path, monkeypatch):
     monkeypatch.setattr(sr, 'PENDING', pending)
     with pytest.raises(PolicyError, match='восстановление'):
         routing_agent.dispatch('routes.apply', {})
+
+
+def test_installer_patch_produces_importable_endpoint(tmp_path):
+    spec = importlib.util.spec_from_file_location('installer', ROOT / 'deploy/install-trusttunnel-routing.py')
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    binary = tmp_path / 'binary'
+    binary.write_bytes(b'fixture')
+    installer.build_context(tmp_path, binary)
+    endpoint = tmp_path / 'endpoint.py'
+    endpoint.write_text('_VPN_TOML_TEMPLATE = "[forward_protocol.direct]"\nvalue = _VPN_TOML_TEMPLATE.format(port=port)\n')
+    patch = (tmp_path / 'patch.py').read_text().replace('/app/app/endpoint.py', str(endpoint))
+    exec(compile(patch, 'patch.py', 'exec'), {})
+    compile(endpoint.read_text(), str(endpoint), 'exec')
+    assert 'trusttunnel_routing.forward_template' in endpoint.read_text()
+
+
+@pytest.mark.parametrize('success', [True, False])
+@pytest.mark.parametrize('early_exit', [True, False])
+def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, tmp_path, success, early_exit):
+    import tomllib
+    probe = load_probe()
+    monkeypatch.setattr(probe, 'RUNTIME', tmp_path / 'runtime')
+    process = Mock()
+    process.poll.side_effect = ([1] if early_exit else []) + [None] * 40
+    calls = []
+    monkeypatch.setattr(probe.time, 'sleep', lambda _: None)
+    ticks = iter(range(0, 1000, 2))
+    monkeypatch.setattr(probe.time, 'monotonic', lambda: next(ticks))
+    monkeypatch.setattr(probe.subprocess, 'check_output', lambda *a, **k: 'sha256:fixture\n')
+    def launch(command, **kwargs):
+        calls.append(command)
+        mount = next(x for x in command if 'dst=/probe.toml' in x)
+        path = mount.split('src=')[1].split(',')[0]
+        assert Path(path).is_relative_to(probe.RUNTIME)
+        settings = tomllib.loads(Path(path).read_text())
+        assert settings['endpoint']['skip_verification'] is False
+        assert settings['listener']['socks']['address'].startswith('0.0.0.0:')
+        assert settings['listener']['socks']['password']
+        return process
+    monkeypatch.setattr(probe.subprocess, 'Popen', launch)
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0 if success else 97, stdout='203.0.113.10')
+    monkeypatch.setattr(probe.subprocess, 'run', run)
+    endpoint = {'hostname': 'vpn.example', 'addresses': ['203.0.113.1:8443'], 'username': 'user', 'password': 'secret'}
+    if success:
+        assert probe.probe(endpoint, 'http2') == '203.0.113.10'
+    else:
+        with pytest.raises(RuntimeError, match='egress'):
+            probe.probe(endpoint, 'http2')
+    assert sum(c[:2] == ['docker', 'run'] for c in calls) == (2 if early_exit else 1)
+    command = calls[0]
+    assert command[command.index('--network')+1] == 'bridge'
+    assert command[command.index('-p')+1].startswith('127.0.0.1:')
+    assert '--read-only' in command and '--cap-drop' in command
+    assert 'secret' not in str(command)
+    name = command[command.index('--name')+1]
+    assert ['docker', 'rm', '-f', name] in calls
+    process.terminate.assert_called_once()
