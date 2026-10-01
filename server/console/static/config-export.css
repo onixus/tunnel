@@ -1,0 +1,20 @@
+.config-export [hidden] { display: none !important; }
+.config-export .export-tabs { display: flex; gap: 8px; margin: 18px 0; }
+.config-export .export-tabs [aria-pressed="true"] {
+  border-color: var(--accent); color: var(--accent); background: #243022;
+}
+.config-export #export-qr { text-align: center; }
+.config-export .config-qr-image {
+  display: block; width: min(100%, 420px); height: auto; aspect-ratio: 1;
+  margin: 0 auto 18px; background: #fff; border: 0;
+}
+.config-export .qr-error:not(:empty) {
+  padding: 16px; border: 1px solid var(--line); border-radius: 7px;
+  color: var(--muted); text-align: left;
+}
+.config-export .export-status { margin-top: 14px; color: var(--muted); }
+.config-export #secret { user-select: text; }
+@media (max-width: 480px) {
+  .config-export .actions { display: grid; grid-template-columns: 1fr; }
+  .config-export .export-tabs button { flex: 1; }
+}

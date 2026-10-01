@@ -17,6 +17,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
+from config_qr import with_qr
 from app import config, db, security, webauth, mailer, conninfo
 
 BASE=Path(__file__).parent
@@ -262,7 +264,8 @@ async def enqueue(request:Request):
 @app.post('/console/api/export')
 async def export(request:Request):
     admin=actor(request,True); q=await body(request)
-    if q.get('consent') is not True or type(q.get('id')) is not int: raise HTTPException(422,'Подтвердите раскрытие ключа')
+    if q.get('consent') is not True or type(q.get('id')) is not int or q['id'] <= 0: raise HTTPException(422,'Подтвердите раскрытие ключа')
+    if type(q.get('qr', False)) is not bool: raise HTTPException(422,'Некорректный параметр QR')
     if q.get('source')=='hysteria': result=agent('hysteria.export',{'id':q['id']})
     elif q.get('source')=='trusttunnel':
         cfg=db.get_config(q['id'])
@@ -271,7 +274,8 @@ async def export(request:Request):
         document=managed_document(cfg)
         result=codec(document['content'],'tt')
     else: raise HTTPException(422,'Неизвестный источник')
-    audit(admin,'key.export',q['source']+':'+str(q['id'])); return result
+    audit(admin,'key.export',q['source']+':'+str(q['id']))
+    return await run_in_threadpool(with_qr, result) if q.get('qr') else result
 
 @app.post('/console/api/password')
 async def password(request:Request):
