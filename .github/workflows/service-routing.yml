@@ -1,0 +1,35 @@
+name: Service routing
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/interactive-service-routing']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: python -m pip install pytest PyYAML cryptography fastapi httpx playwright
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Syntax checks
+        run: |
+          python -m compileall -q server/console deploy scripts
+          node --check server/console/static/console.js
+          node --check server/console/static/routing-ui.js
+      - name: Policy, transaction, API and browser tests
+        run: python -m pytest -q server/tests/test_service_routing.py server/tests/test_routing_api.py server/tests/test_routing_browser.py
+      - name: Upload UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-routing-ui
+          path: test-results/routing
+          if-no-files-found: ignore

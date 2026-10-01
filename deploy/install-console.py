@@ -16,6 +16,7 @@ STAMP=time.strftime('%Y%m%d-%H%M%S')
 BACK=DEST/'backups'/STAMP
 NGINX=Path('/opt/rtrust-releases/20260930-portal/portal-nginx.conf')
 IMAGE='vpn-console:'+STAMP
+AGENT_FILES=('agent.py','routing_agent.py','routing_policy.py','service_routes.py','trusttunnel_routing.py')
 
 def run(args):return subprocess.run(args,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True).stdout
 
@@ -30,7 +31,7 @@ def main():
     for name in ('.rtrust-profile-key','.secret_key'):
         if (data/name).is_file():shutil.copy2(data/name,BACK/name)
     shutil.copy2(NGINX,BACK/'nginx.conf')
-    for p in ('agent.py','root.pub','console.env'):
+    for p in AGENT_FILES+('root.pub','console.env'):
         if (DEST/p).exists():shutil.copy2(DEST/p,BACK/p)
     unit=Path('/etc/systemd/system/vpn-console-agent.service')
     if unit.exists():shutil.copy2(unit,BACK/'agent.service')
@@ -39,12 +40,14 @@ def main():
     if p.returncode==0:previous=json.loads(p.stdout)[0];(BACK/'container.json').write_text(p.stdout)
     (BACK/'portal-container.json').write_text(json.dumps(current))
     run(['docker','build','--build-arg','BASE_IMAGE='+current['Image'],'-f',str(ROOT/'deploy/console.Dockerfile'),'-t',IMAGE,str(ROOT)])
-    run(['docker','run','--rm','--network','none','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=16m','-e','DATA_DIR=/tmp/portal','-e','CONSOLE_DATA=/tmp/console',IMAGE,'python','-c','import console_app; console_app.init(); print("Import and schema OK")'])
+    run(['docker','run','--rm','--network','none','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=16m','-e','DATA_DIR=/tmp/portal','-e','CONSOLE_DATA=/tmp/console',IMAGE,'python','-c','import routing_app, console_app; console_app.init(); print("Import and schema OK")'])
     state=DEST/'data';state.mkdir(mode=0o700,exist_ok=True);os.chown(state,10001,10001)
     if (state/'console.db').exists():
         with sqlite3.connect(state/'console.db') as source, sqlite3.connect(BACK/'console.db') as dest:source.backup(dest)
     (DEST/'packages').mkdir(mode=0o700,exist_ok=True)
-    shutil.copy2(ROOT/'server/console/agent.py',DEST/'agent.py')
+    Path('/root/hysteria-route-backups').mkdir(mode=0o700,exist_ok=True)
+    for name in AGENT_FILES:
+        shutil.copy2(ROOT/'server/console'/name,DEST/name)
     shutil.copy2(ROOT/'server/console/update-root.pub',DEST/'root.pub')
     shutil.copy2(ROOT/'deploy/vpn-console-agent.service',unit)
     # Persist only the inherited settings this service needs, never print their values.
@@ -100,8 +103,9 @@ def main():
         if previous:
             subprocess.run(['docker','rename','vpn-console-backup-'+STAMP,'vpn-console'],capture_output=True)
             subprocess.run(['docker','start','vpn-console'],capture_output=True)
-        for name in ('agent.py','root.pub','console.env'):
+        for name in AGENT_FILES+('root.pub','console.env'):
             if (BACK/name).exists():shutil.copy2(BACK/name,DEST/name)
+            elif name in AGENT_FILES and name!='agent.py':(DEST/name).unlink(missing_ok=True)
         if (BACK/'agent.service').exists():
             shutil.copy2(BACK/'agent.service',unit)
             subprocess.run(['systemctl','daemon-reload'],capture_output=True)

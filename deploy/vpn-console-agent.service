@@ -3,7 +3,7 @@ Description=VPN Console local privileged adapter
 After=network-online.target docker.service h-ui.service
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/vpn-console/agent.py
+ExecStart=/usr/bin/python3 /opt/vpn-console/routing_agent.py
 Restart=on-failure
 RestartSec=3
 UMask=0077
