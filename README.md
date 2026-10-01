@@ -79,3 +79,5 @@ ssh -N -o ExitOnForwardFailure=yes \
 [Telegram-управление и доступ к панелям через TrustTunnel](docs/telegram-control.md).
 
 - [DuckDNS and changing server addresses](docs/dynamic-dns.md)
+
+- [Защита HTTPS-входа и Telegram-кнопка консоли](docs/web-protection.md) — fail2ban для TCP 443 с поддержкой Docker и IPv6.

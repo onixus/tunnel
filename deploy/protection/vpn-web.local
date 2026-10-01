@@ -1,0 +1,14 @@
+[vpn-web]
+enabled = true
+filter = vpn-web
+logpath = /var/log/vpn-portal/auth.log
+backend = polling
+usedns = no
+maxretry = 5
+findtime = 10m
+bantime = 1h
+port = 443
+protocol = tcp
+# Prerouting sees original public destination port before Docker DNAT.
+# Separate table: do not replace UFW, Docker or SSH firewall rules.
+action = nftables[type=multiport, name=vpn-web, port="443", protocol="tcp", table=vpn_web_bans, chain=prerouting, chain_hook=prerouting, chain_priority=-110]

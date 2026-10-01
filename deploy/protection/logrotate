@@ -1,0 +1,13 @@
+/var/log/vpn-portal/auth.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+    sharedscripts
+    postrotate
+        /usr/bin/docker kill --signal=USR1 rtrust-portal-https >/dev/null 2>&1 || true
+    endscript
+}
