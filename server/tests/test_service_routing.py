@@ -402,13 +402,16 @@ def test_installer_patch_produces_importable_endpoint(tmp_path):
 
 
 @pytest.mark.parametrize('success', [True, False])
-def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, success):
+def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, tmp_path, success):
     import tomllib
     probe = load_probe()
+    monkeypatch.setattr(probe, 'RUNTIME', tmp_path / 'runtime')
     process = Mock()
     process.poll.return_value = None
     calls = []
     monkeypatch.setattr(probe.time, 'sleep', lambda _: None)
+    ticks = iter(range(0, 1000, 2))
+    monkeypatch.setattr(probe.time, 'monotonic', lambda: next(ticks))
     monkeypatch.setattr(probe.subprocess, 'check_output', lambda *a, **k: 'sha256:fixture\n')
     def launch(command, **kwargs):
         calls.append(command)
