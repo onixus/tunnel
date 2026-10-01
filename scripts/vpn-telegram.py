@@ -63,7 +63,7 @@ def handle(update):
   send('Управление VPN\n/status — службы, ресурсы, сертификат и маршрут\n/panels — адреса админок\n/bans — баны SSH\n/route — выбор основного/резервного выхода Hysteria\n/restart — перезапуск VPN с подтверждением\nИзменения доступны только владельцу в личном чате.')
  elif cmd=='/status':send(status())
  elif cmd=='/panels':
-  send('Через TrustTunnel (при активном VPN):\nH UI: http://139.100.233.173:8081\nTrustTunnel: http://139.100.233.173:18082/admin/login\n\nЧерез Hysteria:\nH UI: http://10.254.77.1:8081\nTrustTunnel: http://10.254.77.1:18082/admin/login\n\nВход в админки по их собственным паролям.')
+  send('Через TrustTunnel (при активном VPN):\nH UI: http://onixus-rf.duckdns.org:8081\nTrustTunnel: http://onixus-rf.duckdns.org:18082/admin/login\n\nЧерез Hysteria:\nH UI: http://10.254.77.1:8081\nTrustTunnel: http://10.254.77.1:18082/admin/login\n\nВход в админки по их собственным паролям.')
  elif cmd=='/bans':send(command(['fail2ban-client','status','sshd'])[1])
  elif cmd=='/route':send('Выход Hysteria. Исключения RU/РФ/СНГ сохраняются.',[[{'text':'Основной: onixus.ru','callback_data':'select:route-primary'},{'text':'Резервный','callback_data':'select:route-reserve'}]])
  elif cmd=='/restart':send('Выберите службу:',[[{'text':'Hysteria','callback_data':'select:restart-hysteria'},{'text':'TrustTunnel','callback_data':'select:restart-trusttunnel'}]])

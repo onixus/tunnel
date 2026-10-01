@@ -1,0 +1,16 @@
+#!/usr/bin/python3
+import ipaddress,json,subprocess,sys
+from pathlib import Path
+ip=str(ipaddress.IPv4Address(sys.argv[1]));state=Path('/var/lib/vpn-local-address.json')
+old=json.loads(state.read_text())['ip'] if state.exists() else '139.100.233.173'
+if ip==old:raise SystemExit(0)
+interfaces=json.loads(subprocess.check_output(['ip','-j','-4','addr']))
+if ip not in [a['local'] for i in interfaces for a in i.get('addr_info',[])]:raise SystemExit('New public IP not assigned locally; manual NAT review required')
+def run(*args):subprocess.run(args,check=True,timeout=20,capture_output=True)
+for port in ('8081','18082'):
+ run('ufw','insert','1','allow','in','on','br-c0195f42499e','from','172.18.0.0/16','to',ip,'port',port,'proto','tcp')
+p=Path('/etc/systemd/system/trusttunnel-panel.socket');s=p.read_text().replace('ListenStream='+old+':18082','ListenStream='+ip+':18082');p.write_text(s)
+run('systemctl','daemon-reload');run('systemctl','stop','trusttunnel-panel.service','trusttunnel-panel.socket');run('systemctl','start','trusttunnel-panel.socket')
+for port in ('8081','18082'):run('ufw','--force','delete','allow','in','on','br-c0195f42499e','from','172.18.0.0/16','to',old,'port',port,'proto','tcp')
+state.write_text(json.dumps({'ip':ip}));state.chmod(0o600)
+print('Panel bind/firewall updated to '+ip)

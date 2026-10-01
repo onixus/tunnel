@@ -77,3 +77,5 @@ ssh -N -o ExitOnForwardFailure=yes \
 [SMTP через onixus.ru, ежедневные сводки и аварийные уведомления](docs/mail-monitoring.md).
 
 [Telegram-управление и доступ к панелям через TrustTunnel](docs/telegram-control.md).
+
+- [DuckDNS and changing server addresses](docs/dynamic-dns.md)
