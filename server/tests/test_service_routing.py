@@ -402,12 +402,13 @@ def test_installer_patch_produces_importable_endpoint(tmp_path):
 
 
 @pytest.mark.parametrize('success', [True, False])
-def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, tmp_path, success):
+@pytest.mark.parametrize('early_exit', [True, False])
+def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, tmp_path, success, early_exit):
     import tomllib
     probe = load_probe()
     monkeypatch.setattr(probe, 'RUNTIME', tmp_path / 'runtime')
     process = Mock()
-    process.poll.return_value = None
+    process.poll.side_effect = ([1] if early_exit else []) + [None] * 40
     calls = []
     monkeypatch.setattr(probe.time, 'sleep', lambda _: None)
     ticks = iter(range(0, 1000, 2))
@@ -417,6 +418,7 @@ def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, tmp_path, su
         calls.append(command)
         mount = next(x for x in command if 'dst=/probe.toml' in x)
         path = mount.split('src=')[1].split(',')[0]
+        assert Path(path).is_relative_to(probe.RUNTIME)
         settings = tomllib.loads(Path(path).read_text())
         assert settings['endpoint']['skip_verification'] is False
         assert settings['listener']['socks']['address'].startswith('0.0.0.0:')
@@ -433,6 +435,7 @@ def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, tmp_path, su
     else:
         with pytest.raises(RuntimeError, match='egress'):
             probe.probe(endpoint, 'http2')
+    assert sum(c[:2] == ['docker', 'run'] for c in calls) == (2 if early_exit else 1)
     command = calls[0]
     assert command[command.index('--network')+1] == 'bridge'
     assert command[command.index('-p')+1].startswith('127.0.0.1:')
