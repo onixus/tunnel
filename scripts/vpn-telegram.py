@@ -5,6 +5,7 @@ from pathlib import Path
 CFG=Path('/etc/vpn-telegram/config.json')
 STATE=Path('/var/lib/vpn-telegram/state.json')
 PENDING={}
+PANEL_URL='https://onixus-rf.duckdns.org/console/'
 def command(args,timeout=15):
  try:
   r=subprocess.run(args,capture_output=True,text=True,timeout=timeout)
@@ -27,6 +28,7 @@ def status():
  lines=['VPN: '+datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')]
  for name in ['h-ui','wg-quick@wg-private','wg-quick@wg-reserve','certbot.timer']:
   lines.append(name+': '+command(['systemctl','is-active',name])[1])
+ lines.append('Console: '+command(['docker','inspect','vpn-console','--format','{{.State.Status}} / {{.State.Health.Status}}'])[1])
  lines.append('TrustTunnel: '+command(['docker','inspect','trusttunnel-web','--format','{{.State.Status}} / {{.State.Health.Status}}'])[1])
  lines.append(command(['uptime'])[1]);lines.append(command(['free','-m'])[1]);lines.append(command(['df','-h','/'])[1])
  lines.append(command(['/usr/local/sbin/hysteria-exit-switch','status'])[1])
@@ -60,11 +62,12 @@ def handle(update):
  # Ignore stale commands queued while bot was offline.
  if time.time()-update['message'].get('date',0)>180:return
  if cmd in ['/start','/help']:
-  send('Управление VPN\n/status — службы, ресурсы, сертификат и маршрут\n/panels — адреса админок\n/bans — баны SSH\n/route — выбор основного/резервного выхода Hysteria\n/restart — перезапуск VPN с подтверждением\nИзменения доступны только владельцу в личном чате.')
+  send('Управление VPN\n/status — службы, ресурсы, сертификат и маршрут\n/panel — единая панель управления\n/bans — блокировки SSH и веб-входа\n/route — выбор основного/резервного выхода Hysteria\n/restart — перезапуск VPN с подтверждением\nИзменения доступны только владельцу в личном чате.')
  elif cmd=='/status':send(status())
- elif cmd=='/panels':
-  send('Через TrustTunnel (при активном VPN):\nH UI: http://onixus-rf.duckdns.org:8081\nTrustTunnel: http://onixus-rf.duckdns.org:18082/admin/login\n\nЧерез Hysteria:\nH UI: http://10.254.77.1:8081\nTrustTunnel: http://10.254.77.1:18082/admin/login\n\nВход в админки по их собственным паролям.')
- elif cmd=='/bans':send(command(['fail2ban-client','status','sshd'])[1])
+ elif cmd in ['/panel','/panels']:
+  send('Единая VPN-панель: пользователи, ключи, обновления, рассылки и маршруты. Вход по учётной записи администратора TrustTunnel.',[[{'text':'Открыть панель','url':PANEL_URL}]])
+ elif cmd=='/bans':
+  send('\n\n'.join(command(['fail2ban-client','status',j])[1] for j in ['sshd','vpn-web']))
  elif cmd=='/route':send('Выход Hysteria. Исключения RU/РФ/СНГ сохраняются.',[[{'text':'Основной: onixus.ru','callback_data':'select:route-primary'},{'text':'Резервный','callback_data':'select:route-reserve'}]])
  elif cmd=='/restart':send('Выберите службу:',[[{'text':'Hysteria','callback_data':'select:restart-hysteria'},{'text':'TrustTunnel','callback_data':'select:restart-trusttunnel'}]])
 def persist(offset):
@@ -74,7 +77,7 @@ def main():
  CONFIG=json.loads(CFG.read_text());assert isinstance(CONFIG['owner'],int) and CONFIG['owner']>0
  STATE.parent.mkdir(mode=0o700,exist_ok=True)
  me=api('getMe',{});print('Bot ready: '+me['username'],flush=True)
- api('setMyCommands',{'commands':[{'command':c,'description':d} for c,d in [('status','Статус VPN и ресурсы'),('panels','Адреса админок'),('bans','Баны SSH'),('route','Переключить выход Hysteria'),('restart','Перезапустить VPN'),('help','Справка')]]})
+ api('setMyCommands',{'commands':[{'command':c,'description':d} for c,d in [('status','Статус VPN и ресурсы'),('panel','Единая VPN-панель'),('bans','Блокировки SSH и веб-входа'),('route','Переключить выход Hysteria'),('restart','Перезапустить VPN'),('help','Справка')]]})
  offset=json.loads(STATE.read_text()).get('offset',0) if STATE.exists() else 0
  while True:
   try:
