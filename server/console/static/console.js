@@ -228,6 +228,7 @@ function routing() {
   const names = Object.fromEntries(r.exits.map((e) => [e.name, e.id]));
   const rules = r.rules
     .slice(3, -1)
+    .filter((v) => !["local(all, udp/53, 127.0.0.1)", "local(all, tcp/53, 127.0.0.1)"].includes(v))
     .map((v) => {
       const m = v.match(/^([a-zA-Z0-9_-]+)\((suffix:|geoip:)?([^()]+)\)$/);
       return m
@@ -241,7 +242,7 @@ function routing() {
       "Приоритет сверху вниз. Сначала исключения, затем общий выход.",
       btn("Проверить оба выхода", "check-routes"),
     ) +
-    `<div class="grid"><div class="card"><h2>Hysteria · общий выход</h2><label class="field">Весь трафик, не попавший под исключения<select id="route-exit">${r.exits.map((e) => `<option value="${esc(e.id)}" ${e.id === r.selected ? "selected" : ""}>${esc(e.id)} · ${esc(e.host)}</option>`).join("")}</select></label><h2>Исключения</h2><div id="route-rules">${rules}</div>${btn("+ Правило", "add-rule")}<div class="actions">${btn("Проверить изменения", "preview-routes", "", "primary")}</div></div><div class="stack"><div class="card"><h2>Область действия</h2><div class="service"><strong>Hysteria 2</strong>${pill("active", r.selected)}</div><div class="service"><strong>TrustTunnel</strong>${pill("running", "Напрямую")}</div><div class="service"><strong>Трафик сервера</strong>${pill("running", "Напрямую")}</div><div class="note">Правила Hysteria не меняют egress TrustTunnel или системную таблицу маршрутов.</div></div><div class="card"><h2>Защита применения</h2><p class="subtitle">Перед применением проверяется выход. После — реальный запрос через Hysteria. При сбое восстанавливается предыдущая конфигурация.</p><p class="subtitle">Доступ к панелям и блокировка приватных сетей сохраняются. Переключение кратко переподключит клиентов.</p><details><summary>Текущие правила</summary><pre>${esc(r.rules.join("\n"))}</pre></details></div></div></div>`
+    `<div class="grid"><div class="card"><h2>Hysteria · общий выход</h2><label class="field">Весь трафик, не попавший под исключения<select id="route-exit">${r.exits.map((e) => `<option value="${esc(e.id)}" ${e.id === r.selected ? "selected" : ""}>${esc(e.id)} · ${esc(e.host)}</option>`).join("")}</select></label><h2>Исключения</h2><div id="route-rules">${rules}</div>${btn("+ Правило", "add-rule")}<div class="actions">${btn("Проверить изменения", "preview-routes", "", "primary")}</div></div><div class="stack"><div class="card"><h2>Область действия</h2><div class="service"><strong>Hysteria 2</strong>${pill("active", r.selected)}</div><div class="service"><strong>TrustTunnel</strong>${pill("running", "Напрямую")}</div><div class="service"><strong>Трафик сервера</strong>${pill("running", "Напрямую")}</div><div class="note">Правила Hysteria не меняют egress TrustTunnel или системную таблицу маршрутов.</div></div><div class="card"><h2>Локальная фильтрация рекламы</h2>${(state.adblock?.running && state.adblock?.dns_interception) ? pill("active", "Работает") : pill("unknown", "Не подтверждено")}<p class="subtitle">Доменов: ${esc(state.adblock?.domains ?? "—")}; ru/su: ${esc(state.adblock?.ru_su_domains ?? "—")}. Ежедневное обновление из нескольких источников.</p><p class="subtitle">Последний успех: ${esc(state.adblock?.last_success ?? "—")}</p><p class="subtitle">Следующее обновление: ${esc(state.adblock?.next_update ?? "—")}</p>${state.adblock?.last_error ? `<p class="error">${esc(state.adblock.last_error)}</p>` : ""}<ul>${(state.adblock?.sources || []).map((s) => `<li>${esc(s.id)}: ${esc(s.domains)}</li>`).join("")}</ul>${btn("Обновить списки", "refresh-adblock")}<p class="subtitle">Hysteria и TrustTunnel/Rust: обычный DNS внутри VPN фильтруется на сервере. Внешний DoH/DoT в профиле нужно отключить для применения локальных списков. Собственный DoH браузера и прямой обход VPN могут обходить фильтры. Зоны ru/su целиком не заблокированы.</p><h2>Защита применения</h2><p class="subtitle">Перед применением проверяется выход. После — реальный запрос через Hysteria. При сбое восстанавливается предыдущая конфигурация.</p><p class="subtitle">Доступ к панелям, блокировка приватных сетей и перенаправление DNS в локальный фильтр сохраняются. Переключение кратко переподключит клиентов.</p><details><summary>Текущие правила</summary><pre>${esc(r.rules.join("\n"))}</pre></details></div></div></div>`
   );
 }
 function updates() {
@@ -529,6 +530,7 @@ async function handle(b) {
     b.closest(".route-row").remove();
     routeDirty = true;
   }
+  if (a === "refresh-adblock") confirmJob("Обновить локальные списки", "Загрузить списки из настроенных источников? При ошибке останется последняя рабочая версия.", "adblock.refresh", {});
   if (a === "check-routes") await job("routes.check", {});
   if (a === "preview-routes") {
     if ($("#route-rules .error"))

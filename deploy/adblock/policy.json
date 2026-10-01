@@ -1,0 +1,11 @@
+{
+  "sources": [
+    {"id":"hagezi-pro","url":"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt","format":"domains","min":10000},
+    {"id":"adguard-dns-list","url":"https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt","format":"adblock","min":10000},
+    {"id":"stevenblack","url":"https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts","format":"hosts","min":10000},
+    {"id":"hagezi-ultimate-ru-su","url":"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/ultimate-onlydomains.txt","format":"domains","suffixes":["ru","su"],"min":100}
+  ],
+  "protected": ["onixus-rf.duckdns.org","onixus.duckdns.org","onixus-reverse.duckdns.org","onixus.ru","mail.onixus.ru","api.telegram.org","raw.githubusercontent.com","adguardteam.github.io","example.com","api.ipify.org","yandex.ru","mail.ru","vk.com"],
+  "allow": [],
+  "deny": ["ads.example.invalid","adfox.ru","an.yandex.ru","mc.yandex.ru","mc.yandex.com","ads.vk.com","ads.mail.ru","top.mail.ru","top-fwz1.mail.ru","r.mradx.net","counter.yadro.ru","tns-counter.ru"]
+}

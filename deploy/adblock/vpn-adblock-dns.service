@@ -1,0 +1,12 @@
+[Unit]
+Description=Local DNS filtering for Hysteria and TrustTunnel
+After=ufw.service docker.service
+Before=h-ui.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table ip vpn_adblock_dns
+ExecStart=/usr/sbin/nft -f /etc/vpn-adblock-dns.nft
+ExecStop=/usr/sbin/nft delete table ip vpn_adblock_dns
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Update local VPN advertising and tracking lists
+After=network-online.target docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/vpn-adblock/update.py
+TimeoutStartSec=240
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/vpn-adblock
