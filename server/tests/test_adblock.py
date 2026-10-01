@@ -29,6 +29,46 @@ class Lists(unittest.TestCase):
         rules,_=a.compile_lists(policy,lambda _:data)
         self.assertIn('@@||ads.ru^',rules)
 
+    def test_unchanged_update_never_rewrites_published_rules(self):
+        policy,data=self.fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);(home/'policy.json').write_text(json.dumps(policy))
+            with patch.object(a,'HOME',home),patch.object(a,'fetch',return_value=data),patch.object(a,'refresh'),patch('sys.argv',['update']):
+                a.main()
+                current=home/'filters/current/rules.txt';before=current.read_bytes();inode=current.stat().st_ino
+                original=Path.write_text
+                def fail_rule_write(path,text,*args,**kwargs):
+                    if path.name=='rules.txt':
+                        with path.open('w') as f:f.write(text[:5])
+                        raise OSError(28,'No space left on device')
+                    return original(path,text,*args,**kwargs)
+                with patch.object(Path,'write_text',fail_rule_write):
+                    try:a.main()
+                    except OSError:pass
+                self.assertEqual(current.read_bytes(),before)
+                self.assertEqual(current.stat().st_ino,inode)
+
+    def test_new_generation_write_failure_preserves_current(self):
+        policy,data=self.fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);(home/'policy.json').write_text(json.dumps(policy))
+            with patch.object(a,'HOME',home),patch.object(a,'fetch',return_value=data),patch.object(a,'refresh'),patch('sys.argv',['update']):
+                a.main();current=home/'filters/current/rules.txt';before=current.read_bytes()
+                generation=os.readlink(home/'filters/current')
+                previous=json.loads((home/'status.json').read_text())['last_success']
+                original=Path.write_text
+                def fail_rule_write(path,text,*args,**kwargs):
+                    if path.name=='rules.txt':
+                        with path.open('w') as f:f.write(text[:5])
+                        raise OSError(28,'No space left on device')
+                    return original(path,text,*args,**kwargs)
+                with patch.object(a,'fetch',return_value=data+b'new.ads.test\n'),patch.object(Path,'write_text',fail_rule_write):
+                    with self.assertRaises(OSError):a.main()
+                self.assertEqual(current.read_bytes(),before)
+                self.assertEqual(os.readlink(home/'filters/current'),generation)
+                self.assertEqual(json.loads((home/'status.json').read_text())['last_success'],previous)
+                self.assertEqual({p.name for p in (home/'filters').iterdir()},{generation,'current'})
+
     def test_failed_activation_keeps_previous_generation(self):
         policy,data=self.fixture()
         with tempfile.TemporaryDirectory() as tmp:

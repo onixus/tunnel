@@ -183,7 +183,7 @@ function users() {
         ),
         ...h.map(
           (u) =>
-            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="Hysteria"><td>${esc(u.username)}<small>#${u.id}</small></td><td>${pill("running", "Hysteria")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>${bytes(u.download + u.upload)}<small>До ${new Date(u.expire_time).toLocaleDateString("ru")}</small></td><td>${btn("Ключ", "export", `data-source="hysteria" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="hysteria" data-id="${u.id}"`)}${btn("Лимиты", "hysteria-limits", `data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="hysteria" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="hysteria" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
+            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="Hysteria"><td>${esc(u.username)}<small>#${u.id}</small></td><td>${pill("running", "Hysteria")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>${bytes(u.download + u.upload)}<small>До ${new Date(u.expire_time).toLocaleDateString("ru")}</small></td><td>${btn("Ключ", "export", `data-source="hysteria" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="hysteria" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="hysteria" data-id="${u.id}"`)}${btn("Лимиты", "hysteria-limits", `data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="hysteria" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="hysteria" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
         ),
       ],
     ) +
@@ -202,7 +202,7 @@ function keys() {
       ["Владелец / ключ", "Протокол", "Статус", "Действия"],
       (state.keys || []).map(
         (k) =>
-          `<tr><td>${esc(k.email)}<small>${esc(k.tt_username)} · ${esc(k.label)}</small></td><td>TrustTunnel</td><td>${pill(k.revoked_at ? "blocked" : "active", k.revoked_at ? "Отозван" : "Действует")}</td><td>${!k.revoked_at ? btn("Показать / скачать", "export", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Ротация", "rotate", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Отозвать", "revoke", `data-id="${k.id}"`, "danger") : ""}</td></tr>`,
+          `<tr><td>${esc(k.email)}<small>${esc(k.tt_username)} · ${esc(k.label)}</small></td><td>TrustTunnel</td><td>${pill(k.revoked_at ? "blocked" : "active", k.revoked_at ? "Отозван" : "Действует")}</td><td>${!k.revoked_at ? btn("Показать / скачать", "export", `data-source="trusttunnel" data-id="${k.id}"`) + btn("QR-код", "export-qr", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Ротация", "rotate", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Отозвать", "revoke", `data-id="${k.id}"`, "danger") : ""}</td></tr>`,
       ),
     ) +
     `<div class="note">Ключи Hysteria доступны в разделе «Пользователи». API-регистрация устройства и VPN-ключ имеют отдельные сроки и отзыв.</div><h2>Регистрации R-TrustTunnel</h2>` +
@@ -473,32 +473,8 @@ async function handle(b) {
       notice("Пароль изменён");
     });
   }
-  if (a === "export") {
-    modal(
-      "Раскрытие VPN-ключа",
-      `<p>Ссылка содержит секрет подключения. Передавайте её только владельцу.</p><button id="reveal" class="primary">Показать ключ</button>`,
-    );
-    $("#reveal").onclick = async () => {
-      try {
-        const r = await api("export", { source, id, consent: true });
-        $("#modal-body").innerHTML =
-          `<pre id="secret"></pre><button id="download" class="primary">Скачать</button>`;
-        $("#secret").textContent = r.content;
-        $("#download").onclick = () => {
-          const url = URL.createObjectURL(
-            new Blob([r.content], { type: "text/plain" }),
-          );
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = source + "-" + id + ".txt";
-          link.click();
-          setTimeout(() => URL.revokeObjectURL(url), 5000);
-        };
-      } catch (e) {
-        notice(e.message, true);
-        $("#modal").close();
-      }
-    };
+  if (a === "export" || a === "export-qr") {
+    showConfigExport(source, id, a === "export-qr");
   }
   if (a === "contact") {
     const c =
@@ -637,6 +613,6 @@ $("#refresh").onclick = () => {
   refresh();
 };
 $("#modal").addEventListener("close", () => {
-  $("#modal-body").replaceChildren();
+  if (!$("#modal").open) $("#modal-body").replaceChildren();
 });
 refresh();

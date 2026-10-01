@@ -65,6 +65,55 @@ class ConsoleTests(unittest.TestCase):
         ui.init()
         with ui.connect() as c:self.assertEqual(c.execute('SELECT state FROM jobs').fetchone()[0],'unknown')
         self.assertFalse(ui.work_once())
+    def test_create_retry_uses_canonical_payload_without_reexecution(self):
+        for action,data in [('hysteria.create',{'username':'testuser'}),
+                            ('trusttunnel.create',{'email':'  NEW@EXAMPLE.INVALID  '})]:
+            with self.subTest(action=action):
+                key=secrets.token_hex(16)
+                first=self.job(action,data,key)
+                self.assertEqual(first.status_code,200,first.text)
+                self.assertEqual(self.job(action,data,key).status_code,200)
+                with patch.object(ui,'perform',return_value={'message':'done'}) as perform:
+                    ui.work_once()
+                    if action=='trusttunnel.create':db.create_user('new@example.invalid','unused')
+                    retry=self.job(action,data,key)
+                    self.assertEqual(retry.status_code,200,retry.text)
+                    self.assertEqual(retry.json()['state'],'success')
+                    self.assertFalse(ui.work_once());perform.assert_called_once()
+                changed={'username':'different'} if action=='hysteria.create' else {'email':'other@example.invalid'}
+                self.assertEqual(self.job(action,changed,key).status_code,409)
+
+    def test_campaign_retry_after_send_returns_existing_job(self):
+        self.post('contacts',{'source':'trusttunnel','id':self.user,'email':'test@example.invalid','consent':True})
+        draft=self.post('campaigns',{'channel':'email','subject':'Test','body':'Hello',
+                    'recipients':[{'source':'trusttunnel','id':self.user}]}).json()
+        key=secrets.token_hex(16);data={'id':draft['id']}
+        self.assertEqual(self.job('campaign.send',data,key).status_code,200)
+        with patch.object(ui.mailer,'send_mail') as send:
+            ui.work_once()
+            self.assertEqual(self.job('campaign.send',data,key).status_code,200)
+            self.assertFalse(ui.work_once());send.assert_called_once()
+
+    def test_telegram_validates_complete_message_before_creating_draft(self):
+        self.post('contacts',{'source':'trusttunnel','id':self.user,'chat_id':123456,'consent':True})
+        payload={'channel':'telegram','subject':'s'*160,'body':'b'*3339,
+                 'recipients':[{'source':'trusttunnel','id':self.user}]}
+        self.assertEqual(self.post('campaigns',payload).status_code,422)
+        with ui.connect() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM campaigns').fetchone()[0],0)
+        payload['body']='b'*3338
+        draft=self.post('campaigns',payload);self.assertEqual(draft.status_code,200,draft.text)
+        self.job('campaign.send',{'id':draft.json()['id']});ui.work_once()
+        text=ui.agent.call_args.args[1]['text'];self.assertEqual(len(text),3500)
+        tg=ui.STATE/'telegram.json';tg.write_text(json.dumps({'token':'test-only'}))
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def read(self):return b'{"ok":true,"result":{"message_id":1}}'
+        with patch.object(agent,'TG',tg),patch.object(agent.urllib.request,'build_opener') as opener:
+            opener.return_value.open.return_value=Response()
+            self.assertEqual(agent.telegram({'chat_id':123456,'text':text}),{'message_id':1})
+            opener.return_value.open.assert_called_once()
+
     def test_deleted_admin_cannot_execute_queued_job(self):
         self.job('routes.check',{})
         with db.connect() as c:c.execute('DELETE FROM admins')
