@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Compile bounded local DNS lists. All sources must pass; hot-reload with rollback."""
-import argparse,base64,datetime,fcntl,hashlib,json,os,re,shutil,subprocess,sys,time,urllib.request
+import argparse,base64,datetime,fcntl,hashlib,json,os,re,shutil,subprocess,sys,tempfile,time,urllib.request
 from pathlib import Path
 HOME=Path('/opt/vpn-adblock')
 LIMIT=24*1024*1024
@@ -97,8 +97,20 @@ def main():
             canary='generation-'+hashlib.sha256(rules.encode()).hexdigest()[:24]+'.invalid'
             rules+='||'+canary+'^\n'
             digest=hashlib.sha256(rules.encode()).hexdigest()
-            generation=HOME/'filters'/digest;generation.mkdir(parents=True,exist_ok=True);generation.chmod(0o755);generation.parent.chmod(0o755)
-            (generation/'rules.txt').write_text(rules);(generation/'rules.txt').chmod(0o644)
+            filters=HOME/'filters';filters.mkdir(parents=True,exist_ok=True);filters.chmod(0o755)
+            generation=filters/digest
+            if generation.exists():
+                # A published generation is immutable, including on unchanged daily updates.
+                if (generation/'rules.txt').read_bytes()!=rules.encode():
+                    raise ValueError('Existing generation is corrupt')
+            else:
+                staging=Path(tempfile.mkdtemp(prefix='.staging-',dir=filters))
+                try:
+                    candidate=staging/'rules.txt';candidate.write_text(rules);candidate.chmod(0o644)
+                    with candidate.open('rb') as f:os.fsync(f.fileno())
+                    staging.chmod(0o755);staging.rename(generation)
+                finally:
+                    if staging.exists():shutil.rmtree(staging)
             current=HOME/'filters/current';old=os.readlink(current) if current.is_symlink() else None
             nextlink=HOME/'filters/next';nextlink.unlink(missing_ok=True);nextlink.symlink_to(digest);nextlink.replace(current);switched=True
             if not args.bootstrap:refresh(canary)

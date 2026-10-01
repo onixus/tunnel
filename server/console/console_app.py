@@ -211,7 +211,7 @@ def state(request:Request):
 ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
          'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send'}
 
-def validate_action(action,data):
+def validate_action(action,data,*,check_state=True):
     if action not in ACTIONS: raise HTTPException(422,'Неизвестная операция')
     if action.endswith(('.block','.unblock','.rotate','.key','.revoke','.device-revoke')):
         if type(data.get('id')) is not int or data['id']<=0: raise HTTPException(422,'Некорректный ID')
@@ -219,7 +219,7 @@ def validate_action(action,data):
     if action=='trusttunnel.create':
         email=data.get('email','').strip().lower()
         if not re.fullmatch(r'[^\s@<>\r\n]{1,100}@[^\s@<>\r\n]{1,150}\.[^\s@<>\r\n]{2,30}',email): raise HTTPException(422,'Некорректный e-mail')
-        if db.get_user_by_email(email): raise HTTPException(409,'E-mail уже существует')
+        if check_state and db.get_user_by_email(email): raise HTTPException(409,'E-mail уже существует')
         return {'email':email}
     if action=='hysteria.create':
         if not re.fullmatch('[A-Za-z0-9_-]{6,32}',str(data.get('username',''))): raise HTTPException(422,'Логин Hysteria: 6–32 латинских символа')
@@ -229,6 +229,7 @@ def validate_action(action,data):
         if data['id']<=0 or not 1<=data['days']<=3650 or not 1<=data['devices']<=100 or not -1<=data['quota_gb']<=100000: raise HTTPException(422,'Недопустимые лимиты')
         return data
     if action=='campaign.send':
+        if not check_state: return {'id':data.get('id')}
         with connect() as c: row=c.execute('SELECT state FROM campaigns WHERE id=?',(data.get('id'),)).fetchone()
         if not row or row['state']!='draft': raise HTTPException(409,'Рассылка уже отправлялась или не существует')
         return {'id':data['id']}
@@ -249,7 +250,10 @@ async def enqueue(request:Request):
     with WRITE_LOCK:
         with connect() as c: existing=c.execute('SELECT * FROM jobs WHERE id=?',(key,)).fetchone()
         if existing:
-            if existing['actor']!=admin or existing['action']!=action or json.loads(existing['payload'])!=data: raise HTTPException(409,'Идентификатор уже используется')
+            if existing['actor']!=admin or existing['action']!=action: raise HTTPException(409,'Идентификатор уже используется')
+            # Replays compare canonical inputs without rechecking mutable execution state.
+            clean=validate_action(action,data,check_state=False)
+            if json.loads(existing['payload'])!=clean: raise HTTPException(409,'Идентификатор уже используется')
             return {'id':key,'state':existing['state']}
         clean=validate_action(action,data)
         with connect() as c:
@@ -295,6 +299,8 @@ async def campaign(request:Request):
     admin=actor(request,True); q=await body(request)
     channel=q.get('channel'); subject=q.get('subject','').strip(); text=q.get('body','').strip()
     if channel not in ('email','telegram') or not 1<=len(subject)<=160 or '\n' in subject or '\r' in subject or not 1<=len(text)<=3500: raise HTTPException(422,'Проверьте канал, тему и текст')
+    if channel=='telegram' and len(subject+'\n\n'+text)>3500:
+        raise HTTPException(422,'Telegram: тема и текст вместе с разделителем — не более 3500 символов')
     recipients=q.get('recipients')
     if not isinstance(recipients,list) or not 1<=len(recipients)<=500: raise HTTPException(422,'Выберите от 1 до 500 контактов')
     id=secrets.token_hex(16); selected=set()
