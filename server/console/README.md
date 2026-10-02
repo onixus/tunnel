@@ -55,8 +55,14 @@ A campaign snapshots selected addresses, shows a draft and requires a second exp
 send action. Consent is rechecked before dispatch. Every recipient is persisted as
 `sending` before network I/O. Ambiguous delivery remains `unknown` and is never
 retried automatically. `accepted` means SMTP/Telegram accepted the message, not
-that the recipient read it. This implementation sends text announcements; it does
-not silently attach VPN credentials. No real messages are sent by test scripts.
+that the recipient read it. Campaigns send text announcements only and never attach
+VPN credentials. No real messages are sent by test scripts.
+
+Configuration delivery (`config.send`) is separate: an admin-confirmed job that sends
+one user's own link, PNG QR and config files to that user's contact e-mail and/or
+Telegram ID. Credentials are rendered at execution in `config_delivery.py` and are
+never persisted in jobs, results or audit. See
+[unified-console.md](../../docs/unified-console.md#отправка-конфигураций-на-e-mail-и-в-telegram).
 
 ## Updates
 
