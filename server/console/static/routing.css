@@ -2,43 +2,44 @@
 .network-card { margin-bottom: 24px; padding: 28px; overflow: hidden; }
 .network-title { display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .network-title h2 { margin:8px 0; font-size:23px; letter-spacing:-.5px; }
-.route-group { border:1px solid #3e5233; background:#203020; color:var(--accent); border-radius:99px; padding:7px 13px; white-space:nowrap; font-size:12px; }
+.route-group { border:1px solid #96c5ff33; background:#96c5ff14; color:var(--accent); font-weight:600; border-radius:99px; padding:7px 13px; white-space:nowrap; font-size:12px; }
 .network-board { position:relative; display:grid; grid-template-columns:minmax(240px,1fr) minmax(220px,1fr); column-gap:clamp(60px,12vw,200px); padding:16px 6px 26px; min-height:400px; }
 .route-wires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
-.wire { stroke:var(--accent); stroke-width:2.5; fill:none; opacity:.75; }
+.wire { stroke:var(--teal); stroke-width:2; fill:none; opacity:.8; }
 .wire-blue { stroke:var(--blue); }
 .service-nodes,.exit-nodes { display:flex; flex-direction:column; position:relative; z-index:1; gap:14px; }
 .service-nodes { justify-content:center; }
 .exit-nodes { justify-content:space-between; }
 .ingress-label { display:flex; align-items:center; gap:8px; padding:0 8px; font-weight:650; }
 .ingress-label small { margin-left:auto; font-size:11px; color:var(--muted); font-weight:400; }
-.service-node,.exit-node { text-align:left; display:flex; flex-direction:column; background:#101922; border:1px solid var(--line); padding:18px 20px; border-radius:12px; width:100%; min-width:0; transition:background .16s, border-color .16s, transform .16s; }
-.service-node { border-left:3px solid var(--accent); }
+.service-node,.exit-node { text-align:left; display:flex; flex-direction:column; background:#0c141f; border:1px solid var(--line-strong); padding:16px 18px; border-radius:var(--radius); width:100%; min-width:0; transition:background .16s, border-color .16s, transform .16s; }
+.service-node { border-left:3px solid var(--teal); }
 .service-node.service-blue { border-left-color:var(--blue); }
 .service-node:disabled { opacity:.8; }
 .service-node strong,.exit-node strong { font-size:15px; line-height:1.5; overflow-wrap:anywhere; }
 .service-node small,.exit-node small,.policy-service small,.route-choice small { display:block; color:var(--muted); font-size:12px; margin-top:5px; }
-.node-kicker { font-size:10px; letter-spacing:1.2px; color:var(--muted); margin-bottom:8px; }
-.service-route { color:var(--accent); display:flex; justify-content:space-between; margin-top:10px; }
+.node-kicker { font-size:10.5px; font-weight:650; letter-spacing:1px; text-transform:uppercase; color:var(--faint); margin-bottom:6px; }
+.service-route { color:var(--teal); font-weight:600; display:flex; justify-content:space-between; margin-top:10px; }
 .service-blue .service-route { color:var(--blue); }
 .exit-node { min-height:115px; }
-.exit-used { border-color:#526446; background:#16221f; }
-.exit-node:not(:disabled):hover,.service-node:not(:disabled):hover { transform:translateY(-2px); border-color:var(--accent); background:#1a2829; }
+.exit-used { border-color:#69e0c34d; background:linear-gradient(180deg,#69e0c30f,#0c141f); }
+.exit-node:not(:disabled):hover,.service-node:not(:disabled):hover { transform:translateY(-2px); border-color:#96c5ff66; background:#111c2a; }
 .exit-members { display:flex; flex-wrap:wrap; gap:6px; min-height:22px; margin-top:12px; font-size:11px; }
-.route-tag { display:inline-block; background:#2a3c23; color:var(--accent); padding:3px 7px; border-radius:4px; font-size:10px; }
-.route-tag.tag-blue { background:#22344c; color:var(--blue); }
-.network-foot { display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; border-top:1px solid var(--line); padding-top:17px; color:var(--muted); font-size:11px; }
-.legend-dot { display:inline-block; width:7px; height:7px; background:var(--accent); border-radius:50%; margin:0 5px 1px 0; }
+.route-tag { display:inline-block; background:#69e0c31a; color:var(--teal); padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+.route-tag.tag-blue { background:#96c5ff1a; color:var(--blue); }
+.network-foot { display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; border-top:1px solid var(--line); padding-top:17px; color:var(--muted); font-size:12px; }
+.legend-dot { display:inline-block; width:7px; height:7px; background:var(--teal); border-radius:50%; margin:0 5px 1px 0; }
 .legend-dot.blue { background:var(--blue); margin-left:14px; }
-.route-disclaimer { color:var(--muted); font-size:11px; margin:14px 0 0; }
+.route-disclaimer { color:var(--faint); font-size:12px; margin:14px 0 0; }
 .routing-bottom { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:22px; margin:24px 0; }
 .policy-services { display:grid; gap:16px; }
-.policy-service { border:1px solid var(--line); background:#101720; border-radius:10px; padding:18px; }
+.policy-service { border:1px solid var(--line); background:#0c141f; border-radius:var(--radius); padding:18px; }
 .policy-service .field { margin-top:16px; }
 [hidden] { display:none !important; }
-.route-reason { color:#e1b97c !important; line-height:1.5; }
-.route-choice { display:flex; gap:13px; align-items:flex-start; border:1px solid var(--line); padding:16px; border-radius:10px; margin:12px 0; cursor:pointer; }
-.route-choice input { margin-top:5px; accent-color:var(--accent); width:18px; height:18px; flex-shrink:0; }
+.route-reason { color:var(--warn) !important; line-height:1.5; }
+.route-choice { display:flex; gap:13px; align-items:flex-start; border:1px solid var(--line-strong); padding:14px 16px; border-radius:var(--radius); margin:12px 0; cursor:pointer; }
+.route-choice:has(input:checked) { border-color:#96c5ffaa; background:#96c5ff0f; }
+.route-choice input { margin-top:3px; accent-color:var(--accent); width:18px; height:18px; flex-shrink:0; }
 .route-error { color:var(--red); white-space:pre-wrap; }
 .route-error:empty { display:none; }
 .stat strong.stat-word { font-size:23px; padding:10px 0; }

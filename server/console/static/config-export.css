@@ -1,15 +1,15 @@
 .config-export [hidden] { display: none !important; }
 .config-export .export-tabs { display: flex; gap: 8px; margin: 18px 0; }
 .config-export .export-tabs [aria-pressed="true"] {
-  border-color: var(--accent); color: var(--accent); background: #243022;
+  border-color: #96c5ff66; color: var(--text); background: #96c5ff1a;
 }
 .config-export #export-qr { text-align: center; }
 .config-export .config-qr-image {
   display: block; width: min(100%, 420px); height: auto; aspect-ratio: 1;
-  margin: 0 auto 18px; background: #fff; border: 0;
+  margin: 0 auto 18px; background: #fff; border: 0; border-radius: 12px; padding: 10px;
 }
 .config-export .qr-error:not(:empty) {
-  padding: 16px; border: 1px solid var(--line); border-radius: 7px;
+  padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-sm);
   color: var(--muted); text-align: left;
 }
 .config-export .export-status { margin-top: 14px; color: var(--muted); }
