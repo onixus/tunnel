@@ -217,3 +217,16 @@ Probe повторяет запуск клиента при раннем зав�
 оба транспорта используют общий бюджет 45 секунд. Временные root-only профили
 создаются в `/opt/vpn-console/probe-runtime`, чтобы Docker видел их и при
 `PrivateTmp=true` у агента. После завершения профили удаляются.
+
+## Политика TrustTunnel relay
+
+`relay_config` строит sing-box relay для выбранного выхода: DNS идёт напрямую,
+`hostkey.ru` — принудительно через выход, зоны `.ru`, `.su`, `.рф` и адреса из
+rule set `cis` — напрямую, частные сети отвергаются, остальное — в выход.
+Hysteria использует эквивалентные правила ACL (`local(suffix:su)` добавлен
+2 октября 2026).
+
+Rule set `/opt/vpn-console/trusttunnel-routing/cis.json` (sing-box source, ~34 000
+CIDR RU/BY/KZ/KG/TJ/UZ/AM/AZ/MD/TM) собран вручную; генератор в репозитории
+отсутствует. Обновление списка — отдельная задача; после замены файла нужен
+перезапуск `trusttunnel-web`.

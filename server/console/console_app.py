@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from config_qr import with_qr
+import config_delivery
 from app import config, db, security, webauth, mailer, conninfo
 
 BASE=Path(__file__).parent
@@ -139,7 +140,32 @@ def perform(action,data,admin):
         u=db.get_user(cfg['user_id'])
         return legacy(admin,f"users/{cfg['user_id']}/status",{'status':u['status']})
     if action=='campaign.send': return send_campaign(data['id'])
+    if action=='config.send': return send_config(data)
     raise RuntimeError('Операция не поддерживается')
+
+def config_recipients(source,id,user):
+    with connect() as c: row=c.execute('SELECT email,chat_id FROM contacts WHERE source=? AND user_id=?',(source,id)).fetchone()
+    email=(row['email'] if row else '') or (user.get('email','') if source=='trusttunnel' else '')
+    return {'email':email or None,'telegram':row['chat_id'] if row else None}
+
+def send_config(data):
+    source,id,channels=data['source'],data['id'],data['channels']
+    try: user=source_user(source,id)
+    except HTTPException: raise RuntimeError('Пользователь не найден')
+    recipients=config_recipients(source,id,user)
+    if any(not recipients[ch] for ch in channels): raise RuntimeError('Контакт изменился: адрес получателя не задан')
+    try:
+        bundle=(config_delivery.hysteria_bundle(user,lambda d:agent('hysteria.export',d)) if source=='hysteria'
+                else config_delivery.trusttunnel_bundle(user))
+    except config_delivery.DeliveryError: raise
+    except Exception: raise RuntimeError('Не удалось подготовить конфигурацию')
+    status=config_delivery.deliver(bundle,recipients,channels,agent)
+    names={'email':'E-mail','telegram':'Telegram'}
+    summary='; '.join(names[ch]+(': принято' if st=='accepted' else ': ошибка') for ch,st in status.items())
+    if 'failed' in status.values():
+        # No automatic retry: a repeat may duplicate messages in channels that succeeded.
+        raise RuntimeError('Конфигурация отправлена не во все каналы. '+summary+'. Проверьте контакт и SMTP/бота перед повтором.')
+    return {'message':'Конфигурация отправлена. '+summary,'channels':status}
 
 def work_once():
     with connect() as c:
@@ -211,10 +237,21 @@ def state(request:Request):
     return snapshot
 
 ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
-         'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send'}
+         'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send'}
 
 def validate_action(action,data,*,check_state=True):
     if action not in ACTIONS: raise HTTPException(422,'Неизвестная операция')
+    if action=='config.send':
+        channels=data.get('channels')
+        if set(data)!={'source','id','channels'} or data['source'] not in ('hysteria','trusttunnel') or type(data['id']) is not int or data['id']<=0: raise HTTPException(422,'Некорректные параметры')
+        if not isinstance(channels,list) or not channels or len(set(channels))!=len(channels) or not set(channels)<=set(config_delivery.CHANNELS): raise HTTPException(422,'Выберите e-mail и/или Telegram')
+        clean={'source':data['source'],'id':data['id'],'channels':sorted(channels)}
+        if not check_state: return clean
+        recipients=config_recipients(clean['source'],clean['id'],source_user(clean['source'],clean['id']))
+        for ch in clean['channels']:
+            if not recipients[ch]: raise HTTPException(422,('E-mail' if ch=='email' else 'Telegram ID')+' получателя не задан. Заполните контакт пользователя.')
+        if 'email' in clean['channels'] and not mailer.is_configured(): raise HTTPException(409,'SMTP не настроен')
+        return clean
     if action.endswith(('.block','.unblock','.rotate','.key','.revoke','.device-revoke')):
         if type(data.get('id')) is not int or data['id']<=0: raise HTTPException(422,'Некорректный ID')
         return {'id':data['id']}
@@ -259,6 +296,9 @@ async def enqueue(request:Request):
             return {'id':key,'state':existing['state']}
         clean=validate_action(action,data)
         with connect() as c:
+            if action=='config.send':
+                recent=c.execute("SELECT 1 FROM jobs WHERE action='config.send' AND json_extract(payload,'$.source')=? AND json_extract(payload,'$.id')=? AND created>datetime('now','-60 seconds')",(clean['source'],clean['id'])).fetchone()
+                if recent: raise HTTPException(429,'Конфигурация этому пользователю уже отправлялась меньше минуты назад')
             if action=='campaign.send':
                 if c.execute("SELECT 1 FROM jobs WHERE action='campaign.send' AND json_extract(payload,'$.id')=?",(clean['id'],)).fetchone(): raise HTTPException(409,'Рассылка уже поставлена в очередь')
             c.execute('INSERT INTO jobs(id,actor,action,payload,state) VALUES(?,?,?,?,?)',(key,admin,action,json.dumps(clean,sort_keys=True),'queued'))

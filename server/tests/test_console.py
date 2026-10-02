@@ -152,6 +152,76 @@ class ConsoleTests(unittest.TestCase):
         self.assertTrue(db.get_config(key)['revoked_at'])
         self.assertIsNone(db.get_config(other)['revoked_at'])
 
+    def deliver_setup(self,chat=None):
+        db.set_settings({'conn_address':'vpn.example.invalid','conn_port':'8443','panel_domain':'vpn.example.invalid','smtp_host':'smtp.example.invalid'})
+        id=db.create_config(self.user,'test-key','delivered-secret','phone')
+        # The legacy deeplink helper shells out to the endpoint binary, absent outside the image.
+        from app import conninfo
+        deeplink=patch.object(conninfo,'build_deeplink',return_value='tt://legacy-deeplink');deeplink.start();self.addCleanup(deeplink.stop)
+        self.assertEqual(self.post('contacts',{'source':'trusttunnel','id':self.user,'email':'',**({'chat_id':chat} if chat else {})}).status_code,200)
+        return id
+    def test_config_send_validation_and_missing_contacts(self):
+        self.deliver_setup()
+        for bad in [{'source':'trusttunnel','id':self.user},{'source':'trusttunnel','id':self.user,'channels':[]},
+                    {'source':'trusttunnel','id':self.user,'channels':['sms']},{'source':'trusttunnel','id':self.user,'channels':['email','email']},
+                    {'source':'shell','id':self.user,'channels':['email']},{'source':'trusttunnel','id':'1','channels':['email']}]:
+            self.assertEqual(self.job('config.send',bad).status_code,422,bad)
+        # Telegram needs an explicit chat ID; TrustTunnel e-mail falls back to the login.
+        self.assertEqual(self.job('config.send',{'source':'trusttunnel','id':self.user,'channels':['telegram']}).status_code,422)
+        self.assertEqual(self.job('config.send',{'source':'trusttunnel','id':999999,'channels':['email']}).status_code,404)
+        self.assertEqual(self.job('config.send',{'source':'trusttunnel','id':self.user,'channels':['email']}).status_code,200)
+        self.assertEqual(self.job('config.send',{'source':'trusttunnel','id':self.user,'channels':['email']}).status_code,429)
+    def test_config_send_email_and_telegram_without_persisting_secrets(self):
+        self.deliver_setup(chat=424242)
+        calls=[]
+        def fake_agent(op,data=None):
+            calls.append((op,data))
+            return {'hysteria_users':[]} if op=='snapshot' else {'message_id':1}
+        sent=[]
+        with patch.object(ui,'agent',side_effect=fake_agent),patch.object(ui.config_delivery,'smtp_send',side_effect=sent.append):
+            r=self.job('config.send',{'source':'trusttunnel','id':self.user,'channels':['telegram','email']});self.assertEqual(r.status_code,200,r.text)
+            ui.work_once()
+        msg=sent[0];self.assertEqual(msg['To'],'test@example.invalid')
+        files={part.get_filename():part.get_content() for part in msg.iter_attachments()}
+        self.assertTrue(any(n.endswith('.toml') and b'delivered-secret' in v for n,v in files.items()))
+        self.assertTrue(files['qr-1.png'].startswith(b'\x89PNG'))
+        self.assertIn('tt://',msg.get_body().get_content())
+        ops=[op for op,_ in calls if op.startswith('telegram')]
+        self.assertEqual(ops.count('telegram.file'),2);self.assertIn('telegram.send',ops)
+        self.assertTrue(all(d['chat_id']==424242 for op,d in calls if op.startswith('telegram')))
+        with ui.connect() as c:
+            job=c.execute("SELECT state,payload,result FROM jobs WHERE action='config.send'").fetchone()
+            self.assertEqual(job['state'],'success',job['result'])
+            stored=str(dict(job))+str(c.execute('SELECT * FROM audit').fetchall())
+        self.assertNotIn('delivered-secret',stored);self.assertNotIn('tt://',stored)
+    def test_config_send_partial_failure_is_not_retried_and_hides_errors(self):
+        self.deliver_setup(chat=424242)
+        def fake_agent(op,data=None):
+            if op=='telegram.file':raise RuntimeError('upstream echoed delivered-secret')
+            return {'hysteria_users':[]} if op=='snapshot' else {'message_id':1}
+        with patch.object(ui,'agent',side_effect=fake_agent),patch.object(ui.config_delivery,'smtp_send') as smtp:
+            self.job('config.send',{'source':'trusttunnel','id':self.user,'channels':['email','telegram']});ui.work_once()
+            self.assertFalse(ui.work_once());smtp.assert_called_once()
+        with ui.connect() as c:job=c.execute("SELECT state,result FROM jobs WHERE action='config.send'").fetchone()
+        self.assertEqual(job['state'],'failed');self.assertIn('E-mail: принято',job['result']);self.assertIn('Telegram: ошибка',job['result'])
+        self.assertNotIn('delivered-secret',job['result'])
+    def test_config_send_refuses_blocked_or_keyless_users(self):
+        db.set_settings({'smtp_host':'smtp.example.invalid'})
+        with patch.object(ui.config_delivery,'smtp_send') as smtp:
+            self.job('config.send',{'source':'trusttunnel','id':self.user,'channels':['email']});ui.work_once();smtp.assert_not_called()
+        with ui.connect() as c:self.assertIn('нет действующих ключей',c.execute("SELECT result FROM jobs").fetchone()[0])
+        hy={'id':7,'username':'blocked-user','deleted':1}
+        with patch.object(ui,'agent',return_value={'hysteria_users':[hy]}),patch.object(ui.config_delivery,'smtp_send') as smtp:
+            self.post('contacts',{'source':'hysteria','id':7,'email':'h@example.invalid'})
+            self.job('config.send',{'source':'hysteria','id':7,'channels':['email']});ui.work_once();smtp.assert_not_called()
+    def test_qr_png_is_valid_and_bounded(self):
+        import struct,zlib
+        png=ui.config_delivery.qr_png('hysteria2://secret@example.invalid:443/?sni=example.invalid#user')
+        self.assertTrue(png.startswith(b'\x89PNG\r\n\x1a\n'))
+        width,height=struct.unpack('>II',png[16:24]);self.assertEqual(width,height)
+        idat=png[png.index(b'IDAT')+4:png.index(b'IEND')-8];self.assertEqual(len(zlib.decompress(idat)),height*(width+1))
+        self.assertIsNone(ui.config_delivery.qr_png('x'*5000))
+
     def test_validation_rejects_injection_and_nonexistent_contacts(self):
         self.assertEqual(self.job('system.shell',{'cmd':'id'}).status_code,422)
         self.assertEqual(self.job('trusttunnel.block',{'id':'1/../../'}).status_code,422)
@@ -207,5 +277,17 @@ class AgentTests(unittest.TestCase):
         with patch('builtins.open',mock_open()),patch.object(agent.fcntl,'flock'),patch.object(agent,'route_snapshot',return_value={'revision':'new'}),patch.object(agent,'run') as run:
             with self.assertRaises(agent.Rejected):agent.apply_routes({'exit':'primary','rules':[],'revision':'old'})
             run.assert_not_called()
+
+    def test_telegram_file_validation_and_multipart(self):
+        good={'chat_id':5,'kind':'photo','filename':'qr-1.png','data':base64.b64encode(b'\x89PNG\r\n\x1a\nrest').decode(),'caption':'phone'}
+        with patch.object(agent,'telegram_call',return_value={'message_id':3}) as call:
+            self.assertEqual(agent.dispatch('telegram.file',good),{'message_id':3})
+            method,body,ctype=call.call_args[0]
+            self.assertEqual(method,'sendPhoto');self.assertIn(b'filename="qr-1.png"',body);self.assertTrue(ctype.startswith('multipart/form-data; boundary='))
+            for bad in [dict(good,kind='video'),dict(good,filename='../etc/passwd'),dict(good,filename='a"b.png'),dict(good,chat_id=-1),
+                        dict(good,data='not base64!'),dict(good,data=base64.b64encode(b'GIF89a').decode()),
+                        dict(good,kind='document',data=base64.b64encode(b'x'*(agent.TG_FILE_LIMIT+1)).decode())]:
+                with self.assertRaises(agent.Rejected):agent.dispatch('telegram.file',bad)
+            self.assertEqual(call.call_count,1)
 
 if __name__=='__main__':unittest.main(verbosity=2)

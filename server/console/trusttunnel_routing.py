@@ -25,26 +25,40 @@ _THREAD = None
 
 
 def relay_config(profile):
-    """Translate the root-managed authenticated exit, not client credentials."""
-    socks = profile['outbound']['socks5']
-    address = socks['addr']
-    # Deployment uses IPv4 WireGuard addresses. Reject domain lookup/IPv6 ambiguity.
+    """Apply domain/CIS policy before the selected authenticated interserver exit."""
     import ipaddress
-    host, port = address.rsplit(':', 1)
+    socks = profile['outbound']['socks5']
+    host, port = socks['addr'].rsplit(':', 1)
     if ipaddress.ip_address(host).version != 4 or not 1 <= int(port) <= 65535:
-        raise ValueError('Invalid WireGuard SOCKS address')
-    if any(not isinstance(socks.get(k), str) or not socks[k] for k in ('username', 'password')):
+        raise ValueError('Invalid SOCKS address')
+    outbound = {'type': 'socks', 'tag': 'egress', 'server': host, 'server_port': int(port), 'version': '5'}
+    if host == '127.0.0.1' and int(port) == 10810:
+        # Host tt-primary SOCKS, reached from the container via the docker bridge.
+        # TrustTunnel client refuses a non-loopback listener without credentials.
+        outbound['server'] = '172.18.0.1'
+    if all(isinstance(socks.get(k), str) and socks[k] for k in ('username', 'password')):
+        outbound.update(username=socks['username'], password=socks['password'])
+    else:
         raise ValueError('Missing upstream credentials')
     return {
         'log': {'disabled': True},
+        'dns': {'servers': [{'type': 'udp', 'tag': 'local-dns', 'server': '172.18.0.53'}], 'final': 'local-dns', 'strategy': 'ipv4_only'},
         'inbounds': [{'type': 'socks', 'tag': 'endpoint', 'listen': '127.0.0.1', 'listen_port': 11080}],
-        'outbounds': [
-            {'type': 'socks', 'tag': 'egress', 'server': host, 'server_port': int(port),
-             'version': '5', 'username': socks['username'], 'password': socks['password']},
-            {'type': 'direct', 'tag': 'dns-direct'},
-        ],
-        # Preserve the existing host-side DNS interception on TCP/UDP 53.
-        'route': {'rules': [{'port': 53, 'action': 'route', 'outbound': 'dns-direct'}], 'final': 'egress'},
+        'outbounds': [outbound, {'type': 'direct', 'tag': 'dns-direct'}],
+        'route': {
+            'default_domain_resolver': 'local-dns',
+            'rule_set': [{'type': 'local', 'tag': 'cis', 'format': 'source', 'path': '/console-routing/cis.json'}],
+            'rules': [
+                {'port': 53, 'action': 'route', 'outbound': 'dns-direct'},
+                {'action': 'sniff'},
+                {'domain_suffix': ['hostkey.ru'], 'action': 'route', 'outbound': 'egress'},
+                {'domain_suffix': ['ru', 'su', 'xn--p1ai'], 'action': 'route', 'outbound': 'dns-direct'},
+                {'action': 'resolve', 'strategy': 'ipv4_only'},
+                {'ip_is_private': True, 'action': 'reject'},
+                {'rule_set': ['cis'], 'action': 'route', 'outbound': 'dns-direct'},
+            ],
+            'final': 'egress',
+        },
     }
 
 

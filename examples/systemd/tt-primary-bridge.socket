@@ -1,0 +1,8 @@
+[Unit]
+Description=Expose tt-primary SOCKS to docker bridge (client is slow on non-loopback sockets)
+[Socket]
+ListenStream=172.18.0.1:10810
+FreeBind=yes
+NoDelay=yes
+[Install]
+WantedBy=sockets.target

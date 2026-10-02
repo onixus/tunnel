@@ -1,0 +1,12 @@
+[Unit]
+Description=Forward docker bridge SOCKS to tt-primary loopback listener
+Requires=tt-primary-bridge.socket
+After=tt-primary.service
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=2048 127.0.0.1:10810
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+LimitNOFILE=16384

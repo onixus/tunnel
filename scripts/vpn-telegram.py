@@ -5,6 +5,7 @@ from pathlib import Path
 CFG=Path('/etc/vpn-telegram/config.json')
 STATE=Path('/var/lib/vpn-telegram/state.json')
 PENDING={}
+ID_REPLIES={}
 PANEL_URL='https://onixus-rf.duckdns.org/console/'
 def command(args,timeout=15):
  try:
@@ -26,7 +27,7 @@ def allowed(update):
  return obj.get('from',{}).get('id')==CONFIG['owner'] and chat.get('id')==CONFIG['owner'] and chat.get('type')=='private'
 def status():
  lines=['VPN: '+datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')]
- for name in ['h-ui','wg-quick@wg-private','wg-quick@wg-reserve','certbot.timer']:
+ for name in ['h-ui','tt-primary','wg-quick@wg-private','wg-quick@wg-reserve','certbot.timer']:
   lines.append(name+': '+command(['systemctl','is-active',name])[1])
  lines.append('Console: '+command(['docker','inspect','vpn-console','--format','{{.State.Status}} / {{.State.Health.Status}}'])[1])
  lines.append('TrustTunnel: '+command(['docker','inspect','trusttunnel-web','--format','{{.State.Status}} / {{.State.Health.Status}}'])[1])
@@ -44,8 +45,17 @@ def confirm(action):
  if action not in ACTIONS:return
  nonce=secrets.token_hex(8);PENDING.clear();PENDING[nonce]=(action,time.time()+120)
  send(ACTIONS[action][1]+'? Клиенты могут кратко переподключиться. Подтверждение действует 2 минуты.',[[{'text':'Подтвердить','callback_data':'confirm:'+nonce},{'text':'Отмена','callback_data':'cancel'}]])
+def tell_id(update):
+ # Other users may only learn their own numeric ID, needed to receive configs from the console.
+ msg=update.get('message') or {};chat=msg.get('chat',{});sender=msg.get('from',{}).get('id')
+ text=(msg.get('text') or '').split();cmd=text[0].split('@')[0].lower() if text else ''
+ if chat.get('type')!='private' or not isinstance(sender,int) or sender!=chat.get('id') or cmd not in ('/start','/id'):return
+ if time.time()-msg.get('date',0)>180 or time.time()-ID_REPLIES.get(sender,0)<60:return
+ if len(ID_REPLIES)>1000:ID_REPLIES.clear()
+ ID_REPLIES[sender]=time.time()
+ api('sendMessage',{'chat_id':sender,'text':f'Ваш Telegram ID: {sender}\nПередайте его администратору VPN, чтобы получать конфигурации в этот чат.'})
 def handle(update):
- if not allowed(update):return
+ if not allowed(update):tell_id(update);return
  if 'callback_query' in update:
   cb=update['callback_query'];api('answerCallbackQuery',{'callback_query_id':cb['id']});data=cb.get('data','')
   if data=='cancel':PENDING.clear();send('Отменено.');return

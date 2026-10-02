@@ -295,11 +295,28 @@ def test_prepare_preserves_every_acl_and_ignores_unused_exit(monkeypatch):
     assert config['acl']['inline'] == rules
 
 
-def test_relay_has_no_direct_fallback_except_dns():
+def test_relay_splits_ru_cis_direct_and_everything_else_to_egress():
     c = tt.relay_config(profile())
     assert c['inbounds'][0]['listen'] == '127.0.0.1'
-    assert c['route'] == {'rules': [{'port': 53, 'action': 'route', 'outbound': 'dns-direct'}], 'final': 'egress'}
     assert c['outbounds'][0]['password'] == 'not-a-live-secret'
+    rules, route = c['route']['rules'], c['route']
+    assert rules[0] == {'port': 53, 'action': 'route', 'outbound': 'dns-direct'}
+    # Forced exception precedes the national-zone bypass.
+    assert rules.index({'domain_suffix': ['hostkey.ru'], 'action': 'route', 'outbound': 'egress'}) < \
+        rules.index({'domain_suffix': ['ru', 'su', 'xn--p1ai'], 'action': 'route', 'outbound': 'dns-direct'})
+    assert {'ip_is_private': True, 'action': 'reject'} in rules
+    assert rules[-1] == {'rule_set': ['cis'], 'action': 'route', 'outbound': 'dns-direct'}
+    assert route['final'] == 'egress'
+
+
+def test_relay_reaches_loopback_trusttunnel_socks_through_bridge_with_credentials():
+    p = profile()
+    p['outbound']['socks5']['addr'] = '127.0.0.1:10810'
+    out = tt.relay_config(p)['outbounds'][0]
+    assert (out['server'], out['server_port'], out['username']) == ('172.18.0.1', 10810, 'root-exit-user')
+    p['outbound']['socks5']['password'] = ''
+    with pytest.raises(ValueError):
+        tt.relay_config(p)
 
 
 @pytest.mark.parametrize('address', ['localhost:1080', '[::1]:1080', '10.254.77.2:0', '10.254.77.2:65536'])

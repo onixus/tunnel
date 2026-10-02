@@ -179,11 +179,11 @@ function users() {
       [
         ...(state.users || []).map(
           (u) =>
-            `<tr data-search="${esc(u.email.toLowerCase())}" data-protocol="TrustTunnel"><td>${esc(u.email)}<small>#${u.id}</small></td><td>${pill("running", "TrustTunnel")}</td><td>${pill(u.status)}</td><td>—</td><td>${btn("Ключ", "user-key", `data-id="${u.id}"`)}${btn("Пароль", "password", `data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="trusttunnel" data-id="${u.id}"`)}${btn(u.status === "blocked" ? "Включить" : "Блокировать", "status", `data-source="trusttunnel" data-id="${u.id}" data-block="${u.status !== "blocked"}"`)}</td></tr>`,
+            `<tr data-search="${esc(u.email.toLowerCase())}" data-protocol="TrustTunnel"><td>${esc(u.email)}<small>#${u.id}</small></td><td>${pill("running", "TrustTunnel")}</td><td>${pill(u.status)}</td><td>—</td><td>${btn("Ключ", "user-key", `data-id="${u.id}"`)}${btn("Пароль", "password", `data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="trusttunnel" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="trusttunnel" data-id="${u.id}"`)}${btn(u.status === "blocked" ? "Включить" : "Блокировать", "status", `data-source="trusttunnel" data-id="${u.id}" data-block="${u.status !== "blocked"}"`)}</td></tr>`,
         ),
         ...h.map(
           (u) =>
-            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="Hysteria"><td>${esc(u.username)}<small>#${u.id}</small></td><td>${pill("running", "Hysteria")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>${bytes(u.download + u.upload)}<small>До ${new Date(u.expire_time).toLocaleDateString("ru")}</small></td><td>${btn("Ключ", "export", `data-source="hysteria" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="hysteria" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="hysteria" data-id="${u.id}"`)}${btn("Лимиты", "hysteria-limits", `data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="hysteria" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="hysteria" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
+            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="Hysteria"><td>${esc(u.username)}<small>#${u.id}</small></td><td>${pill("running", "Hysteria")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>${bytes(u.download + u.upload)}<small>До ${new Date(u.expire_time).toLocaleDateString("ru")}</small></td><td>${btn("Ключ", "export", `data-source="hysteria" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="hysteria" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="hysteria" data-id="${u.id}"`)}${btn("Лимиты", "hysteria-limits", `data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="hysteria" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="hysteria" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="hysteria" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
         ),
       ],
     ) +
@@ -475,6 +475,29 @@ async function handle(b) {
   }
   if (a === "export" || a === "export-qr") {
     showConfigExport(source, id, a === "export-qr");
+  }
+  if (a === "send-config") {
+    const c =
+        (state.contacts || []).find(
+          (c) => c.source === source && c.user_id === id,
+        ) || {},
+      user =
+        source === "trusttunnel"
+          ? (state.users || []).find((u) => u.id === id)
+          : (Array.isArray(state.hysteria_users) ? state.hysteria_users : []).find((u) => u.id === id),
+      email = c.email || (source === "trusttunnel" ? user?.email : ""),
+      chat = c.chat_id,
+      option = (value, label, address, extra = "") =>
+        `<label><input type="checkbox" name="channel" value="${value}" ${address ? "checked" : "disabled"}> ${label}: ${address ? esc(address) : "не задан"}${extra}</label>`;
+    modal(
+      "Отправить конфигурацию",
+      `<form id="send-config-form"><p>${esc(source === "hysteria" ? "Hysteria" : "TrustTunnel")} · ${esc(user?.email || user?.username || "#" + id)}</p>${option("email", "E-mail", email, state.smtp ? "" : " <small>(SMTP не настроен)</small>")}${option("telegram", "Telegram", chat)}<div class="note">Будут отправлены ссылка, QR-код и файл конфигурации со всеми данными доступа${source === "trusttunnel" ? " для каждого действующего ключа" : ""}. Получатель Telegram должен заранее открыть бота и нажать Start (бот сообщит его ID). Адреса меняются кнопкой «Контакт».</div><div class="actions"><button type="submit" class="primary">Отправить</button></div></form>`,
+    );
+    formSubmit("send-config-form", async (f) => {
+      const channels = f.getAll("channel");
+      if (!channels.length) throw new Error("Выберите хотя бы один канал");
+      await job("config.send", { source, id, channels });
+    });
   }
   if (a === "contact") {
     const c =

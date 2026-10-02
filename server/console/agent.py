@@ -268,18 +268,45 @@ def server_update(data):
     else: raise Rejected('Неизвестный компонент')
     return {'message':'Обновление проверено и применено'}
 
-def telegram(data):
-    cfg=json.loads(TG.read_text()); chat=data.get('chat_id'); text=data.get('text')
-    if not isinstance(chat,int) or chat<=0 or not isinstance(text,str) or not 1<=len(text)<=3500:
-        raise Rejected('Неверный получатель или сообщение')
-    req=urllib.request.Request('https://api.telegram.org/bot'+cfg['token']+'/sendMessage',
-        data=json.dumps({'chat_id':chat,'text':text,'disable_web_page_preview':True}).encode(),headers={'Content-Type':'application/json'})
+class NoRedirect(urllib.request.HTTPRedirectHandler):
     # No redirects: the bot token must never leave Telegram.
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self,*args): return None
-    with urllib.request.build_opener(NoRedirect).open(req,timeout=20) as r: result=json.load(r)
+    def redirect_request(self,*args): return None
+
+def telegram_call(method,body,content_type):
+    cfg=json.loads(TG.read_text())
+    req=urllib.request.Request('https://api.telegram.org/bot'+cfg['token']+'/'+method,data=body,headers={'Content-Type':content_type})
+    with urllib.request.build_opener(NoRedirect).open(req,timeout=30) as r: result=json.load(r)
     if not result.get('ok'): raise Rejected('Telegram отклонил сообщение')
     return {'message_id':result['result']['message_id']}
+
+def telegram(data):
+    chat=data.get('chat_id'); text=data.get('text')
+    if not isinstance(chat,int) or chat<=0 or not isinstance(text,str) or not 1<=len(text)<=3500:
+        raise Rejected('Неверный получатель или сообщение')
+    return telegram_call('sendMessage',json.dumps({'chat_id':chat,'text':text,'disable_web_page_preview':True}).encode(),'application/json')
+
+# Fits the agent's 64 KiB request line after base64 and JSON framing.
+TG_FILE_LIMIT=40000
+
+def telegram_file(data):
+    """Send one console-rendered file (config or QR PNG). Content is never logged."""
+    chat=data.get('chat_id'); kind=data.get('kind'); name=data.get('filename'); caption=data.get('caption','')
+    if not isinstance(chat,int) or chat<=0 or kind not in ('photo','document'): raise Rejected('Неверный получатель или тип файла')
+    if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}',name): raise Rejected('Недопустимое имя файла')
+    if not isinstance(caption,str) or len(caption)>1000: raise Rejected('Слишком длинная подпись')
+    try: raw=base64.b64decode(data.get('data',''),validate=True)
+    except (ValueError,TypeError): raise Rejected('Некорректные данные файла')
+    if not 1<=len(raw)<=TG_FILE_LIMIT: raise Rejected('Недопустимый размер файла')
+    if kind=='photo' and not raw.startswith(b'\x89PNG\r\n\x1a\n'): raise Rejected('Фото должно быть PNG')
+    boundary='----vpnconsole'+secrets.token_hex(12); parts=[]
+    def field(key,value):
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
+    field('chat_id',str(chat))
+    if caption: field('caption',caption)
+    mime='image/png' if kind=='photo' else 'application/octet-stream'
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{kind}"; filename="{name}"\r\nContent-Type: {mime}\r\n\r\n'.encode()+raw+b'\r\n')
+    parts.append(f'--{boundary}--\r\n'.encode())
+    return telegram_call('sendPhoto' if kind=='photo' else 'sendDocument',b''.join(parts),'multipart/form-data; boundary='+boundary)
 
 def adblock_snapshot():
     state=json.loads(Path('/opt/vpn-adblock/status.json').read_text())
@@ -308,6 +335,7 @@ def dispatch(op,data):
     if op=='updates.promote': return promote(data)
     if op=='updates.server': return server_update(data)
     if op=='telegram.send': return telegram(data)
+    if op=='telegram.file': return telegram_file(data)
     if op=='hysteria.create':
         name=data.get('username','')
         if not re.fullmatch('[a-zA-Z0-9_-]{6,32}',name): raise Rejected('Логин: 6–32 латинских символа')
