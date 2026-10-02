@@ -83,3 +83,5 @@ ssh -N -o ExitOnForwardFailure=yes \
 - [Защита HTTPS-входа и Telegram-кнопка консоли](docs/web-protection.md) — fail2ban для TCP 443 с поддержкой Docker и IPv6.
 
 - [Локальные фильтры рекламы и трекеров](docs/local-adblock.md) — ежедневное обновление из нескольких источников, усиление RU/SU и состояние в консоли.
+
+- [Primary interserver TrustTunnel and WireGuard restoration](docs/interserver-trusttunnel.md)
