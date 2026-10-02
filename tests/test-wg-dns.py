@@ -23,6 +23,10 @@ class Tests(unittest.TestCase):
     self.assertEqual(calls[-1],('wg','set','wg-private','peer','existing-public-key','endpoint','151.241.234.124:51830'))
     self.assertEqual(json.loads(mapped('/var/lib/wg-dns-refresh/wg-private.json').read_text())['ip'],'151.241.234.124')
     if backend=='nft':self.assertNotIn('139.100.233.173',nft.read_text()+wg.read_text())
+ def test_disabled_peer_changes_nothing(self):
+  with patch.object(m,'resolve') as resolve,patch.object(m,'run') as run:
+   m.refresh({'interface':'wg-private','enabled':False})
+   resolve.assert_not_called();run.assert_not_called()
  def test_dns_failure_changes_nothing(self):
   with patch.object(m,'resolve',side_effect=OSError('DNS unavailable')),patch.object(m,'run') as run:
    with self.assertRaises(OSError):m.refresh({'hostname':'node.duckdns.org'})

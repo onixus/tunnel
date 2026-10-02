@@ -33,6 +33,7 @@ def collect():
  if dp>=90:issues.append('Disk >=90%')
  if load[1]>2*(os.cpu_count() or 1):issues.append('5-minute load > 2 x CPU')
  services=['h-ui','fail2ban','wg-quick@wg-private','wg-quick@wg-reserve'] if ROLE=='vpn' else ['maddy','hysteria-exit','wg-quick@wg-private']
+ services=CFG.get('services',services)
  for service in services:
   rc,out=cmd(['systemctl','is-active',service]);lines.append(f'{service}: {out}')
   if rc:issues.append(service+' inactive')

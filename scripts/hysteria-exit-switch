@@ -145,7 +145,7 @@ def main():
         known = {p['outbound']['name'] + '(all)' for p in profiles.values()}
         if current['acl']['inline'][-1] not in known:
             raise RuntimeError('Unknown catch-all rule; refusing to replace custom configuration')
-        if current['acl']['inline'][-1] == target:
+        if current['acl']['inline'][-1] == target and profile['outbound'] in current.get('outbounds', []):
             print('Already selected; Hysteria egress:', probe_hysteria(profile['expected_ip']))
             return
         BACKUPS.mkdir(mode=0o700, exist_ok=True)

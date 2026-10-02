@@ -10,6 +10,8 @@ def resolve(host):
   raise RuntimeError('Expected one public IPv4 address; retaining previous state')
  return ips[0]
 def refresh(cfg):
+ if not cfg.get('enabled',True):
+  print(cfg['interface']+': administratively disabled');return
  ip=resolve(cfg['hostname']);interface=cfg['interface'];port=int(cfg['port'])
  peers=run('wg','show',interface,'peers').splitlines()
  if len(peers)!=1:raise RuntimeError('Expected exactly one configured WireGuard peer')

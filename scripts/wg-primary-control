@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+mode="${SSH_ORIGINAL_COMMAND:-${1:-}}"
+case "$mode" in enable|disable) ;; *) echo 'Only enable or disable supported' >&2; exit 2;; esac
+python3 - "$mode" <<'PY'
+import sys,json
+from pathlib import Path
+enabled=sys.argv[1]=='enable'
+p=Path('/etc/wg-dns-refresh.json');c=json.loads(p.read_text())
+for i in c:
+ if i['interface']=='wg-private':i['enabled']=enabled
+p.write_text(json.dumps(c));p.chmod(0o600)
+p=Path('/etc/vpn-report/smtp.json');c=json.loads(p.read_text());c['services']=['maddy','tt-exit']+(['hysteria-exit','wg-quick@wg-private'] if enabled else []);p.write_text(json.dumps(c));p.chmod(0o600)
+PY
+if [ "$mode" = enable ]; then
+ systemctl enable --now wg-quick@wg-private hysteria-exit
+ systemctl start wg-dns-refresh.service
+else
+ systemctl disable --now hysteria-exit wg-quick@wg-private
+fi
