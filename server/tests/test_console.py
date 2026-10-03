@@ -15,11 +15,11 @@ from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[2]
 PORTAL_ROOT=Path(os.environ.get('RTRUST_SOURCE_DIR',str(ROOT.parent/'R-Trusttunnel')))
-if not (PORTAL_ROOT/'server/upstream/app').is_dir():
-    raise SystemExit('Set RTRUST_SOURCE_DIR to a Rust-trustvpn checkout with server/upstream and the built rtrust-codec')
+if not (PORTAL_ROOT/'server/overlay/app').is_dir():
+    raise SystemExit('Set RTRUST_SOURCE_DIR to a Rust-trustvpn checkout with server/overlay and the built rtrust-codec')
 TMP=tempfile.TemporaryDirectory(prefix='vpn-console-tests-')
 os.environ.update(DATA_DIR=TMP.name,SECRET_KEY=secrets.token_hex(32),ADMIN_PASSWORD=secrets.token_hex(24),CONSOLE_DATA=TMP.name+'/console')
-sys.path.insert(0,str(PORTAL_ROOT/'server/upstream')); sys.path.insert(0,str(ROOT/'server/console'))
+sys.path.insert(0,str(ROOT/'server/upstream')); sys.path.insert(0,str(ROOT/'server/console'))
 import app
 app.__path__.append(str(PORTAL_ROOT/'server/overlay/app'))
 os.environ.setdefault('RTRUST_CODEC',str(PORTAL_ROOT/'target/debug/rtrust-codec'))
