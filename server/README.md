@@ -8,6 +8,9 @@ identity, existing VPN accounts and the private Telegram bot.
 - [Deployment entry point](../deploy/README.md)
 - [Live acceptance, scope and rollback](../docs/unified-console.md)
 
-The portal runtime and Rust codec come from the existing installed portal image
-and [Rust-trustvpn](https://github.com/onixus/Rust-trustvpn). This repository does
-not contain private databases, account credentials, bot tokens or signing keys.
+`upstream/` is the TrustTunnel portal source that the console and the
+[patches](../patches) apply to; it was moved here from Rust-trustvpn so the portal
+has one owner. The profile-exchange overlay and the Rust codec stay in
+[Rust-trustvpn](https://github.com/onixus/Rust-trustvpn), and the runtime still
+inherits the installed portal image. This repository does not contain private
+databases, account credentials, bot tokens or signing keys.

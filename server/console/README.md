@@ -126,7 +126,8 @@ do not overwrite it with an old snapshot without a separate recovery decision.
 
 ## Validation
 
-The runtime inherits the existing portal image; portal modules and the Rust codec
+The runtime inherits the existing portal image. The portal source lives in
+[`server/upstream`](../upstream); the profile-exchange overlay and the Rust codec
 are maintained in [Rust-trustvpn](https://github.com/onixus/Rust-trustvpn).
 This repository carries the console and deployment tooling, not a duplicate Rust
 workspace. Local API tests require a checkout of that companion repository
