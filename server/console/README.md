@@ -100,6 +100,21 @@ crash is manual** using the retained binary/compose; unlike routing there is no
 watchdog for server package installation yet. Only stage packages in a maintenance
 window with SSH access and retained profile encryption keys.
 
+## Protocol lifecycle
+
+`protocols.py` and `amnezia.py` run inside the agent. `protocols.check` reads release
+metadata from a fixed registry of the developers' GitHub repositories;
+`protocols.install`/`protocols.update` accept only a registry name and a version that
+check discovered. Release binaries are verified against the SHA-256 GitHub publishes
+for the asset; AmneziaWG is built from source at the commit recorded for the tag.
+No URL, path, image or command comes from the browser. Every replacement keeps the
+previous binary, image or container until the new one passes its check. The fresh
+Hysteria host install runs a fixed root-owned script as a transient systemd unit,
+because host users and units are outside the agent's sandbox. The older
+operator-staged packages below remain available. AmneziaWG client keys are kept in
+`/opt/amneziawg/state.json` (root-only) and are returned only by the audited export
+route. Details and limits: [protocols.md](../../docs/protocols.md).
+
 ## Security and recovery
 
 Mutations require a live administrator session plus a session-bound CSRF token and

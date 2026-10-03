@@ -14,6 +14,7 @@ CHANNELS = ('email', 'telegram')
 TG_TEXT_LIMIT = 3500
 INSTRUCTIONS = {
     'hysteria': 'Импортируйте ссылку hysteria2:// в клиент (Hiddify, v2rayN, NekoBox, Streisand) или отсканируйте QR-код.',
+    'amnezia': 'Импортируйте файл .conf в AmneziaVPN или AmneziaWG (версия с поддержкой AmneziaWG 3.1) либо отсканируйте QR-код.',
     'trusttunnel': 'Импортируйте ссылку в приложение TrustTunnel / R-TrustTunnel, отсканируйте QR-код или используйте TOML в консольном клиенте.',
 }
 WARNING = 'Конфигурация содержит данные доступа. Не пересылайте её другим людям.'
@@ -57,6 +58,16 @@ def hysteria_bundle(user, export):
     name = user['username']
     files = [(f'hysteria-{name}.txt', (link + '\n').encode(), 'text/plain')]
     return {'title': 'Hysteria — ' + name, 'kind': 'hysteria', 'items': [{'name': name, 'link': link, 'files': files}]}
+
+
+def amnezia_bundle(user, export):
+    if user.get('deleted'):
+        raise DeliveryError('Пользователь AmneziaWG заблокирован; конфигурация не отправлена')
+    # AmneziaWG has no link form: the .conf text is what clients import and scan.
+    conf = export({'id': user['id']})['content']
+    name = user['username']
+    files = [(f'amneziawg-{name}.conf', conf.encode(), 'text/plain')]
+    return {'title': 'AmneziaWG — ' + name, 'kind': 'amnezia', 'items': [{'name': name, 'link': conf, 'files': files}]}
 
 
 def trusttunnel_bundle(user):

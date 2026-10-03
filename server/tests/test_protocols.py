@@ -1,0 +1,322 @@
+"""Protocol lifecycle and AmneziaWG: fake GitHub, fake Docker, temporary state. No network, no live VPN."""
+import base64
+import hashlib
+import hmac
+import io
+import json
+from pathlib import Path
+import random
+import sys
+import types
+import urllib.request
+
+import pytest
+from fastapi.testclient import TestClient
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'server/console'))
+import amnezia
+import protocols
+from routing_policy import PolicyError
+
+GO = [{'name': 'v3.1.20260828', 'commit': {'sha': 'a' * 40}}, {'name': 'v3.1.20260812', 'commit': {'sha': 'b' * 40}},
+      {'name': 'v3.0.20260805', 'commit': {'sha': 'c' * 40}}, {'name': 'v3.1.20260901-rc', 'commit': {'sha': 'd' * 40}}]
+TOOLS = [{'name': 'v3.1.20260812', 'commit': {'sha': 'e' * 40}}, {'name': 'v3.1.20260901', 'commit': {'sha': 'f' * 40}}]
+DIGEST = 'sha256:' + '1' * 64
+
+
+def release(tag, asset, **extra):
+    return {'tag_name': tag, 'published_at': '2026-09-01T00:00:00Z', 'assets': [{'name': asset, 'size': 1000, 'digest': DIGEST}], **extra}
+
+
+@pytest.fixture
+def host(tmp_path, monkeypatch):
+    """Temporary agent paths and a recording Docker stand-in."""
+    home = tmp_path / 'amneziawg'
+    monkeypatch.setattr(amnezia, 'STATE', home / 'state.json')
+    monkeypatch.setattr(amnezia, 'RUNTIME', home / 'runtime')
+    for name in ('CACHE', 'ROLLBACK', 'BUILD', 'ASSETS'):
+        monkeypatch.setattr(protocols, name, tmp_path / name.lower())
+    (tmp_path / 'assets/amnezia').mkdir(parents=True)
+    for name in ('Dockerfile', 'entrypoint.sh'):
+        (tmp_path / 'assets/amnezia' / name).write_text('fixture')
+    monkeypatch.setattr(protocols.service_routes, 'trusted', lambda path, executable=False: path.is_file())
+    protocols._MEMO['value'] = None
+    box = {'calls': [], 'port': None, 'containers': set()}
+
+    def run(args, timeout=30, env=None):
+        box['calls'].append(args)
+        if args[:2] == ['docker', 'run']:
+            box['containers'].add(args[args.index('--name') + 1])
+        return ''
+
+    def quiet(args, timeout=8):
+        box['calls'].append(args)
+        if args[:2] == ['docker', 'inspect']:
+            return (0, 'running') if args[2] in box['containers'] else (1, '')
+        if args[:2] == ['docker', 'exec'] and 'listen-port' in args:
+            return 0, str(box['port'] or '')
+        if args[:3] == ['docker', 'rm', '-f']:
+            box['containers'].discard(args[3])
+        return 0, ''
+    monkeypatch.setattr(protocols, 'run', run)
+    monkeypatch.setattr(protocols, 'quiet', quiet)
+    monkeypatch.setattr(amnezia, 'run', run)
+    monkeypatch.setattr(amnezia, 'running', lambda: amnezia.CONTAINER in box['containers'])
+    monkeypatch.setattr(protocols.time, 'sleep', lambda s: None)
+    return box
+
+
+def test_awg31_parameters_satisfy_protocol_constraints():
+    for seed in range(200):
+        p = amnezia.new_params(random.Random(seed))
+        # Header protection (AWG 3+) requires every padding to be at least 12.
+        assert all(p[k] >= 12 for k in ('S1', 'S2', 'S3', 'S4'))
+        assert len({148 + p['S1'], 92 + p['S2'], 64 + p['S3']}) == 3
+        assert 4 <= p['Jc'] <= 12 and p['Jmin'] <= p['Jmax'] < amnezia.MTU
+        ranges = sorted(tuple(map(int, p[k].split('-'))) for k in ('H1', 'H2', 'H3', 'H4'))
+        assert all(4 < low <= high < 2 ** 31 for low, high in ranges)
+        assert all(a[1] < b[0] for a, b in zip(ranges, ranges[1:]))
+        assert len(base64.b64decode(p['HeaderProtectionKey'], validate=True)) == 32
+
+
+@pytest.mark.parametrize('port', [None, '47443', 80, 443, 8443, 51831, 70000, True])
+def test_port_is_validated(port):
+    with pytest.raises(PolicyError):
+        amnezia.new_state(port)
+
+
+def test_peer_lifecycle_and_secret_boundaries(host):
+    with pytest.raises(PolicyError, match='не установлен'):
+        amnezia.users()
+    amnezia.save(amnezia.new_state(47443), sync=False)
+    for name in ('alice', 'bob-2'):
+        amnezia.dispatch('amnezia.create', {'username': name}, 'vpn.example.invalid')
+    for bad in ('ab', 'alice', 'bad name', '../x', 7):
+        with pytest.raises(PolicyError):
+            amnezia.dispatch('amnezia.create', {'username': bad}, 'vpn.example.invalid')
+    state = amnezia.load()
+    alice, bob = state['peers']
+    assert (alice['address'], bob['address']) == ('10.8.1.2', '10.8.1.3')
+    listing = json.dumps(amnezia.users())
+    for secret in (state['private_key'], alice['private_key'], alice['psk'], bob['psk']):
+        assert secret not in listing
+    conf = amnezia.dispatch('amnezia.export', {'id': 1}, 'vpn.example.invalid')['content']
+    assert 'Endpoint = vpn.example.invalid:47443' in conf and alice['private_key'] in conf
+    assert bob['private_key'] not in conf and state['private_key'] not in conf and state['public_key'] in conf
+    # Both sides carry identical AWG 3.1 obfuscation values.
+    server = (amnezia.RUNTIME / 'awg0.conf').read_text()
+    for key in amnezia.SHARED:
+        line = f'{key} = {state["params"][key]}'
+        assert line in conf and line in server
+    assert (amnezia.STATE.stat().st_mode & 0o777, (amnezia.RUNTIME / 'awg0.conf').stat().st_mode & 0o777) == (0o600, 0o600)
+
+    amnezia.dispatch('amnezia.block', {'id': 2}, 'h')
+    assert bob['public_key'] not in (amnezia.RUNTIME / 'awg0.conf').read_text()
+    with pytest.raises(PolicyError, match='заблокирован'):
+        amnezia.dispatch('amnezia.export', {'id': 2}, 'h')
+    amnezia.dispatch('amnezia.unblock', {'id': 2}, 'h')
+    amnezia.dispatch('amnezia.rotate', {'id': 1}, 'h')
+    rotated = amnezia.load()['peers'][0]
+    server = (amnezia.RUNTIME / 'awg0.conf').read_text()
+    assert rotated['public_key'] != alice['public_key'] and alice['public_key'] not in server and rotated['public_key'] in server
+    for op, data in (('amnezia.block', {'id': 99}), ('amnezia.block', {'id': '1'}), ('amnezia.delete', {'id': 1})):
+        with pytest.raises(PolicyError):
+            amnezia.dispatch(op, data, 'h')
+
+
+def test_live_reload_uses_one_fixed_command(host):
+    amnezia.save(amnezia.new_state(47443), sync=False)
+    host['containers'].add(amnezia.CONTAINER)
+    amnezia.dispatch('amnezia.create', {'username': 'alice'}, 'h')
+    assert host['calls'][-1] == ['docker', 'exec', 'amnezia-awg', 'bash', '-c', 'awg syncconf awg0 <(awg-quick strip awg0)']
+
+
+def test_discovery_keeps_only_stable_verifiable_releases(monkeypatch):
+    replies = {
+        'HyNetworks/hysteria/releases?per_page=30': [
+            release('app/v2.13.0', 'hysteria-linux-amd64', prerelease=True),
+            release('app/v2.12.4', 'hysteria-linux-amd64'),
+            {'tag_name': 'app/v2.12.5', 'assets': [{'name': 'hysteria-linux-amd64', 'size': 1000}]},  # no published digest
+            release('app/v2.12.3', 'hysteria-linux-arm64'),
+            release('evil/v9.9.9', 'hysteria-linux-amd64')],
+        'TrustTunnel/TrustTunnel/releases?per_page=30': [
+            release('v1.3.0-beta.1', 'trusttunnel-v1.3.0-beta.1-linux-x86_64.tar.gz'),
+            release('v1.1.0', 'trusttunnel-v1.1.0-linux-x86_64.tar.gz'), release('v1.2.0', 'trusttunnel-v1.2.0-linux-x86_64.tar.gz', draft=True)],
+        'amnezia-vpn/amneziawg-go/tags?per_page=50': GO,
+        'amnezia-vpn/amneziawg-tools/tags?per_page=50': TOOLS,
+    }
+    monkeypatch.setattr(protocols, 'api', lambda path: replies[path])
+    assert [r['version'] for r in protocols.discover('hysteria')] == ['2.12.4']
+    assert protocols.discover('trusttunnel') == [{'version': '1.1.0', 'tag': 'v1.1.0', 'sha256': '1' * 64, 'published': '2026-09-01'}]
+    awg = protocols.discover('amnezia')
+    # Only 3.1 tags; tools are never newer than the protocol tag they are paired with.
+    assert [(r['version'], r['commit'], r['tools_tag'], r['tools_commit']) for r in awg] == [
+        ('3.1.20260828', 'a' * 40, 'v3.1.20260812', 'e' * 40), ('3.1.20260812', 'b' * 40, 'v3.1.20260812', 'e' * 40)]
+    assert awg[0]['published'] == '2026-08-28'
+
+
+def test_redirects_cannot_leave_github():
+    handler = protocols.GitHubOnly()
+    request = urllib.request.Request('https://github.com/x')
+    for url in ('http://github.com/x', 'https://evil.invalid/x', 'https://githubusercontent.com.evil.invalid/x', 'file:///etc/passwd'):
+        assert handler.redirect_request(request, None, 302, 'Found', {}, url) is None
+    assert handler.redirect_request(request, None, 302, 'Found', {}, 'https://release-assets.githubusercontent.com/x') is not None
+
+
+def test_download_rejects_wrong_hash_and_oversize(tmp_path, monkeypatch):
+    monkeypatch.setattr(protocols, 'open_url', lambda url: io.BytesIO(b'artifact'))
+    protocols.download('https://github.com/x', tmp_path / 'ok', hashlib.sha256(b'artifact').hexdigest())
+    with pytest.raises(PolicyError, match='Хеш'):
+        protocols.download('https://github.com/x', tmp_path / 'bad', '0' * 64)
+    monkeypatch.setattr(protocols, 'LIMIT', 4)
+    with pytest.raises(PolicyError, match='размер'):
+        protocols.download('https://github.com/x', tmp_path / 'big', hashlib.sha256(b'artifact').hexdigest())
+
+
+def cache(**components):
+    protocols.amnezia.write(protocols.CACHE, json.dumps({'checked': '2026-10-03T00:00:00Z', 'components': {
+        name: {'releases': releases} for name, releases in components.items()}}))
+
+
+AWG = {'version': '3.1.20260828', 'tag': 'v3.1.20260828', 'commit': 'a' * 40, 'tools_tag': 'v3.1.20260812', 'tools_commit': 'e' * 40}
+
+
+def test_install_accepts_only_registry_components_and_discovered_versions(host, monkeypatch):
+    monkeypatch.setattr(protocols, 'check', lambda data=None: None)
+    cache(amnezia=[AWG])
+    for data in ({'component': 'openvpn'}, {'component': 'amnezia', 'url': 'https://evil.invalid'}, {},
+                 {'component': 'amnezia', 'version': '3.1.20260828; rm -rf /', 'port': 47443},
+                 {'component': 'amnezia', 'version': '9.9.9', 'port': 47443}):
+        with pytest.raises(PolicyError):
+            protocols.dispatch('protocols.install', data, None)
+    with pytest.raises(PolicyError, match='не установлен'):
+        protocols.dispatch('protocols.update', {'component': 'amnezia', 'version': '3.1.20260828'}, None)
+    with pytest.raises(PolicyError):
+        protocols.dispatch('protocols.remove', {'component': 'amnezia'}, None)
+    assert not any(c[:2] in (['docker', 'build'], ['docker', 'run']) for c in host['calls'])
+
+
+def test_amnezia_install_pins_commits_then_update_keeps_keys(host):
+    cache(amnezia=[AWG])
+    host['port'] = 47443
+    result = protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    assert 'UDP 47443' in result['message']
+    build = next(c for c in host['calls'] if c[:2] == ['docker', 'build'])
+    for arg in ('AWG_GO_REF=v3.1.20260828', 'AWG_GO_COMMIT=' + 'a' * 40, 'AWG_TOOLS_REF=v3.1.20260812', 'AWG_TOOLS_COMMIT=' + 'e' * 40):
+        assert arg in build
+    start = next(c for c in host['calls'] if c[:2] == ['docker', 'run'])
+    assert start[start.index('--cap-drop') + 1] == 'ALL' and '--privileged' not in start and '47443:47443/udp' in start
+    assert [p.name for p in protocols.BUILD.iterdir() if p.name != '.docker'] == []
+    state = amnezia.load()
+    assert state['version'] == '3.1.20260828' and protocols.installed('amnezia')['installed']
+    with pytest.raises(PolicyError, match='уже установлен'):
+        protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    for version, message in (('3.1.20260828', 'уже установлена'), ('3.1.20260812', 'Понижение')):
+        cache(amnezia=[AWG, dict(AWG, version='3.1.20260812', tag='v3.1.20260812')])
+        with pytest.raises(PolicyError, match=message):
+            protocols.dispatch('protocols.update', {'component': 'amnezia', 'version': version}, None)
+
+    amnezia.dispatch('amnezia.create', {'username': 'alice'}, 'h')
+    newer = dict(AWG, version='3.1.20260915', tag='v3.1.20260915', commit='9' * 40)
+    cache(amnezia=[newer, AWG])
+    protocols.dispatch('protocols.update', {'component': 'amnezia', 'version': '3.1.20260915'}, None)
+    after = amnezia.load()
+    assert after['version'] == '3.1.20260915'
+    assert all(after[k] == state[k] for k in ('private_key', 'params', 'port')) and after['peers'][0]['name'] == 'alice'
+    assert ['docker', 'rename', 'amnezia-awg', 'amnezia-awg-previous'] in host['calls']
+
+
+def test_failed_first_install_leaves_nothing_and_failed_update_restores(host):
+    cache(amnezia=[AWG])
+    host['port'] = 1  # the new container never reports the expected listen port
+    with pytest.raises(PolicyError, match='не прошёл проверку'):
+        protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    assert not amnezia.STATE.exists() and amnezia.CONTAINER not in host['containers']
+
+    host['port'] = 47443
+    protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    before = amnezia.STATE.read_text()
+    cache(amnezia=[dict(AWG, version='3.1.20260915', tag='v3.1.20260915')])
+    host['port'] = 1
+    with pytest.raises(PolicyError, match='восстановлено'):
+        protocols.dispatch('protocols.update', {'component': 'amnezia', 'version': '3.1.20260915'}, None)
+    assert amnezia.STATE.read_text() == before
+    assert ['docker', 'rename', 'amnezia-awg-previous', 'amnezia-awg'] in host['calls']
+
+
+def test_status_reports_versions_containers_and_no_secrets(host, monkeypatch):
+    cache(amnezia=[AWG], hysteria=[{'version': '2.12.4', 'tag': 'app/v2.12.4', 'sha256': '1' * 64}])
+    inspect = [{'Name': '/trusttunnel-web', 'RestartCount': 2, 'Config': {'Image': 'sha256:' + 'a' * 64, 'Env': ['SECRET_KEY=never-shown']},
+                'State': {'Status': 'running', 'Running': True, 'StartedAt': '2026-10-01T10:00:00.123Z', 'Health': {'Status': 'healthy'}},
+                'HostConfig': {'PortBindings': {'8443/udp': [{'HostIp': '', 'HostPort': '8443'}]}}},
+               {'Name': '/other', 'Config': {'Image': 'nginx:1'}, 'State': {'Status': 'exited', 'ExitCode': 137, 'FinishedAt': '2026-10-02T00:00:00Z'}}]
+    monkeypatch.setattr(protocols, 'quiet', lambda args, timeout=8: (0, 'a' * 64 + '\n' + 'b' * 64) if args[:2] == ['docker', 'ps'] else (1, ''))
+    monkeypatch.setattr(protocols, 'run', lambda args, timeout=30: json.dumps(inspect))
+    value = protocols.status()
+    assert [i['id'] for i in value['items']] == ['hysteria', 'trusttunnel', 'amnezia']
+    assert value['items'][2] == dict(value['items'][2], installed=False, latest='3.1.20260828', update=False, repo='https://github.com/amnezia-vpn/amneziawg-go')
+    first, second = value['containers']
+    assert first == {'name': 'trusttunnel-web', 'role': 'TrustTunnel и портал', 'state': 'running', 'image': 'sha256:aaaaaaaaaaaa', 'health': 'healthy',
+                     'restarts': 2, 'exit_code': 0, 'since': '2026-10-01T10:00:00', 'ports': ['*:8443 → 8443/udp']}
+    assert (second['state'], second['exit_code']) == ('exited', 137)
+    assert 'never-shown' not in json.dumps(value)
+    assert protocols.status() is value  # memoised between UI polls
+
+
+@pytest.fixture
+def console(tmp_path, monkeypatch):
+    """The real console API over a stub portal identity."""
+    app = types.ModuleType('app')
+    app.__path__ = []
+    parts = {name: types.ModuleType('app.' + name) for name in ('config', 'db', 'security', 'webauth', 'mailer', 'conninfo')}
+    parts['config'].SECRET_KEY = 'test-secret'
+    parts['webauth'].ADMIN_COOKIE = 'admin_token'
+    parts['webauth'].current_admin = lambda request: {'id': 1} if request.cookies.get('admin_token') == 'session' else None
+    parts['mailer'].is_configured = lambda: False
+    monkeypatch.setitem(sys.modules, 'app', app)
+    for name, module in parts.items():
+        setattr(app, name, module)
+        monkeypatch.setitem(sys.modules, 'app.' + name, module)
+    monkeypatch.delitem(sys.modules, 'console_app', raising=False)
+    import console_app
+    monkeypatch.setattr(console_app, 'STATE', tmp_path)
+    console_app.init()
+    client = TestClient(console_app.app)
+    client.cookies.set('admin_token', 'session')
+    client.headers['X-CSRF-Token'] = hmac.new(b'test-secret', b'console:session', hashlib.sha256).hexdigest()
+    yield client, console_app
+    sys.modules.pop('console_app', None)
+
+
+def job(client, action, data, key):
+    return client.post('/console/api/jobs', json={'action': action, 'data': data, 'confirm': True, 'request_id': key})
+
+
+def test_api_validates_and_serialises_protocol_jobs(console):
+    client, ui = console
+    for action, data in [('protocols.install', {'component': 'openvpn'}), ('protocols.install', {'component': 'amnezia'}),
+                         ('protocols.install', {'component': 'amnezia', 'port': 80}), ('protocols.install', {'component': 'hysteria', 'port': 47443}),
+                         ('protocols.install', {'component': 'amnezia', 'port': 47443, 'image': 'evil'}),
+                         ('protocols.update', {'component': 'hysteria'}), ('protocols.update', {'component': 'hysteria', 'version': 'latest'}),
+                         ('protocols.check', {'component': 'hysteria'}), ('amnezia.create', {'username': 'a b'}), ('amnezia.block', {'id': '1'})]:
+        assert job(client, action, data, 'k' * 16 + action).status_code == 422, (action, data)
+    assert job(client, 'protocols.install', {'component': 'amnezia', 'port': 47443}, 'install-request-0001').status_code == 200
+    assert job(client, 'protocols.install', {'component': 'amnezia', 'port': 47443}, 'install-request-0001').status_code == 200
+    # One lifecycle operation at a time, across all protocols.
+    assert job(client, 'protocols.update', {'component': 'hysteria', 'version': '2.12.4'}, 'update-request-0001').status_code == 409
+    assert job(client, 'amnezia.create', {'username': 'alice'}, 'create-request-0001').status_code == 200
+    with ui.connect() as c:
+        rows = {r['action']: json.loads(r['payload']) for r in c.execute('SELECT action,payload FROM jobs')}
+    assert rows == {'protocols.install': {'component': 'amnezia', 'port': 47443}, 'amnezia.create': {'username': 'alice'}}
+    client.headers.pop('X-CSRF-Token')
+    assert job(client, 'protocols.check', {}, 'check-request-00001').status_code == 403
+
+
+def test_amnezia_config_bundle_and_blocked_user():
+    import config_delivery
+    bundle = config_delivery.amnezia_bundle({'id': 3, 'username': 'alice', 'deleted': 0}, lambda d: {'content': '[Interface]\nfixture\n'})
+    assert bundle['kind'] == 'amnezia' and bundle['items'][0]['files'] == [('amneziawg-alice.conf', b'[Interface]\nfixture\n', 'text/plain')]
+    assert 'AmneziaWG' in config_delivery.body_text(bundle)
+    with pytest.raises(config_delivery.DeliveryError):
+        config_delivery.amnezia_bundle({'id': 3, 'username': 'alice', 'deleted': 1}, lambda d: {})

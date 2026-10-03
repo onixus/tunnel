@@ -11,11 +11,13 @@ _legacy_perform = console.perform
 
 
 def perform(action, data, admin):
-    if action not in ('routes.services', 'updates.server'):
+    lifecycle = action in ('protocols.install', 'protocols.update')
+    if action not in ('routes.services', 'updates.server') and not lifecycle:
         return _legacy_perform(action, data, admin)
     # The persistent watchdog still owns recovery if this worker disappears.
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(600)
+        # A source build of a protocol image takes minutes.
+        sock.settimeout(1800 if lifecycle else 600)
         sock.connect(console.AGENT)
         sock.sendall(json.dumps({'op': action, 'data': data}).encode() + b'\n')
         with sock.makefile('rb') as stream:

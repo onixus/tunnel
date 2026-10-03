@@ -16,7 +16,11 @@ STAMP=time.strftime('%Y%m%d-%H%M%S')
 BACK=DEST/'backups'/STAMP
 NGINX=Path('/opt/rtrust-releases/20260930-portal/portal-nginx.conf')
 IMAGE='vpn-console:'+STAMP
-AGENT_FILES=('agent.py','routing_agent.py','routing_policy.py','service_routes.py','trusttunnel_routing.py')
+AGENT_FILES=('agent.py','routing_agent.py','routing_policy.py','service_routes.py','trusttunnel_routing.py','amnezia.py','protocols.py')
+# Fixed, root-owned inputs for protocol installation from the console.
+ASSETS={'amnezia/Dockerfile':'deploy/amnezia/Dockerfile','amnezia/entrypoint.sh':'deploy/amnezia/entrypoint.sh',
+        'trusttunnel/Dockerfile':'deploy/trusttunnel/Dockerfile','install-hysteria-host.py':'deploy/hysteria/install-host.py',
+        'bootstrap-hui.py':'scripts/bootstrap-hui.py','h-ui.service':'examples/systemd/h-ui.service'}
 
 def run(args):return subprocess.run(args,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True).stdout
 
@@ -48,6 +52,10 @@ def main():
     Path('/root/hysteria-route-backups').mkdir(mode=0o700,exist_ok=True)
     for name in AGENT_FILES:
         shutil.copy2(ROOT/'server/console'/name,DEST/name)
+    for name,source in ASSETS.items():
+        target=DEST/'assets'/name;target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+        shutil.copyfile(ROOT/source,target);target.chmod(0o755 if name.endswith('.sh') else 0o644)
+    for path in (DEST/'build',DEST/'protocols',Path('/opt/amneziawg')):path.mkdir(mode=0o700,exist_ok=True)
     shutil.copy2(ROOT/'server/console/update-root.pub',DEST/'root.pub')
     shutil.copy2(ROOT/'deploy/vpn-console-agent.service',unit)
     # Persist only the inherited settings this service needs, never print their values.

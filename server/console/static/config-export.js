@@ -95,7 +95,7 @@ function showConfigExport(source, id, preferQr = false) {
           "QR-код недоступен. Скопируйте ссылку или скачайте конфигурацию.";
       }
       find("#download").onclick = () => {
-        if (exported) save(exported.content, "text/plain;charset=utf-8", "txt");
+        if (exported) save(exported.content, "text/plain;charset=utf-8", source === "amnezia" ? "conf" : "txt");
       };
       find("#copy-config").onclick = async () => {
         if (!exported) return;
