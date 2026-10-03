@@ -108,10 +108,16 @@ def source_user(source,id):
             for u in users:
                 if u['id']==id: return u
         raise HTTPException(404,'Пользователь не найден')
+    if source=='amnezia':
+        users=agent('snapshot').get('amnezia_users',[])
+        if isinstance(users,list):
+            for u in users:
+                if u['id']==id: return u
+        raise HTTPException(404,'Пользователь не найден')
     raise HTTPException(422,'Неизвестный источник')
 
 def perform(action,data,admin):
-    if action.startswith(('routes.','updates.','hysteria.','adblock.')): return agent(action,data)
+    if action.startswith(('routes.','updates.','hysteria.','adblock.','amnezia.','protocols.')): return agent(action,data)
     if action=='trusttunnel.create':
         # Password is generated at execution, never stored in the job or audit.
         return legacy(admin,'users/create',{'email':data['email'],'password':secrets.token_urlsafe(24)})
@@ -156,6 +162,7 @@ def send_config(data):
     if any(not recipients[ch] for ch in channels): raise RuntimeError('Контакт изменился: адрес получателя не задан')
     try:
         bundle=(config_delivery.hysteria_bundle(user,lambda d:agent('hysteria.export',d)) if source=='hysteria'
+                else config_delivery.amnezia_bundle(user,lambda d:agent('amnezia.export',d)) if source=='amnezia'
                 else config_delivery.trusttunnel_bundle(user))
     except config_delivery.DeliveryError: raise
     except Exception: raise RuntimeError('Не удалось подготовить конфигурацию')
@@ -237,13 +244,15 @@ def state(request:Request):
     return snapshot
 
 ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
-         'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send'}
+         'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send',
+         'amnezia.create','amnezia.block','amnezia.unblock','amnezia.rotate','protocols.check','protocols.install','protocols.update'}
+PROTOCOLS=('hysteria','trusttunnel','amnezia')
 
 def validate_action(action,data,*,check_state=True):
     if action not in ACTIONS: raise HTTPException(422,'Неизвестная операция')
     if action=='config.send':
         channels=data.get('channels')
-        if set(data)!={'source','id','channels'} or data['source'] not in ('hysteria','trusttunnel') or type(data['id']) is not int or data['id']<=0: raise HTTPException(422,'Некорректные параметры')
+        if set(data)!={'source','id','channels'} or data['source'] not in PROTOCOLS or type(data['id']) is not int or data['id']<=0: raise HTTPException(422,'Некорректные параметры')
         if not isinstance(channels,list) or not channels or len(set(channels))!=len(channels) or not set(channels)<=set(config_delivery.CHANNELS): raise HTTPException(422,'Выберите e-mail и/или Telegram')
         clean={'source':data['source'],'id':data['id'],'channels':sorted(channels)}
         if not check_state: return clean
@@ -263,6 +272,22 @@ def validate_action(action,data,*,check_state=True):
     if action=='hysteria.create':
         if not re.fullmatch('[A-Za-z0-9_-]{6,32}',str(data.get('username',''))): raise HTTPException(422,'Логин Hysteria: 6–32 латинских символа')
         return {'username':data['username'],'days':365,'devices':3}
+    if action=='amnezia.create':
+        if not re.fullmatch('[A-Za-z0-9_-]{3,32}',str(data.get('username',''))): raise HTTPException(422,'Имя AmneziaWG: 3–32 латинских символа')
+        return {'username':data['username']}
+    if action in ('protocols.install','protocols.update'):
+        # Only a registry name and a version string; the agent resolves both against the developers' repositories.
+        component=data.get('component'); clean={'component':component}
+        if component not in PROTOCOLS or not set(data)<={'component','version','port'}: raise HTTPException(422,'Некорректные параметры')
+        if 'version' in data:
+            if not isinstance(data['version'],str) or not re.fullmatch(r'\d+(\.\d+){1,3}',data['version']): raise HTTPException(422,'Некорректная версия')
+            clean['version']=data['version']
+        elif action=='protocols.update': raise HTTPException(422,'Укажите версию')
+        if action=='protocols.install' and component=='amnezia':
+            if type(data.get('port')) is not int or not 1024<=data['port']<=65535: raise HTTPException(422,'Порт AmneziaWG: 1024–65535')
+            clean['port']=data['port']
+        elif 'port' in data: raise HTTPException(422,'Некорректные параметры')
+        return clean
     if action=='hysteria.update':
         if set(data)!={'id','days','devices','quota_gb'} or any(type(data[k]) is not int for k in data): raise HTTPException(422,'Проверьте параметры')
         if data['id']<=0 or not 1<=data['days']<=3650 or not 1<=data['devices']<=100 or not -1<=data['quota_gb']<=100000: raise HTTPException(422,'Недопустимые лимиты')
@@ -272,7 +297,7 @@ def validate_action(action,data,*,check_state=True):
         with connect() as c: row=c.execute('SELECT state FROM campaigns WHERE id=?',(data.get('id'),)).fetchone()
         if not row or row['state']!='draft': raise HTTPException(409,'Рассылка уже отправлялась или не существует')
         return {'id':data['id']}
-    if action in ('routes.check','adblock.refresh'):
+    if action in ('routes.check','adblock.refresh','protocols.check'):
         if data: raise HTTPException(422,'Некорректные параметры')
         return {}
     # Agent repeats validation at the privilege boundary.
@@ -299,6 +324,8 @@ async def enqueue(request:Request):
             if action=='config.send':
                 recent=c.execute("SELECT 1 FROM jobs WHERE action='config.send' AND json_extract(payload,'$.source')=? AND json_extract(payload,'$.id')=? AND created>datetime('now','-60 seconds')",(clean['source'],clean['id'])).fetchone()
                 if recent: raise HTTPException(429,'Конфигурация этому пользователю уже отправлялась меньше минуты назад')
+            if action.startswith('protocols.') and c.execute("SELECT 1 FROM jobs WHERE action LIKE 'protocols.%' AND state IN ('queued','running')").fetchone():
+                raise HTTPException(409,'Уже выполняется операция с протоколами')
             if action=='campaign.send':
                 if c.execute("SELECT 1 FROM jobs WHERE action='campaign.send' AND json_extract(payload,'$.id')=?",(clean['id'],)).fetchone(): raise HTTPException(409,'Рассылка уже поставлена в очередь')
             c.execute('INSERT INTO jobs(id,actor,action,payload,state) VALUES(?,?,?,?,?)',(key,admin,action,json.dumps(clean,sort_keys=True),'queued'))
@@ -311,6 +338,9 @@ async def export(request:Request):
     if q.get('consent') is not True or type(q.get('id')) is not int or q['id'] <= 0: raise HTTPException(422,'Подтвердите раскрытие ключа')
     if type(q.get('qr', False)) is not bool: raise HTTPException(422,'Некорректный параметр QR')
     if q.get('source')=='hysteria': result=agent('hysteria.export',{'id':q['id']})
+    elif q.get('source')=='amnezia':
+        try: result=agent('amnezia.export',{'id':q['id']})
+        except RuntimeError as exc: raise HTTPException(409,str(exc)) from None
     elif q.get('source')=='trusttunnel':
         cfg=db.get_config(q['id'])
         if not cfg or cfg['revoked_at']: raise HTTPException(404,'Ключ не найден')

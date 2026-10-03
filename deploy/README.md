@@ -16,9 +16,12 @@ python3 deploy/test-console-isolated.py
 
 The source subset must include `server/console/`,
 `server/tests/console_portal_acceptance.py`, the console deployment files in this
-directory, and `server/console/update-root.pub`. Host Python needs PyYAML and cryptography;
-Docker Compose, systemd, H UI, the existing route-switch helper and VPN profiles
-must already be installed. The isolated acceptance script runs against the installed
+directory (including `amnezia/`, `trusttunnel/` and `hysteria/`), `scripts/bootstrap-hui.py`,
+`examples/systemd/h-ui.service` and `server/console/update-root.pub`. Host Python needs PyYAML and cryptography;
+Docker Compose, systemd and the portal container must already be installed. H UI,
+the route-switch helper and VPN profiles are needed for Hysteria features only:
+protocols can be installed afterwards from the console's
+[Protocols page](../docs/protocols.md). The isolated acceptance script runs against the installed
 console image with a temporary database and no external network or production mounts.
 
 The installer backs up portal SQLite and encryption keys, nginx and prior console

@@ -11,7 +11,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/run /opt/vpn-console /opt/rtrust-updates /opt/trusttunnel-web /var/lib/h-ui /root/hysteria-route-backups
+# Protocols can be installed from the console after the UI is deployed. The installer creates
+# /var/lib/h-ui up front: a path missing at start stays read-only until the agent restarts.
+ReadWritePaths=/run /opt/vpn-console /opt/amneziawg /var/lib/h-ui -/opt/rtrust-updates -/opt/trusttunnel-web -/root/hysteria-route-backups
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 [Install]
 WantedBy=multi-user.target
