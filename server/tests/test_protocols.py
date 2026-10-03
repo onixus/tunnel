@@ -320,3 +320,133 @@ def test_amnezia_config_bundle_and_blocked_user():
     assert 'AmneziaWG' in config_delivery.body_text(bundle)
     with pytest.raises(config_delivery.DeliveryError):
         config_delivery.amnezia_bundle({'id': 3, 'username': 'alice', 'deleted': 1}, lambda d: {})
+
+
+def test_failed_live_reload_restarts_interface_or_reports_stale_keys(host, monkeypatch):
+    amnezia.save(amnezia.new_state(47443), sync=False)
+    amnezia.dispatch('amnezia.create', {'username': 'alice'}, 'h')
+    host['containers'].add(amnezia.CONTAINER)
+    failing = {'exec'}
+
+    def run(args, timeout=30, env=None):
+        host['calls'].append(args)
+        if args[1] in failing:
+            raise PolicyError('docker')
+        return ''
+    monkeypatch.setattr(amnezia, 'run', run)
+    # syncconf fails: the interface is reloaded from the saved file, so the block takes effect.
+    assert amnezia.dispatch('amnezia.block', {'id': 1}, 'h')['message']
+    assert host['calls'][-1] == ['docker', 'restart', '--time', '10', 'amnezia-awg']
+    failing.add('restart')
+    with pytest.raises(PolicyError, match='прежние ключи AmneziaWG ещё действуют'):
+        amnezia.dispatch('amnezia.rotate', {'id': 1}, 'h')
+    # Desired state is still saved for the operator's restart.
+    assert amnezia.load()['peers'][0]['enabled'] is False
+
+
+def test_stopped_trusttunnel_is_an_existing_deployment(host, monkeypatch):
+    for state in ('exited', 'restarting'):
+        monkeypatch.setattr(protocols, 'quiet', lambda args, timeout=8: (0, state) if args[:2] == ['docker', 'inspect'] else (1, ''))
+        assert protocols.installed('trusttunnel') == {'installed': True, 'version': None, 'state': state}
+        cache(trusttunnel=[{'version': '1.0.33', 'tag': 'v1.0.33', 'sha256': '1' * 64}])
+        with pytest.raises(PolicyError, match='уже установлен'):
+            protocols.dispatch('protocols.install', {'component': 'trusttunnel', 'version': '1.0.33'}, None)
+    monkeypatch.setattr(protocols, 'quiet', lambda args, timeout=8: (1, ''))
+    assert protocols.installed('trusttunnel')['installed'] is False
+    # Running container without an endpoint binary is the only first-install case.
+    monkeypatch.setattr(protocols, 'quiet', lambda args, timeout=8: (0, 'running') if args[:2] == ['docker', 'inspect'] else (127, ''))
+    assert protocols.installed('trusttunnel')['installed'] is False
+
+
+def test_swap_restarts_old_container_when_rename_fails(host, monkeypatch):
+    host['containers'].add('svc')
+    plain = protocols.run
+
+    def run(args, timeout=30, env=None):
+        if args[:2] == ['docker', 'rename']:
+            host['calls'].append(args)
+            raise PolicyError('rename')
+        return plain(args, timeout)
+    monkeypatch.setattr(protocols, 'run', run)
+    with pytest.raises(PolicyError):
+        protocols.swap_container('svc', ['image'], lambda: None)
+    # The old container still owns the name: it is started again, never removed.
+    assert host['calls'][-1] == ['docker', 'start', 'svc']
+    assert ['docker', 'rm', '-f', 'svc'] not in host['calls'] and 'svc' in host['containers']
+    assert not any(c[:2] == ['docker', 'run'] for c in host['calls'])
+
+
+@pytest.fixture
+def hysteria(host, tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    binary = tmp_path / 'h-ui/bin/hysteria-linux-amd64'
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b'old-core')
+    unit = tmp_path / 'h-ui.service'
+    unit.write_text('unit')
+    monkeypatch.setattr(protocols, 'HYSTERIA_BIN', binary)
+    monkeypatch.setattr(protocols, 'HYSTERIA_UNIT', unit)
+    monkeypatch.setattr(protocols.platform, 'machine', lambda: 'x86_64')
+    monkeypatch.setattr(protocols, 'download', lambda url, dest, sha256: dest.write_bytes(b'new-core'))
+    monkeypatch.setattr(protocols.service_routes, 'route_lock', lambda wait=False: nullcontext())
+    monkeypatch.setattr(protocols.service_routes, 'PENDING', tmp_path / 'no-pending')
+    box = {'probe_ok': True}
+
+    class Runtime:
+        def __init__(self, agent): pass
+        def observe(self): return {'services': {'hysteria': {'actual_exit': 'primary'}}, 'profiles': {}}
+        def expected_ip(self, exit_id, profiles): return '192.0.2.1'
+        def probe(self, name, expected):
+            host['calls'].append(['probe', name, expected])
+            if not box['probe_ok']:
+                raise PolicyError('probe')
+    monkeypatch.setattr(protocols.service_routes, 'Runtime', Runtime)
+    cache(hysteria=[{'version': '2.12.4', 'tag': 'app/v2.12.4', 'sha256': '1' * 64}])
+    box.update(binary=binary, update=lambda: protocols.dispatch('protocols.update', {'component': 'hysteria', 'version': '2.12.4'}, None))
+    return box
+
+
+def test_hysteria_update_probes_real_traffic_and_keeps_previous_binary(host, hysteria):
+    assert '2.12.4' in hysteria['update']()['message']
+    assert hysteria['binary'].read_bytes() == b'new-core' and hysteria['binary'].stat().st_mode & 0o777 == 0o755
+    assert ['probe', 'hysteria', '192.0.2.1'] in host['calls']
+    assert [p.read_bytes() for p in protocols.ROLLBACK.iterdir()] == [b'old-core']
+
+
+def test_hysteria_failed_probe_restores_previous_binary_and_restarts(host, hysteria):
+    hysteria['probe_ok'] = False
+    with pytest.raises(PolicyError, match='Предыдущая версия восстановлена'):
+        hysteria['update']()
+    assert hysteria['binary'].read_bytes() == b'old-core'
+    assert host['calls'][-1] == ['systemctl', 'start', 'h-ui']
+
+
+def test_hysteria_is_started_even_when_rollback_cannot_write(host, hysteria, monkeypatch):
+    def denied(*args):
+        raise OSError(30, 'Read-only file system')
+    monkeypatch.setattr(protocols.shutil, 'chown', denied)
+    with pytest.raises(PolicyError, match='откат не подтверждён'):
+        hysteria['update']()
+    # Neither replacement happened; the service must not be left stopped.
+    assert hysteria['binary'].read_bytes() == b'old-core'
+    assert [p.name for p in hysteria['binary'].parent.iterdir()] == ['hysteria-linux-amd64']
+    assert host['calls'][-1] == ['systemctl', 'start', 'h-ui']
+    assert not any(c[0] == 'probe' for c in host['calls'])
+
+
+def test_agent_writable_paths_exist_before_it_starts():
+    """systemd resolves ReadWritePaths at start; a path created later stays read-only."""
+    import re
+    unit = (ROOT / 'deploy/vpn-console-agent.service').read_text()
+    installer = (ROOT / 'deploy/install-console.py').read_text()
+    paths = re.search(r'^ReadWritePaths=(.+)$', unit, re.M)[1].split()
+    assert '/var/lib/h-ui' in paths and '/opt/amneziawg' in paths
+    for path in ('/var/lib/h-ui', '/opt/amneziawg'):
+        assert f"Path('{path}')" in installer and installer.index(f"Path('{path}')") < installer.index("'enable','--now','vpn-console-agent'")
+
+
+def test_overview_does_not_show_uninstalled_protocol_as_failure():
+    script = (ROOT / 'server/console/static/console.js').read_text()
+    assert 's === "absent"' in script and 'pill gray">Не установлен' in script
+    assert 'servicePill("amnezia")' not in script and '${servicePill(k)}' in script
+    assert '${servicePill(id)}' in (ROOT / 'server/console/static/routing-ui.js').read_text()

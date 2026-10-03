@@ -148,6 +148,13 @@ function serviceState(k) {
     (state.protocols?.items || []).find((p) => p.id === k)?.state
   );
 }
+function servicePill(k) {
+  const s = serviceState(k);
+  // A protocol that was never installed is not a failure.
+  return s === "absent"
+    ? '<span class="pill gray">Не установлен</span>'
+    : pill(["active", "running"].includes(s) ? "active" : "unknown", s || "Нет данных");
+}
 function overview() {
   const h = Array.isArray(state.hysteria_users) ? state.hysteria_users : [],
     u = state.users || [],
@@ -167,7 +174,7 @@ function overview() {
     ]
       .map(
         ([n, k, d]) =>
-          `<div class="service"><div><strong>${n}</strong><small>${d}</small></div>${pill(["active", "running"].includes(serviceState(k)) ? "active" : "unknown", serviceState(k) || "Нет данных")}</div>`,
+          `<div class="service"><div><strong>${n}</strong><small>${d}</small></div>${servicePill(k)}</div>`,
       )
       .join(
         "",

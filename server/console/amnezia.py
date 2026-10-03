@@ -144,9 +144,17 @@ def save(state, sync=True):
     write(STATE, json.dumps(state, sort_keys=True))
     write(RUNTIME / (INTERFACE + '.conf'), render_server(state))
     if sync and running():
-        # Fixed command: reload peers without dropping established sessions.
-        run(['docker', 'exec', CONTAINER, 'bash', '-c',
-             f'awg syncconf {INTERFACE} <(awg-quick strip {INTERFACE})'], 20)
+        try:
+            # Fixed command: reload peers without dropping established sessions.
+            run(['docker', 'exec', CONTAINER, 'bash', '-c',
+                 f'awg syncconf {INTERFACE} <(awg-quick strip {INTERFACE})'], 20)
+        except (PolicyError, subprocess.TimeoutExpired):
+            # A blocked or rotated key must not stay accepted: reload the whole interface.
+            try:
+                run(['docker', 'restart', '--time', '10', CONTAINER], 40)
+            except (PolicyError, subprocess.TimeoutExpired):
+                raise PolicyError('Изменение сохранено, но не применено: прежние ключи AmneziaWG ещё действуют. '
+                                  'Перезапустите контейнер amnezia-awg.') from None
 
 
 def live():

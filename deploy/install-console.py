@@ -56,6 +56,9 @@ def main():
         target=DEST/'assets'/name;target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
         shutil.copyfile(ROOT/source,target);target.chmod(0o755 if name.endswith('.sh') else 0o644)
     for path in (DEST/'build',DEST/'protocols',Path('/opt/amneziawg')):path.mkdir(mode=0o700,exist_ok=True)
+    # The agent's writable paths are fixed when it starts: a directory created later by a
+    # protocol install from the console would stay read-only for the running agent.
+    Path('/var/lib/h-ui').mkdir(mode=0o750,exist_ok=True)
     shutil.copy2(ROOT/'server/console/update-root.pub',DEST/'root.pub')
     shutil.copy2(ROOT/'deploy/vpn-console-agent.service',unit)
     # Persist only the inherited settings this service needs, never print their values.

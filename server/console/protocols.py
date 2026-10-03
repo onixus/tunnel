@@ -218,6 +218,10 @@ def installed(name):
         code, state = quiet(['docker', 'inspect', TT_CONTAINER, '--format', '{{.State.Status}}'])
         if code:
             return {'installed': False, 'version': None, 'state': 'absent'}
+        if state != 'running':
+            # The endpoint cannot be queried, but an existing deployment is never a first install:
+            # only the update path, with its mandatory probe, may replace it.
+            return {'installed': True, 'version': None, 'state': state}
         code, out = quiet(['docker', 'exec', TT_CONTAINER, TT_ENDPOINT, '--version'])
         match = re.search(r'(\d+\.\d+\.\d+)', out)
         return {'installed': code == 0, 'version': match[1] if match and code == 0 else None, 'state': state}
@@ -298,17 +302,22 @@ def swap_container(name, args, verify):
     """Replace a container, keeping the previous one until the new one passes its check."""
     backup = name + '-previous'
     exists = quiet(['docker', 'inspect', name])[0] == 0
-    if exists:
-        quiet(['docker', 'rm', '-f', backup], 30)
-        run(['docker', 'stop', '--time', '10', name], 40)
-        run(['docker', 'rename', name, backup])
+    renamed = False
     try:
+        if exists:
+            quiet(['docker', 'rm', '-f', backup], 30)
+            run(['docker', 'stop', '--time', '10', name], 40)
+            run(['docker', 'rename', name, backup])
+            renamed = True
         run(['docker', 'run', '-d', '--name', name, *args], 90)
         verify()
     except BaseException:
-        quiet(['docker', 'rm', '-f', name], 30)
-        if exists:
+        if renamed or not exists:
+            # Only then does `name` refer to the new container.
+            quiet(['docker', 'rm', '-f', name], 30)
+        if renamed:
             quiet(['docker', 'rename', backup, name])
+        if exists:
             quiet(['docker', 'start', name], 30)
         raise
     if exists:
@@ -460,10 +469,13 @@ def install_hysteria(op, data, release, work, agent):
 
         def place(source):
             temp = HYSTERIA_BIN.with_name('.console-' + secrets.token_hex(6))
-            shutil.copy2(source, temp)
-            temp.chmod(0o755)
-            shutil.chown(temp, owner.st_uid, owner.st_gid)
-            temp.replace(HYSTERIA_BIN)
+            try:
+                shutil.copy2(source, temp)
+                temp.chmod(0o755)
+                shutil.chown(temp, owner.st_uid, owner.st_gid)
+                temp.replace(HYSTERIA_BIN)
+            finally:
+                temp.unlink(missing_ok=True)
         try:
             run(['systemctl', 'stop', 'h-ui'])
             place(binary)
@@ -472,9 +484,17 @@ def install_hysteria(op, data, release, work, agent):
             runtime.probe('hysteria', expected)
         except BaseException:
             quiet(['systemctl', 'stop', 'h-ui'], 30)
-            place(previous)
+            try:
+                place(previous)
+                restored = True
+            except OSError:
+                restored = False
+            # Whatever binary is in place, never leave the service stopped.
             quiet(['systemctl', 'start', 'h-ui'], 30)
-            raise PolicyError('Hysteria не прошла проверку трафика. Предыдущая версия восстановлена.') from None
+            if not restored:
+                raise PolicyError('Обновление Hysteria не удалось, и откат не подтверждён. H UI запущен; проверьте версию ядра. '
+                                  'Прежний бинарник: ' + str(previous)) from None
+            raise PolicyError('Hysteria не прошла проверку. Предыдущая версия восстановлена.') from None
     return f'Hysteria {release["version"]} установлена и проверена реальным трафиком'
 
 
