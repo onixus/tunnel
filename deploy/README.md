@@ -34,3 +34,11 @@ Prior console containers are retained stopped for recovery.
 restoring the preceding console version from removing the console entry and
 returning to the legacy admin dashboard. Never restore an old SQLite snapshot over
 newer user changes merely to roll back application code.
+
+## Device route groups and profile exchange
+
+The server overlay and additive portal image builder now belong to this repository.
+Use `deploy/prepare-portal-update.py` to prepare a checked image from the exact
+installed image, preserving the existing Rust codec and endpoint. It does not
+replace containers. See [device routing](../docs/device-routing.md) for ownership,
+API compatibility, administrative precedence, migration, validation and rollback.

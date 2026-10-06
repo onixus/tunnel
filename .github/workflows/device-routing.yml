@@ -1,0 +1,31 @@
+name: Device routing administration
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated API and browser dependencies
+        run: python -m pip install -r server/test-environment/requirements.txt pytest playwright
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Check packaging and syntax
+        run: |
+          python server/tests/test_publication.py
+          python -m compileall -q server/overlay deploy/portal_patch.py deploy/prepare-portal-update.py
+          node --check server/overlay/app/static/rtrust-profiles.js
+          node --check server/overlay/app/static/rtrust-admin-routes.js
+      - name: Admin API and desktop/mobile browser lifecycle
+        run: |
+          python server/tests/test_agent_routes.py
+          python -m pytest -q server/tests/test_agent_routes_browser.py
