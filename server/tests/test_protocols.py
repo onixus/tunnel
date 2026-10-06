@@ -464,13 +464,94 @@ def test_auto_check_refreshes_only_stale_cache(host, monkeypatch):
     def wait(seconds):
         raise Stop
     with pytest.raises(Stop):
-        protocols.auto_check(threading.Lock(), wait=wait)
+        protocols.auto_check(wait=wait)
     assert calls == [1]
     protocols.CACHE.parent.mkdir(parents=True, exist_ok=True)
     protocols.CACHE.write_text(json.dumps({'checked': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'components': {}}))
     assert not protocols.stale()
     with pytest.raises(Stop):
-        protocols.auto_check(threading.Lock(), wait=wait)
+        protocols.auto_check(wait=wait)
     assert calls == [1]
     protocols.CACHE.write_text(json.dumps({'checked': '2020-01-01T00:00:00Z', 'components': {}}))
     assert protocols.stale()
+
+
+def test_slow_manual_and_background_discovery_leave_mutation_lock_free(host, monkeypatch):
+    import socket
+    import threading
+    import routing_agent
+    entered = threading.Event()
+    release = threading.Event()
+    refreshed = threading.Event()
+    manual_entered = threading.Event()
+    errors = []
+    peers = []
+    workers = []
+    observed = []
+    lock = threading.Lock()
+    monkeypatch.setattr(routing_agent.agent, 'LOCK', lock)
+
+    def discover(name):
+        entered.set()
+        assert release.wait(3), 'Synthetic upstream did not finish'
+        return []
+    monkeypatch.setattr(protocols, 'discover', discover)
+
+    def dispatch(op, data):
+        if op == 'protocols.check':
+            manual_entered.set()
+            return protocols.check()
+        observed.append(lock.locked())
+        return {'mutation': 'accepted'}
+    monkeypatch.setattr(routing_agent, 'dispatch', dispatch)
+
+    class Stop(Exception):
+        pass
+    def wait(seconds):
+        refreshed.set()
+        raise Stop
+    def background():
+        try:
+            protocols.auto_check(wait=wait)
+        except Stop:
+            pass
+        except BaseException as error:
+            errors.append(error)
+    def request(op):
+        client, peer = socket.socketpair()
+        peers.extend((client, peer))
+        client.settimeout(1)
+        def handle():
+            try:
+                routing_agent.Handler(peer, None, None)
+            except BaseException as error:
+                errors.append(error)
+        worker = threading.Thread(target=handle, daemon=True)
+        workers.append(worker); worker.start()
+        client.sendall((json.dumps({'op': op, 'data': {}})+'\n').encode())
+        return client
+
+    worker = threading.Thread(target=background, daemon=True)
+    workers.append(worker); worker.start()
+    try:
+        assert entered.wait(1)
+        manual = request('protocols.check')
+        assert manual_entered.wait(1)
+        # The manual refresh is serialized with the background writer, while a
+        # VPN mutation can still execute without waiting for either GitHub call.
+        mutation = request('routes.preview')
+        result = json.loads(mutation.recv(4096))
+        assert result == {'ok': True, 'result': {'mutation': 'accepted'}}
+        assert observed == [True], 'VPN mutations must retain their own lock'
+        release.set()
+        assert json.loads(manual.recv(4096))['ok'] is True
+        assert refreshed.wait(1)
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(3)
+        for peer in peers:
+            peer.close()
+    assert not errors, errors
+    assert all(not worker.is_alive() for worker in workers)
+    assert isinstance(protocols.cached()['components'], dict)
