@@ -5,6 +5,7 @@ only name a component and a version already discovered there; it never supplies 
 image or command. Binaries are checked against the SHA-256 GitHub publishes for the release
 asset; source builds are pinned to the commit GitHub reported for the tag.
 """
+import calendar
 import hashlib
 import hmac
 import json
@@ -34,6 +35,7 @@ BUILD = BASE / 'build'
 ASSETS = BASE / 'assets'
 API = 'https://api.github.com/repos/'
 LIMIT = 64 * 1024 * 1024
+AUTO_CHECK = 6 * 3600
 HYSTERIA_BIN = Path('/var/lib/h-ui/bin/hysteria-linux-amd64')
 HYSTERIA_UNIT = Path('/etc/systemd/system/h-ui.service')
 TT_CONTAINER = 'trusttunnel-web'
@@ -190,6 +192,28 @@ def check(data=None):
     if failed:
         raise PolicyError('Не удалось получить версии: ' + ', '.join(failed))
     return {'message': 'Версии в репозиториях разработчиков проверены'}
+
+
+def stale(max_age=AUTO_CHECK):
+    """True when the cached release list is missing or older than max_age seconds."""
+    try:
+        checked = calendar.timegm(time.strptime(cached()['checked'], '%Y-%m-%dT%H:%M:%SZ'))
+    except (KeyError, TypeError, ValueError):
+        return True
+    return time.time() - checked >= max_age
+
+
+def auto_check(lock, interval=AUTO_CHECK, wait=None):
+    """Background loop: refresh the release cache so new upstream versions appear without a click."""
+    wait = wait or time.sleep
+    while True:
+        if stale(interval):
+            with lock:
+                try:
+                    check()
+                except Exception:
+                    pass  # check() keeps the previous releases and records the error per component.
+        wait(600)
 
 
 def pick(name, version):

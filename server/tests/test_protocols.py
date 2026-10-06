@@ -450,3 +450,27 @@ def test_overview_does_not_show_uninstalled_protocol_as_failure():
     assert 's === "absent"' in script and 'pill gray">Не установлен' in script
     assert 'servicePill("amnezia")' not in script and '${servicePill(k)}' in script
     assert '${servicePill(id)}' in (ROOT / 'server/console/static/routing-ui.js').read_text()
+
+
+def test_auto_check_refreshes_only_stale_cache(host, monkeypatch):
+    import threading, time
+    calls = []
+    monkeypatch.setattr(protocols, 'check', lambda: calls.append(1))
+    assert protocols.stale()
+
+    class Stop(Exception):
+        pass
+
+    def wait(seconds):
+        raise Stop
+    with pytest.raises(Stop):
+        protocols.auto_check(threading.Lock(), wait=wait)
+    assert calls == [1]
+    protocols.CACHE.parent.mkdir(parents=True, exist_ok=True)
+    protocols.CACHE.write_text(json.dumps({'checked': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'components': {}}))
+    assert not protocols.stale()
+    with pytest.raises(Stop):
+        protocols.auto_check(threading.Lock(), wait=wait)
+    assert calls == [1]
+    protocols.CACHE.write_text(json.dumps({'checked': '2020-01-01T00:00:00Z', 'components': {}}))
+    assert protocols.stale()

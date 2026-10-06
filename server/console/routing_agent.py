@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import socketserver
+import threading
 from urllib.parse import urlsplit
 
 import agent
@@ -82,6 +83,7 @@ def main():
             service_routes.watchdog_restore(Path(pending['journal']))
         except Exception:
             pass  # Keep reads available; the pending marker blocks all route writes.
+    threading.Thread(target=protocols.auto_check, args=(agent.LOCK,), daemon=True).start()
     path = Path(agent.SOCKET)
     path.parent.mkdir(mode=0o750, exist_ok=True)
     path.unlink(missing_ok=True)
