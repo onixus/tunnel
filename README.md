@@ -39,6 +39,7 @@ Hysteria отправляет `.ru`, `.рф` и выбранные GeoIP-стр�
 - [Установка TrustTunnel и панели](docs/trusttunnel-server.md)
 - [Настройка Linux, Windows, macOS, Android и iOS](docs/clients.md)
 - [Единая консоль: функции, приёмка и ограничения](docs/unified-console.md)
+- [Группы маршрутов устройств R-TrustTunnel](docs/device-routing.md)
 - [Протоколы: AmneziaWG 3.1, установка и обновление из консоли, мониторинг контейнеров](docs/protocols.md)
 - [Доступ к панелям и управление пользователями](docs/panels.md)
 - [Проверки и диагностика](docs/troubleshooting.md)

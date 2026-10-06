@@ -10,7 +10,11 @@ identity, existing VPN accounts and the private Telegram bot.
 
 `upstream/` is the TrustTunnel portal source that the console and the
 [patches](../patches) apply to; it was moved here from Rust-trustvpn so the portal
-has one owner. The profile-exchange overlay and the Rust codec stay in
-[Rust-trustvpn](https://github.com/onixus/Rust-trustvpn), and the runtime still
-inherits the installed portal image. This repository does not contain private
+has one owner. The profile-exchange overlay, device route groups and administrative policy API
+also live here in `overlay/`, together with their packaging and server tests.
+The Rust codec and native client remain in
+[Rust-trustvpn](https://github.com/onixus/Rust-trustvpn).
+[Device routing ownership and validation](../docs/device-routing.md) describe the
+client API, administrative precedence, migration and rollout.
+This repository does not contain private
 databases, account credentials, bot tokens or signing keys.

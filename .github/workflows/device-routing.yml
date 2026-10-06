@@ -1,0 +1,52 @@
+name: Device routing administration
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/rtrust-client/target
+      RTRUST_CODEC: ${{ github.workspace }}/rtrust-client/target/debug/rtrust-codec
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout the pinned public codec and Rust API clients
+        uses: actions/checkout@v4
+        with:
+          repository: onixus/Rust-trustvpn
+          ref: 4400ca12938619df92326c4abe21818bf39915e9
+          path: rtrust-client
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - name: Build the shared codec and HTTPS client examples
+        working-directory: rtrust-client
+        run: |
+          cargo build --locked -p rtrust-codec
+          cargo build --locked -p rtrust-portal --examples
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated API and browser dependencies
+        run: python -m pip install -r server/test-environment/requirements.txt pytest playwright
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Check packaging and syntax
+        run: |
+          python server/tests/test_publication.py
+          python -m compileall -q server/overlay deploy/portal_patch.py deploy/prepare-portal-update.py
+          node --check server/overlay/app/static/rtrust-profiles.js
+          node --check server/overlay/app/static/rtrust-admin-routes.js
+      - name: Profile exchange, admin API and desktop/mobile browser lifecycle
+        run: |
+          python server/tests/test_exchange.py
+          python server/tests/test_agent_routes.py
+          python -m pytest -q server/tests/test_agent_routes_browser.py
+          python server/tests/native_exchange.py
+          python server/tests/routing_exchange.py
