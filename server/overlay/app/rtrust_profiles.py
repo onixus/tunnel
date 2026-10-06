@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS rtrust_tokens(hash TEXT PRIMARY KEY,device INTEGER NO
 CREATE TABLE IF NOT EXISTS rtrust_rates(bucket TEXT PRIMARY KEY,count INTEGER NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rtrust_audit(id INTEGER PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,object TEXT NOT NULL,created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rtrust_route_groups(id INTEGER PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,name TEXT NOT NULL,policy TEXT NOT NULL,revision INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS rtrust_route_counter(singleton INTEGER PRIMARY KEY CHECK(singleton=1),high_water INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rtrust_route_members(device INTEGER PRIMARY KEY REFERENCES app_devices(id) ON DELETE CASCADE,grp INTEGER NOT NULL REFERENCES rtrust_route_groups(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS rtrust_admin_route_groups(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,policy TEXT NOT NULL,revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rtrust_admin_route_members(device INTEGER PRIMARY KEY REFERENCES app_devices(id) ON DELETE CASCADE,grp INTEGER NOT NULL REFERENCES rtrust_admin_route_groups(id) ON DELETE CASCADE);
@@ -39,7 +40,12 @@ CREATE INDEX IF NOT EXISTS rtrust_route_members_grp ON rtrust_route_members(grp)
 '''
 
 def init():
-    with db.connect() as c: c.executescript(SCHEMA)
+    with db.connect() as c:
+        c.executescript(SCHEMA)
+        c.execute('BEGIN IMMEDIATE')
+        # Preserve legacy IDs and reserve deleted IDs recorded by earlier versions.
+        high_water=c.execute("SELECT MAX(v) FROM (SELECT COALESCE(MAX(id),0) AS v FROM rtrust_route_groups UNION ALL SELECT COALESCE(MAX(CAST(object AS INTEGER)),0) AS v FROM rtrust_audit WHERE action IN ('route_group_create','route_group_delete'))").fetchone()[0]
+        c.execute('INSERT INTO rtrust_route_counter VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET high_water=MAX(high_water,excluded.high_water)',(high_water,))
     cipher()
 
 def install(application):
@@ -369,7 +375,11 @@ async def create_route_group(request:Request):
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT count(*) FROM rtrust_route_groups WHERE owner=?',(owner,)).fetchone()[0]>=50:raise HTTPException(409,'Route group limit reached')
-        identifier=c.execute('INSERT INTO rtrust_route_groups(owner,name,policy,revision) VALUES(?,?,?,1)',(owner,name,json.dumps(policy))).lastrowid
+        # A deleted group must never share an ID/revision with its replacement.
+        # Compare live IDs too, so an older application can be rolled back safely.
+        c.execute('UPDATE rtrust_route_counter SET high_water=MAX(high_water,COALESCE((SELECT MAX(id) FROM rtrust_route_groups),0))+1 WHERE singleton=1')
+        identifier=c.execute('SELECT high_water FROM rtrust_route_counter WHERE singleton=1').fetchone()[0]
+        c.execute('INSERT INTO rtrust_route_groups(id,owner,name,policy,revision) VALUES(?,?,?,?,1)',(identifier,owner,name,json.dumps(policy)))
         audit(c,identity,'route_group_create',str(identifier))
         return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
 

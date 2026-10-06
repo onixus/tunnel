@@ -50,6 +50,9 @@ codec, routing adapter, entrypoint и mounts. В Docker build context попад
 Перед установкой новой версии оператор делает SQLite backup API и сохраняет
 `.rtrust-profile-key`, Compose, точный прежний image ID и все routing mounts.
 Новые таблицы добавляются при старте через `CREATE TABLE IF NOT EXISTS`.
+Счётчик ID пользовательских групп сохраняет существующие группы и членство,
+учитывает удалённые ID из аудита и не переиспользует их. Это предотвращает
+совпадение ревизий и запись из устаревшего окна в новую группу.
 Откат выполняется возвратом образа, без перезаписи БД старой копией.
 Обновлять нужно портал, а console image — для новой ссылки в навигации.
 Установку на production этот перенос не выполняет.
@@ -71,6 +74,10 @@ node --check server/overlay/app/static/rtrust-admin-routes.js
 # Для browser E2E: pip install playwright pytest; python -m playwright install chromium
 /tmp/tunnel-portal-venv/bin/python -m pytest -q server/tests/test_agent_routes_browser.py
 ```
+
+GitHub CI собирает codec и HTTPS-клиенты из закреплённого commit публичного
+`onixus/Rust-trustvpn`, затем проверяет обмен профилями, API администратора,
+браузерные сценарии и реальные Rust-клиенты.
 
 Тесты используют синтетические учётные записи и временную SQLite. Кодек является
 внешней клиентской зависимостью; тестам больше не нужен overlay из клиентского

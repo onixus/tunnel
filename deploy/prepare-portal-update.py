@@ -55,6 +55,8 @@ import json
 import os
 from pathlib import Path
 assert os.access(exchange.CODEC, os.X_OK), "Missing executable Rust codec"
+probe = {"schema_version":1,"name":"Isolated build check","endpoint":{"hostname":"vpn.example.invalid","addresses":["203.0.113.1:8443"],"username":"synthetic","password":"synthetic","upstream_protocol":"http2"}}
+assert exchange.codec(json.dumps(probe))["content"], "Codec roundtrip failed"
 db.init_db()
 exchange.init()
 exchange.init()

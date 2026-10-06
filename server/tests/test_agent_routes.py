@@ -87,6 +87,31 @@ class AgentRouteTests(unittest.TestCase):
         self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json(),{'policy':None})
         with db.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM rtrust_admin_route_members').fetchone()[0],0)
 
+    def test_user_group_recreation_rejects_stale_revision(self):
+        data={'name':'Old','include':['10.0.0.0/8'],'exclude':[],'exclude_lan':True}
+        first=self.post('route-groups',data).json()
+        path=f'/portal/v2/route-groups/{first["id"]}'
+        self.assertEqual(self.client.delete(path,headers={**self.headers,'If-Match':'1'}).status_code,200)
+        second=self.post('route-groups',{**data,'name':'Replacement'}).json()
+        self.assertNotEqual(first['id'],second['id'],'Deleted group IDs must not be reused')
+        self.assertEqual(self.client.put(path,json={**data,'revision':1},headers=self.headers).status_code,404)
+
+    def test_legacy_counter_upgrade_preserves_memberships_and_deleted_ids(self):
+        data={'name':'Legacy','include':['10.0.0.0/8'],'exclude':[],'exclude_lan':True}
+        group=self.post('route-groups',data).json()
+        device,auth=self.device()
+        self.post(f'route-groups/{group["id"]}/members',{'device_id':device,'member':True})
+        with db.connect() as c:
+            c.execute('DROP TABLE rtrust_route_counter')
+            c.execute("INSERT INTO rtrust_audit(actor,action,object,created) VALUES('legacy','route_group_delete','500',1)")
+        exchange.init();exchange.init()
+        self.assertEqual(self.client.get('/portal/v2/routing',headers=auth).json()['policy']['revision'],f'{group["id"]}:1')
+        replacement=self.post('route-groups',{**data,'name':'New'}).json()
+        self.assertGreater(replacement['id'],500)
+        with db.connect() as c:
+            c.execute('INSERT INTO rtrust_route_groups(id,owner,name,policy,revision) VALUES(900,?,?,?,1)',(self.owner,'Old writer','{"include":["10.0.0.0/8"],"exclude":[],"exclude_lan":true}'))
+        self.assertGreater(self.post('route-groups',data).json()['id'],900)
+
     def test_admin_enrollment_is_one_time_and_audited(self):
         headers=self.admin()
         response=self.client.post('/admin/api/agent-routes/enrollment-codes',json={'user_id':self.other},headers=headers)
