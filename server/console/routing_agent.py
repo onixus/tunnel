@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import socketserver
+import threading
 from urllib.parse import urlsplit
 
 import agent
@@ -60,7 +61,7 @@ class Handler(socketserver.StreamRequestHandler):
             request = json.loads(raw)
             if not isinstance(request, dict) or not isinstance(request.get('op'), str) or not isinstance(request.get('data', {}), dict):
                 raise PolicyError('Некорректный запрос')
-            if request['op'] == 'snapshot':
+            if request['op'] in ('snapshot', 'protocols.check'):
                 result = dispatch(request['op'], request.get('data', {}))
             else:
                 with agent.LOCK:
@@ -82,6 +83,7 @@ def main():
             service_routes.watchdog_restore(Path(pending['journal']))
         except Exception:
             pass  # Keep reads available; the pending marker blocks all route writes.
+    threading.Thread(target=protocols.auto_check, daemon=True).start()
     path = Path(agent.SOCKET)
     path.parent.mkdir(mode=0o750, exist_ok=True)
     path.unlink(missing_ok=True)
