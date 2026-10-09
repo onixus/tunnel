@@ -188,7 +188,8 @@ class Runtime:
             else:
                 value = {'schema': 1, 'exit': exit_id}
                 if exit_id != 'direct':
-                    value['relay'] = relay_config(profiles[exit_id])
+                    # Mirror the live Hysteria exceptions so both VPNs route alike.
+                    value['relay'] = relay_config(profiles[exit_id], state['config'].get('acl', {}).get('inline', []), profiles)
                 new = json.dumps(value, sort_keys=True)
                 old = state['raw_tt']
             prepared[name] = {'before': old, 'after': new, 'expected_ip': expected,
@@ -264,6 +265,45 @@ def restore(runtime, path, journal):
     PENDING.unlink(missing_ok=True)
 
 
+def commit(runtime, prepared, old_policy, new_policy=None):
+    """Write prepared services under a watchdog; roll everything back on any failure."""
+    BACKUPS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    name = 'vpn-services-rollback-' + secrets.token_hex(8)
+    path = BACKUPS / (name + '.json')
+    journal = {'status': 'pending', 'watchdog': name, 'prepared': prepared, 'attempted': [], 'old_policy': old_policy}
+    save_journal(path, journal)
+    atomic(PENDING, json.dumps({'journal': str(path)}))
+    try:
+        runtime.arm(name, path)  # No live service changes before watchdog arming.
+    except BaseException:
+        journal['status'] = 'aborted'
+        save_journal(path, journal)
+        PENDING.unlink(missing_ok=True)
+        raise
+    try:
+        for service, item in prepared.items():
+            if runtime.current(service) != item['before']:
+                raise PolicyError('Конфигурация изменена другим оператором')
+            journal['attempted'].append(service)
+            save_journal(path, journal)
+            runtime.write(service, item['after'], item['before'])
+            runtime.probe(service, item['expected_ip'])
+        if new_policy is not None:
+            atomic(POLICY, json.dumps(new_policy, sort_keys=True))
+        journal['status'] = 'committed'
+        save_journal(path, journal)  # A late watchdog sees committed and does nothing.
+        PENDING.unlink(missing_ok=True)
+    except BaseException:
+        restore(runtime, path, journal)
+        runtime.disarm(name)
+        raise PolicyError('Переключение не прошло проверку. Предыдущие конфигурации восстановлены.') from None
+    try:
+        runtime.disarm(name)
+    except Exception:
+        pass  # Committed journal makes a late timer harmless.
+    return path.name
+
+
 def apply(runtime, data):
     with route_lock():
         if PENDING.exists():
@@ -274,41 +314,32 @@ def apply(runtime, data):
         # Preflight can take time; never use it as permission to overwrite a newer edit.
         if runtime.observe()['revision'] != state['revision']:
             raise PolicyError('Конфигурация изменилась во время проверки. Обновите страницу.')
-        BACKUPS.mkdir(mode=0o700, parents=True, exist_ok=True)
-        name = 'vpn-services-rollback-' + secrets.token_hex(8)
-        path = BACKUPS / (name + '.json')
-        journal = {'status': 'pending', 'watchdog': name, 'prepared': prepared, 'attempted': [], 'old_policy': state['raw_policy']}
-        save_journal(path, journal)
-        atomic(PENDING, json.dumps({'journal': str(path)}))
-        try:
-            runtime.arm(name, path)  # No live service changes before watchdog arming.
-        except BaseException:
-            journal['status'] = 'aborted'
-            save_journal(path, journal)
-            PENDING.unlink(missing_ok=True)
-            raise
-        try:
-            for service, item in prepared.items():
-                if runtime.current(service) != item['before']:
-                    raise PolicyError('Конфигурация изменена другим оператором')
-                journal['attempted'].append(service)
-                save_journal(path, journal)
-                runtime.write(service, item['after'], item['before'])
-                runtime.probe(service, item['expected_ip'])
-            atomic(POLICY, json.dumps(plan['policy'], sort_keys=True))
-            journal['status'] = 'committed'
-            save_journal(path, journal)  # A late watchdog sees committed and does nothing.
-            PENDING.unlink(missing_ok=True)
-        except BaseException:
-            restore(runtime, path, journal)
-            runtime.disarm(name)
-            raise PolicyError('Переключение не прошло проверку. Предыдущие конфигурации восстановлены.') from None
-        try:
-            runtime.disarm(name)
-        except Exception:
-            pass  # Committed journal makes a late timer harmless.
+        backup = commit(runtime, prepared, state['raw_policy'], plan['policy'])
         return {'message': 'Политика маршрутов применена. ' + ('Переключённые сервисы проверены.' if prepared else 'Перезапуск сервисов не потребовался.'),
-                'changes': plan['changes'], 'untouched': plan['untouched'], 'backup': path.name}
+                'changes': plan['changes'], 'untouched': plan['untouched'], 'backup': backup}
+
+
+def sync_trusttunnel(runtime):
+    """Re-render the TrustTunnel relay from the current Hysteria ACL, keeping its exit.
+
+    Returns a user-facing message, or None when TrustTunnel exits directly or is already in sync.
+    """
+    with route_lock():
+        if PENDING.exists():
+            raise PolicyError('Предыдущее переключение не завершено. Сначала проверьте журнал восстановления.')
+        state = runtime.observe()
+        service = state['services']['trusttunnel']
+        exit_id = service['actual_exit']
+        if exit_id not in ('primary', 'reserve') or not service['configurable']:
+            return None
+        change = {'id': 'trusttunnel', 'before': exit_id, 'after': exit_id, 'restart': True}
+        prepared = runtime.prepare({'changes': [change]}, state)
+        if prepared['trusttunnel']['after'] == prepared['trusttunnel']['before']:
+            return None
+        if runtime.observe()['revision'] != state['revision']:
+            raise PolicyError('Конфигурация изменилась во время проверки. Обновите страницу.')
+        commit(runtime, prepared, state['raw_policy'])
+        return 'Исключения TrustTunnel синхронизированы с Hysteria и проверены.'
 
 
 def watchdog_restore(path):

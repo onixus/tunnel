@@ -46,8 +46,20 @@ def dispatch(op, data):
         return service_routes.apply(runtime, data)
     if op == 'updates.server' and (service_routes.POLICY.exists() or service_routes.TT_CONFIG.exists()):
         raise PolicyError('При сервисной маршрутизации обновление компонентов выполняется оператором с сохранением адаптера; см. service-routing.md')
-    if op == 'routes.apply' and service_routes.PENDING.exists():
-        raise PolicyError('Сначала завершите восстановление предыдущего переключения')
+    if op == 'routes.apply':
+        if service_routes.PENDING.exists():
+            raise PolicyError('Сначала завершите восстановление предыдущего переключения')
+        result = agent.dispatch(op, data)
+        # Exception edits target Hysteria ACL; TrustTunnel relay must follow them.
+        try:
+            synced = service_routes.sync_trusttunnel(runtime)
+        except PolicyError as exc:
+            synced = 'TrustTunnel не синхронизирован: ' + str(exc)
+        except Exception:
+            synced = 'TrustTunnel не синхронизирован; повторите сохранение исключений или проверьте журнал'
+        if synced:
+            result['message'] = result.get('message', '') + ' ' + synced
+        return result
     return agent.dispatch(op, data)
 
 

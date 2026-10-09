@@ -309,6 +309,88 @@ def test_relay_splits_ru_cis_direct_and_everything_else_to_egress():
     assert route['final'] == 'egress'
 
 
+LIVE_ACL = ['local(10.254.77.1, tcp/18082, 127.0.0.1)', 'reject(geoip:private)',
+            'local(all, udp/53, 127.0.0.1)', 'reserve-out(suffix:hostkey.ru)', 'local(suffix:ru)',
+            'local(suffix:XN--P1AI)', 'local(lemanapro.com)', 'reserve-out(198.51.100.0/24)',
+            'local(geoip:ru)', 'local(geoip:kz)', 'primary-out(geoip:by)', 'unknown(suffix:x.com)',
+            'primary-out(all)']
+
+
+def exits():
+    return {'primary': profile('primary-out'), 'reserve': profile('reserve-out')}
+
+
+def test_relay_mirrors_hysteria_acl_in_order():
+    p = exits()
+    c = tt.relay_config(p['primary'], LIVE_ACL, p)
+    rules = c['route']['rules']
+    resolve = rules.index({'action': 'resolve', 'strategy': 'ipv4_only'})
+    assert rules[2:resolve] == [
+        {'domain_suffix': ['hostkey.ru'], 'action': 'route', 'outbound': 'reserve'},
+        {'domain_suffix': ['ru'], 'action': 'route', 'outbound': 'dns-direct'},
+        {'domain_suffix': ['xn--p1ai'], 'action': 'route', 'outbound': 'dns-direct'},
+        {'domain': ['lemanapro.com'], 'action': 'route', 'outbound': 'dns-direct'},
+    ]
+    assert rules[resolve + 1:] == [
+        {'ip_is_private': True, 'action': 'reject'},
+        {'ip_cidr': ['198.51.100.0/24'], 'action': 'route', 'outbound': 'reserve'},
+        {'rule_set': ['cis'], 'action': 'route', 'outbound': 'dns-direct'},
+    ]
+    # Only referenced exits get an outbound; the selected exit stays `egress`.
+    assert [o['tag'] for o in c['outbounds']] == ['egress', 'dns-direct', 'reserve']
+    assert c['route']['final'] == 'egress'
+
+
+def test_translate_reports_unrepresentable_rules_and_keeps_private_reject():
+    domain, network, skipped = tt.translate_acl(['local(suffix:ru)', 'primary-out(geoip:by)', 'unknown(x.com)', 'local(all)'],
+                                                {'local': 'dns-direct', 'primary-out': 'egress'})
+    assert domain == [{'domain_suffix': ['ru'], 'action': 'route', 'outbound': 'dns-direct'}]
+    assert network == [{'ip_is_private': True, 'action': 'reject'}]
+    assert skipped == ['primary-out(geoip:by)', 'unknown(x.com)']
+
+
+def test_prepare_trusttunnel_uses_live_acl():
+    p = exits()
+    config = {'acl': {'inline': ['reject(geoip:private)', 'local(suffix:example.org)', 'primary-out(all)']}}
+    r = sr.Runtime(SimpleNamespace(module_switch=lambda: SimpleNamespace(check_exit=Mock())))
+    r.expected_ip = Mock(return_value='203.0.113.2')
+    plan = {'changes': [{'id': 'trusttunnel', 'before': 'direct', 'after': 'reserve', 'restart': True}]}
+    out = r.prepare(plan, {'config': config, 'raw_tt': None, 'profiles': p})
+    rules = json.loads(out['trusttunnel']['after'])['relay']['route']['rules']
+    assert {'domain_suffix': ['example.org'], 'action': 'route', 'outbound': 'dns-direct'} in rules
+
+
+def test_sync_rewrites_only_trusttunnel_and_keeps_policy(runtime):
+    runtime.s = state(t='reserve')
+    sr.POLICY.write_text('{"kept": true}')
+    assert sr.sync_trusttunnel(runtime)
+    assert runtime.values == {'hysteria': 'old-h', 'trusttunnel': 'new-trusttunnel'}
+    assert sr.POLICY.read_text() == '{"kept": true}'
+    assert not sr.PENDING.exists()
+
+
+def test_sync_is_noop_for_direct_or_unchanged(runtime):
+    assert sr.sync_trusttunnel(runtime) is None
+    runtime.s = state(t='primary')
+    runtime.values['trusttunnel'] = 'new-trusttunnel'
+    assert sr.sync_trusttunnel(runtime) is None
+    assert not [c for c in runtime.calls if c[0] == 'write']
+
+
+def test_exception_edit_triggers_trusttunnel_sync(tmp_path, monkeypatch):
+    import agent
+    import routing_agent
+    monkeypatch.setattr(sr, 'PENDING', tmp_path / 'pending.json')
+    monkeypatch.setattr(agent, 'dispatch', lambda op, data: {'message': 'Маршруты применены'})
+    monkeypatch.setattr(sr, 'sync_trusttunnel', lambda r: 'TT ok')
+    assert routing_agent.dispatch('routes.apply', {})['message'] == 'Маршруты применены TT ok'
+    def broken(r):
+        raise RuntimeError('secret detail')
+    monkeypatch.setattr(sr, 'sync_trusttunnel', broken)
+    message = routing_agent.dispatch('routes.apply', {})['message']
+    assert 'не синхронизирован' in message and 'secret' not in message
+
+
 def test_relay_reaches_loopback_trusttunnel_socks_through_bridge_with_credentials():
     p = profile()
     p['outbound']['socks5']['addr'] = '127.0.0.1:10810'
