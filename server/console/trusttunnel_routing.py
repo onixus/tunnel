@@ -29,6 +29,7 @@ _THREAD = None
 CIS = ('ru', 'by', 'kz', 'kg', 'tj', 'uz', 'am', 'az', 'md', 'tm')
 # Hysteria ACL line with one plain argument: outbound(match). Port/hijack forms are skipped.
 _ACL_LINE = re.compile(r'^([A-Za-z0-9_-]+)\(\s*([^(),\s]+)\s*\)$')
+_CATCH_ALL = re.compile(r'^[A-Za-z0-9_-]+\(\s*all\s*\)$')
 _HOST = re.compile(r'^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$')
 # Used when no Hysteria ACL is supplied (installer self-check, legacy callers).
 _DEFAULT_DOMAIN = [
@@ -44,12 +45,14 @@ _DEFAULT_NETWORK = [
 def translate_acl(acl, outbounds):
     """Translate Hysteria ACL exceptions into sing-box rules, keeping their order.
 
-    `outbounds` maps Hysteria outbound names to relay tags. The last ACL line is the
-    catch-all and is replaced by the relay's own `final`. Returns (domain, network,
+    `outbounds` maps Hysteria outbound names to relay tags. A trailing `outbound(all)`
+    catch-all is replaced by the relay's own `final`; any other last line is an exception. Returns (domain, network,
     skipped): domain rules run before resolution, network rules after it.
     """
     domain, network, skipped = [], [], []
-    for line in acl[:-1]:
+    if acl and isinstance(acl[-1], str) and _CATCH_ALL.match(acl[-1].strip()):
+        acl = acl[:-1]
+    for line in acl:
         m = _ACL_LINE.match(line.strip()) if isinstance(line, str) else None
         if not m:
             skipped.append(line)

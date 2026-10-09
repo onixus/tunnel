@@ -126,7 +126,11 @@ class FakeRuntime:
         result = deepcopy(self.s)
         if self.drift_during_preflight and self.observe_count > 1:
             result['revision'] = 'b' * 64
+        result['raw_tt'] = self.values['trusttunnel']
         return result
+
+    def tt_config(self, exit_id, s):
+        return 'new-trusttunnel'
 
     def prepare(self, plan, s):
         return {c['id']: {'before': self.values[c['id']], 'after': 'new-' + c['id'],
@@ -375,6 +379,27 @@ def test_sync_is_noop_for_direct_or_unchanged(runtime):
     runtime.values['trusttunnel'] = 'new-trusttunnel'
     assert sr.sync_trusttunnel(runtime) is None
     assert not [c for c in runtime.calls if c[0] == 'write']
+
+
+def test_sync_skips_exit_check_when_relay_is_current(runtime):
+    runtime.s = state(t='primary')
+    runtime.values['trusttunnel'] = 'new-trusttunnel'
+    runtime.prepare = Mock(side_effect=AssertionError('exit checked'))
+    assert sr.sync_trusttunnel(runtime) is None
+
+
+def test_tt_config_without_hysteria_acl_keeps_builtin_policy():
+    p = exits()
+    r = sr.Runtime(SimpleNamespace())
+    for config in ({}, {'acl': None}, {'acl': {'inline': []}}):
+        relay = json.loads(r.tt_config('primary', {'config': config, 'profiles': p}))['relay']
+        assert relay == tt.relay_config(p['primary'])
+
+
+def test_translate_keeps_last_exception_without_catch_all():
+    domain, network, _ = tt.translate_acl(['local(suffix:ru)', 'local(example.org)'], {'local': 'dns-direct'})
+    assert domain == [{'domain_suffix': ['ru'], 'action': 'route', 'outbound': 'dns-direct'},
+                      {'domain': ['example.org'], 'action': 'route', 'outbound': 'dns-direct'}]
 
 
 def test_exception_edit_triggers_trusttunnel_sync(tmp_path, monkeypatch):
