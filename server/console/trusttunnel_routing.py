@@ -4,9 +4,11 @@ Called by endpoint.write_vpn_toml, including after credential regeneration.
 Never changes the host route table or the portal's own outbound connections.
 """
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import threading
@@ -24,14 +26,72 @@ _PROC = None
 _THREAD = None
 
 
-def relay_config(profile):
-    """Apply domain/CIS policy before the selected authenticated interserver exit."""
-    import ipaddress
+CIS = ('ru', 'by', 'kz', 'kg', 'tj', 'uz', 'am', 'az', 'md', 'tm')
+# Hysteria ACL line with one plain argument: outbound(match). Port/hijack forms are skipped.
+_ACL_LINE = re.compile(r'^([A-Za-z0-9_-]+)\(\s*([^(),\s]+)\s*\)$')
+_HOST = re.compile(r'^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$')
+# Used when no Hysteria ACL is supplied (installer self-check, legacy callers).
+_DEFAULT_DOMAIN = [
+    {'domain_suffix': ['hostkey.ru'], 'action': 'route', 'outbound': 'egress'},
+    {'domain_suffix': ['ru', 'su', 'xn--p1ai'], 'action': 'route', 'outbound': 'dns-direct'},
+]
+_DEFAULT_NETWORK = [
+    {'ip_is_private': True, 'action': 'reject'},
+    {'rule_set': ['cis'], 'action': 'route', 'outbound': 'dns-direct'},
+]
+
+
+def translate_acl(acl, outbounds):
+    """Translate Hysteria ACL exceptions into sing-box rules, keeping their order.
+
+    `outbounds` maps Hysteria outbound names to relay tags. The last ACL line is the
+    catch-all and is replaced by the relay's own `final`. Returns (domain, network,
+    skipped): domain rules run before resolution, network rules after it.
+    """
+    domain, network, skipped = [], [], []
+    for line in acl[:-1]:
+        m = _ACL_LINE.match(line.strip()) if isinstance(line, str) else None
+        if not m:
+            skipped.append(line)
+            continue
+        name, match = m.group(1), m.group(2).lower()
+        if name == 'reject':
+            action = {'action': 'reject'}
+        elif name in outbounds:
+            action = {'action': 'route', 'outbound': outbounds[name]}
+        else:
+            skipped.append(line)
+            continue
+        if match.startswith('suffix:') and _HOST.match(match[7:]):
+            domain.append({'domain_suffix': [match[7:]], **action})
+        elif match == 'geoip:private':
+            network.append({'ip_is_private': True, **action})
+        elif match.startswith('geoip:') and match[6:] in CIS and action.get('outbound') == 'dns-direct':
+            # One combined CIS rule set: only the shared "direct" policy is representable.
+            rule = {'rule_set': ['cis'], **action}
+            if rule not in network:
+                network.append(rule)
+        elif _HOST.match(match) and not match.replace('.', '').isdigit():
+            domain.append({'domain': [match], **action})
+        else:
+            try:
+                cidr = str(ipaddress.ip_network(match, strict=False))
+            except ValueError:
+                skipped.append(line)
+                continue
+            network.append({'ip_cidr': [cidr], **action})
+    # Never forward to private destinations, whatever the source ACL says.
+    if {'ip_is_private': True, 'action': 'reject'} not in network:
+        network.insert(0, {'ip_is_private': True, 'action': 'reject'})
+    return domain, network, skipped
+
+
+def _socks(profile, tag):
     socks = profile['outbound']['socks5']
     host, port = socks['addr'].rsplit(':', 1)
     if ipaddress.ip_address(host).version != 4 or not 1 <= int(port) <= 65535:
         raise ValueError('Invalid SOCKS address')
-    outbound = {'type': 'socks', 'tag': 'egress', 'server': host, 'server_port': int(port), 'version': '5'}
+    outbound = {'type': 'socks', 'tag': tag, 'server': host, 'server_port': int(port), 'version': '5'}
     if host == '127.0.0.1' and int(port) == 10810:
         # Host tt-primary SOCKS, reached from the container via the docker bridge.
         # TrustTunnel client refuses a non-loopback listener without credentials.
@@ -40,22 +100,49 @@ def relay_config(profile):
         outbound.update(username=socks['username'], password=socks['password'])
     else:
         raise ValueError('Missing upstream credentials')
+    return outbound
+
+
+def relay_config(profile, acl=None, profiles=None):
+    """Apply the Hysteria exception policy before the selected authenticated exit.
+
+    With `acl` (Hysteria `acl.inline`) and `profiles` (all exits), the relay mirrors
+    every translatable Hysteria exception; otherwise the built-in RU/CIS policy is used.
+    """
+    outbounds = [_socks(profile, 'egress'), {'type': 'direct', 'tag': 'dns-direct'}]
+    if acl is None:
+        domain, network = _DEFAULT_DOMAIN, _DEFAULT_NETWORK
+    else:
+        names = {'local': 'dns-direct'}
+        extra = {}
+        for exit_id, item in sorted((profiles or {}).items()):
+            name = item['outbound'].get('name')
+            if not name or name in names:
+                continue
+            if item is profile or item['outbound'] == profile['outbound']:
+                names[name] = 'egress'
+            elif exit_id not in ('egress', 'dns-direct'):
+                names[name] = exit_id
+                extra[exit_id] = item
+        if profile['outbound'].get('name'):
+            names.setdefault(profile['outbound']['name'], 'egress')
+        domain, network, _ = translate_acl(acl, names)
+        used = {r.get('outbound') for r in domain + network}
+        outbounds += [_socks(extra[t], t) for t in sorted(extra) if t in used]
     return {
         'log': {'disabled': True},
         'dns': {'servers': [{'type': 'udp', 'tag': 'local-dns', 'server': '172.18.0.53'}], 'final': 'local-dns', 'strategy': 'ipv4_only'},
         'inbounds': [{'type': 'socks', 'tag': 'endpoint', 'listen': '127.0.0.1', 'listen_port': 11080}],
-        'outbounds': [outbound, {'type': 'direct', 'tag': 'dns-direct'}],
+        'outbounds': outbounds,
         'route': {
             'default_domain_resolver': 'local-dns',
             'rule_set': [{'type': 'local', 'tag': 'cis', 'format': 'source', 'path': '/console-routing/cis.json'}],
             'rules': [
                 {'port': 53, 'action': 'route', 'outbound': 'dns-direct'},
                 {'action': 'sniff'},
-                {'domain_suffix': ['hostkey.ru'], 'action': 'route', 'outbound': 'egress'},
-                {'domain_suffix': ['ru', 'su', 'xn--p1ai'], 'action': 'route', 'outbound': 'dns-direct'},
+                *domain,
                 {'action': 'resolve', 'strategy': 'ipv4_only'},
-                {'ip_is_private': True, 'action': 'reject'},
-                {'rule_set': ['cis'], 'action': 'route', 'outbound': 'dns-direct'},
+                *network,
             ],
             'final': 'egress',
         },
