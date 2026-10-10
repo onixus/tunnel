@@ -186,15 +186,22 @@ class Runtime:
                 new = yaml.safe_dump(config, sort_keys=False)
                 old = state['raw_h']
             else:
-                value = {'schema': 1, 'exit': exit_id}
-                if exit_id != 'direct':
-                    # Mirror the live Hysteria exceptions so both VPNs route alike.
-                    value['relay'] = relay_config(profiles[exit_id], state['config'].get('acl', {}).get('inline', []), profiles)
-                new = json.dumps(value, sort_keys=True)
+                new = self.tt_config(exit_id, state, profiles)
                 old = state['raw_tt']
             prepared[name] = {'before': old, 'after': new, 'expected_ip': expected,
                               'before_ip': self.expected_ip(change['before'], profiles)}
         return prepared
+
+    def tt_config(self, exit_id, state, profiles=None):
+        """Render the TrustTunnel routing config; no network access."""
+        value = {'schema': 1, 'exit': exit_id}
+        if exit_id != 'direct':
+            profiles = profiles or state['profiles']
+            # Mirror the live Hysteria exceptions so both VPNs route alike;
+            # without an ACL the relay keeps its built-in RU/CIS policy.
+            acl = (state['config'].get('acl') or {}).get('inline') or None
+            value['relay'] = relay_config(profiles[exit_id], acl, profiles)
+        return json.dumps(value, sort_keys=True)
 
     def current(self, name):
         return self.agent.module_switch().get_config() if name == 'hysteria' else text_or_none(TT_CONFIG)
@@ -332,10 +339,11 @@ def sync_trusttunnel(runtime):
         exit_id = service['actual_exit']
         if exit_id not in ('primary', 'reserve') or not service['configurable']:
             return None
+        # Compare before prepare(): it resolves and checks the exit over the network.
+        if runtime.tt_config(exit_id, state) == state['raw_tt']:
+            return None
         change = {'id': 'trusttunnel', 'before': exit_id, 'after': exit_id, 'restart': True}
         prepared = runtime.prepare({'changes': [change]}, state)
-        if prepared['trusttunnel']['after'] == prepared['trusttunnel']['before']:
-            return None
         if runtime.observe()['revision'] != state['revision']:
             raise PolicyError('Конфигурация изменилась во время проверки. Обновите страницу.')
         commit(runtime, prepared, state['raw_policy'])
