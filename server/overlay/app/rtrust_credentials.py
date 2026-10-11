@@ -7,6 +7,7 @@ all sessions; other credentials remain unchanged.
 import json
 import os
 import secrets
+import socket
 import time
 import uuid
 from fastapi import HTTPException
@@ -108,7 +109,7 @@ def apply_pending():
                 deadline = time.monotonic() + 2
                 while endpoint.manager._is_running() and time.monotonic() < deadline:
                     time.sleep(.05)
-                if endpoint.manager._is_running():
+                if endpoint.manager._is_running() and listener_ready(int(settings.get('conn_port') or '8443')):
                     state, error = 'applied', None
                 fence.executemany('UPDATE rtrust_credential_operations SET state=?,error=?,applied=? WHERE id=?',
                                   [(state, error, int(time.time()) if state == 'applied' else None, i) for i in ids])
@@ -244,3 +245,12 @@ def revoke_legacy(device):
                 c.execute('DELETE FROM '+table+' WHERE device=?',(device,))
         apply_pending()
     return count
+
+
+
+def listener_ready(port):
+    try:
+        with socket.create_connection(('127.0.0.1',port),timeout=.2):
+            return True
+    except OSError:
+        return False

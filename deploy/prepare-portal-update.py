@@ -38,6 +38,8 @@ def prepare(base, tag):
         context = Path(folder)
         shutil.copytree(ROOT / 'server/overlay/app', context / 'server/overlay/app',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        (context / 'server/console').mkdir()
+        shutil.copy2(ROOT / 'server/console/console_app.py', context / 'server/console/console_app.py')
         (context / 'deploy').mkdir()
         for name in ('portal_patch.py', 'portal-update.Dockerfile'):
             shutil.copy2(ROOT / 'deploy' / name, context / 'deploy' / name)
@@ -66,6 +68,7 @@ paths = app.openapi()['paths']
 assert 'post' in paths['/portal/v2/devices/{identifier}/credentials/{action}']
 assert 'get' in paths['/portal/v2/device-credentials']
 assert 'post' in paths['/portal/v2/device-token/renew']
+assert 'post' in paths['/admin/api/device-credentials/{identifier}/revoke']
 assert 'get' in paths['/portal/v2/routing']
 assert 'get' in paths['/admin/agent-routes']
 assert 'put' in paths['/admin/api/agent-routes/devices/{identifier}']

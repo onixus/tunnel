@@ -19,6 +19,9 @@ class CredentialTests(ExchangeTests):
         self.certificate = patch.object(endpoint,'cert_present',return_value=True)
         self.certificate.start()
         self.addCleanup(self.certificate.stop)
+        self.listener = patch.object(managed,'listener_ready',return_value=True)
+        self.listener.start()
+        self.addCleanup(self.listener.stop)
         self.running = patch.object(endpoint.manager, '_is_running', return_value=True)
         self.running.start()
         self.addCleanup(self.running.stop)
@@ -120,6 +123,12 @@ class CredentialTests(ExchangeTests):
             self.assertEqual(path.stat().st_mode&0o777,0o600)
             self.assertEqual(tomllib.loads(path.read_text())['client'],creds)
 
+    def test_live_process_without_listener_is_not_applied(self):
+        device,_=self.enrolled()
+        with patch.object(managed,'listener_ready',return_value=False),patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            result=self.change(device,'provision')
+        self.assertEqual(result.json()['operations'][0]['state'],'failed')
+
     def test_retry_after_write_failure_forces_process_restart(self):
         device,_=self.enrolled()
         with patch.object(endpoint.manager,'reconcile',side_effect=RuntimeError('secret exception text')):
@@ -140,6 +149,39 @@ class CredentialTests(ExchangeTests):
         self.assertEqual(managed.active_credentials(),[])
         self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,401)
         self.assertEqual(managed.snapshot(self.owner,device)['operations'][0]['action'],'revoke')
+
+    def test_admin_revoke_requires_role_csrf_and_reports_failure(self):
+        from app import security
+        from app.rtrust_profiles import admin_csrf
+        import hashlib,hmac
+        device,auth=self.enrolled()
+        path=f'/admin/api/device-credentials/{device}/revoke'
+        self.assertEqual(self.client.post(path,headers=self.headers).status_code,401)
+        self.assertEqual(self.client.post(path,headers=auth).status_code,403)
+        with db.connect() as c:admin=c.execute('SELECT id FROM admins LIMIT 1').fetchone()[0]
+        token=security.create_session_token(str(admin),'admin')
+        self.client.cookies.set('admin_token',token)
+        self.assertEqual(self.client.post(path).status_code,403)
+        from app import config
+        headers={'X-CSRF-Token':hmac.new(config.SECRET_KEY.encode(),('rtrust-admin-routes:'+token).encode(),hashlib.sha256).hexdigest()}
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.change(device,'provision')
+        with patch.object(endpoint.manager,'_is_running',return_value=False):
+            revoked=self.client.post(path,headers=headers)
+        self.assertEqual(revoked.status_code,200,revoked.text)
+        self.assertEqual(revoked.json()['operations'][0]['state'],'failed')
+        self.assertEqual(revoked.headers['cache-control'],'no-store')
+        self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,401)
+
+    def test_startup_replays_durable_failed_operation(self):
+        from fastapi.testclient import TestClient
+        device,_=self.enrolled()
+        with patch.object(endpoint.manager,'_is_running',return_value=False):
+            result=self.change(device,'provision')
+        self.assertEqual(result.json()['operations'][0]['state'],'failed')
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            with TestClient(self.client.app):
+                self.assertEqual(managed.snapshot(self.owner,device)['operations'][0]['state'],'applied')
 
     def test_second_supervisor_is_rejected_before_startup(self):
         from fastapi.testclient import TestClient

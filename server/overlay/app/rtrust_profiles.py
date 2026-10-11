@@ -88,7 +88,7 @@ def install(application):
     @application.middleware('http')
     async def private_responses(request, call_next):
         response = await call_next(request)
-        if request.url.path in ('/profiles', '/admin/agent-routes') or request.url.path.startswith(('/portal/v2/', '/admin/api/agent-routes')):
+        if request.url.path in ('/profiles', '/admin/agent-routes') or request.url.path.startswith(('/portal/v2/', '/admin/api/agent-routes', '/admin/api/device-credentials')):
             response.headers.update(HEADERS)
             response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         return response
@@ -622,3 +622,21 @@ def renew_device_token(request:Request):
         c.execute('INSERT INTO rtrust_tokens VALUES(?,?,?)',(security.hash_api_token(raw),device,int(time.time())+30*86400))
         audit(c,identity,'renew_token',str(device))
     return JSONResponse({'token':raw,'expires_in':30*86400},headers=HEADERS)
+
+
+@router.post('/admin/api/device-credentials/{identifier}/revoke')
+def admin_credential_revoke(identifier:int,request:Request):
+    identity=route_admin(request,True)
+    with credentials.endpoint.manager._lock:
+        with db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT * FROM app_devices WHERE id=?',(identifier,)).fetchone()
+            if row is None:raise HTTPException(404,'Device not found')
+            owner=row['user_id']
+            credentials.revoke(c,owner,identifier)
+            c.execute("UPDATE app_devices SET revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=?",(identifier,))
+            for table in ('rtrust_tokens','rtrust_grants','rtrust_route_members','rtrust_admin_route_members','rtrust_route_delivery'):
+                c.execute('DELETE FROM '+table+' WHERE device=?',(identifier,))
+            audit(c,identity,'revoke_device',str(identifier))
+        credentials.apply_pending()
+    return JSONResponse(credentials.snapshot(owner,identifier),headers=HEADERS)

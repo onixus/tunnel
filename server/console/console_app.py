@@ -97,6 +97,25 @@ def legacy(actor_id,path,data):
     finally: client.close()
     return {'message':'Изменение TrustTunnel применено'}
 
+def managed_device_revoke(actor_id,device_id):
+    # The sidecar never starts an endpoint. Use the owning portal supervisor.
+    token=security.create_session_token(str(actor_id),'admin')
+    csrf=hmac.new(config.SECRET_KEY.encode(),('rtrust-admin-routes:'+token).encode(),hashlib.sha256).hexdigest()
+    origin=urlsplit(PORTAL)
+    if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
+        raise RuntimeError('Недопустимый внутренний адрес панели')
+    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=30)
+    try:
+        client.request('POST',f'/admin/api/device-credentials/{device_id}/revoke',headers={'Cookie':webauth.ADMIN_COOKIE+'='+token,'X-CSRF-Token':csrf})
+        response=client.getresponse();raw=response.read(1048576)
+        if response.status!=200:raise RuntimeError('Портал не подтвердил отзыв устройства')
+        result=json.loads(raw)
+        revoke=next((op for op in result.get('operations',[]) if op['action']=='revoke'),None)
+        if revoke and revoke['state']!='applied':
+            raise RuntimeError('Отзыв записан, но endpoint не подтвердил применение. Повторите операцию после восстановления endpoint.')
+        return {'message':'Отзыв отдельного VPN-пароля применён на endpoint' if revoke else 'Доступ к порталу отозван. Общие и внешние VPN-пароли остаются действующими.'}
+    finally:client.close()
+
 def source_user(source,id):
     if source=='trusttunnel':
         u=db.get_user(id)
@@ -131,6 +150,9 @@ def perform(action,data,admin):
     if action=='trusttunnel.device-revoke':
         with db.connect() as c: device=c.execute('SELECT * FROM app_devices WHERE id=?',(data['id'],)).fetchone()
         if not device: raise RuntimeError('Устройство не найдено')
+        with db.connect() as c:
+            integrated=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rtrust_credential_operations'").fetchone()
+        if integrated:return managed_device_revoke(admin,device['id'])
         db.revoke_device(device['id']); user=db.get_user(device['user_id'])
         return legacy(admin,f"users/{user['id']}/status",{'status':user['status']})
     if action=='trusttunnel.key':
@@ -139,6 +161,8 @@ def perform(action,data,admin):
     if action in ('trusttunnel.rotate','trusttunnel.revoke'):
         cfg=db.get_config(data['id'])
         if not cfg or cfg['revoked_at']: raise RuntimeError('Ключ не найден или уже отозван')
+        if cfg['device_id'] is not None:
+            raise RuntimeError('Для ключа устройства используйте смену пароля или отзыв устройства в разделе профилей.')
         # Persist desired state first; if endpoint reload fails, job reports failure.
         with db.connect() as c:
             if action.endswith('.rotate'): c.execute('UPDATE configs SET tt_password=? WHERE id=?',(secrets.token_urlsafe(24),cfg['id']))

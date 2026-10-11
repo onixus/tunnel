@@ -32,6 +32,8 @@ def test_credential_browser(viewport):
                     context.add_cookies([{'name':'user_token','value':fixture.client.cookies.get('user_token'),'url':origin}])
                     page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
                     page.goto(origin+'/profiles')
+                    # The private HTTP portal may lack secure-context randomUUID.
+                    page.evaluate("Object.defineProperty(crypto,'randomUUID',{value:undefined})")
                     expect(page.locator('#devices')).to_contain_text('Managed fixture')
                     page.once('dialog',lambda d:d.accept())
                     page.get_by_role('button',name='Выдать отдельный VPN-пароль',exact=True).click()

@@ -13,6 +13,11 @@ function button(label, action){const node=document.createElement('button');node.
 async function perform(node,action){node.disabled=true;try{await action();}catch(error){status(error.message);}finally{node.disabled=false;}}
 function clearPreview(){previewId=null;el('preview-result').hidden=true;el('summary').textContent='';el('content').value='';el('file').value='';}
 const credentialKeys={};
+function operationKey(){
+  const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+  const value=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+  return [value.slice(0,8),value.slice(8,12),value.slice(12,16),value.slice(16,20),value.slice(20)].join('-');
+}
 async function refresh(){
   const values=await Promise.all([api('profiles'),api('devices'),api('route-groups'),api('device-credentials'),api('capabilities')]);profiles=values[0].profiles;devices=values[1].devices;groups=values[2].groups;credentialStates=values[3].devices;const managedEnabled=values[4].managed_credentials.enabled;
   el('profiles').replaceChildren();el('devices').replaceChildren();
@@ -47,7 +52,7 @@ async function refresh(){
         if(!confirm('Смена паролей перезапустит VPN endpoint и разорвёт все текущие соединения. Другие устройства смогут переподключиться. Продолжить?'))return;
         const action=record.management==='device_credentials'?'rotate':'provision';
         const keyName=record.device_id+':'+action+':'+record.generation;
-        credentialKeys[keyName] ||= crypto.randomUUID();
+        credentialKeys[keyName] ||= operationKey();
         const result=await api('devices/'+device.id+'/credentials/'+action,'POST',undefined,{'Idempotency-Key':credentialKeys[keyName]});
         await refresh();status(stateNames[result.operations[0].state]+'. Обновите профиль в приложении.');
       }));
