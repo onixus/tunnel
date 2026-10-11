@@ -70,10 +70,15 @@ def spawn():
 
 def profile(device, protocol):
     cfg=db.get_device_config(device)
-    return {'schema_version':1,'name':'Acceptance','endpoint':{
-        'hostname':'localhost','addresses':[f'127.0.0.1:{port}'],
-        'username':cfg['tt_username'],'password':cfg['tt_password'],
-        'certificate':(certs/'fullchain.pem').read_text(),'upstream_protocol':protocol}}
+    identifier='managed-'+str(cfg['id'])
+    items=case.client.get('/portal/v2/profiles').json()['profiles']
+    meta=next(item for item in items if item['id']==identifier)
+    exported=case.post('profiles/'+identifier+'/export',{'format':'profile_json','revision':meta['revision'],'include_secrets':True})
+    assert exported.status_code==200,exported.text
+    result=json.loads(exported.json()['content'])
+    assert result['endpoint']['certificate']==(certs/'fullchain.pem').read_text()
+    result['endpoint']['upstream_protocol']=protocol
+    return result
 
 
 def probe(data, success=True):
@@ -127,7 +132,7 @@ def active_stream(data):
 case=ExchangeTests();case.setUp()
 db.set_settings({'panel_domain':'localhost','conn_address':'127.0.0.1','conn_port':str(port)})
 try:
-    with patch.dict(os.environ,RTRUST_MANAGED_CREDENTIALS='1'),patch.object(config,'ENDPOINT_WORKDIR',str(runtime)),patch.object(config,'CERT_DIR',str(work/'certs')),patch.object(endpoint.manager,'_spawn',spawn),patch.object(endpoint.manager,'_kill',kill),patch.object(endpoint,'_VPN_TOML_TEMPLATE',endpoint._VPN_TOML_TEMPLATE.replace('allow_private_network_connections = false','allow_private_network_connections = true')):
+    with patch.dict(os.environ,RTRUST_MANAGED_CREDENTIALS='1',CLIENT_CA_FILE=str(certs/'fullchain.pem')),patch.object(config,'ENDPOINT_WORKDIR',str(runtime)),patch.object(config,'CERT_DIR',str(work/'certs')),patch.object(endpoint.manager,'_spawn',spawn),patch.object(endpoint.manager,'_kill',kill),patch.object(endpoint,'_VPN_TOML_TEMPLATE',endpoint._VPN_TOML_TEMPLATE.replace('allow_private_network_connections = false','allow_private_network_connections = true')):
         for protocol in ('http2','http3'):
             lost,auth=case.enrolled(protocol+' lost');neighbor,_=case.enrolled(protocol+' neighbor')
             def change(device,action):

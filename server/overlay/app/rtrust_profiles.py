@@ -181,6 +181,11 @@ def managed_document(cfg):
     port=int(settings.get('conn_port') or '8443')
     if ':' in address and not address.startswith('['):address='['+address+']'
     raw={'schema_version':1,'name':cfg['label'] or cfg['tt_username'],'endpoint':{'hostname':hostname,'addresses':[f'{address}:{port}'],'username':cfg['tt_username'],'password':cfg['tt_password'],'custom_sni':settings.get('conn_sni') or '', 'has_ipv6':False,'anti_dpi':False,'upstream_protocol':'http3' if settings.get('conn_protocol')=='QUIC' else 'http2'}}
+    ca_path=os.environ.get('CLIENT_CA_FILE')
+    if ca_path:
+        try:
+            raw['endpoint']['certificate']=Path(ca_path).read_text(encoding='utf-8')
+        except (OSError,UnicodeError):raise HTTPException(503,'Client trust certificate unavailable')
     return codec(json.dumps(raw))
 
 def accessible(c, owner, device, identifier):

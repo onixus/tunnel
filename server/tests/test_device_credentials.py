@@ -123,6 +123,15 @@ class CredentialTests(ExchangeTests):
             self.assertEqual(path.stat().st_mode&0o777,0o600)
             self.assertEqual(tomllib.loads(path.read_text())['client'],creds)
 
+    def test_configured_client_trust_is_required_for_export(self):
+        device,_=self.enrolled()
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.change(device,'provision')
+        with patch.dict(os.environ,CLIENT_CA_FILE='/missing/synthetic-client-trust.pem'):
+            result=self.client.get('/portal/v2/profiles')
+        self.assertEqual(result.status_code,503)
+        self.assertNotIn('/missing/',result.text)
+
     def test_live_process_without_listener_is_not_applied(self):
         device,_=self.enrolled()
         with patch.object(managed,'listener_ready',return_value=False),patch.object(managed.time,'monotonic',side_effect=range(1000)):
