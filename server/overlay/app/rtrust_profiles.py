@@ -15,7 +15,7 @@ import tempfile
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from . import config, db, security, webauth
+from . import config, db, security, webauth, rtrust_credentials as credentials
 from .templating import templates
 
 router = APIRouter()
@@ -47,15 +47,42 @@ def init():
         high_water=c.execute("SELECT MAX(v) FROM (SELECT COALESCE(MAX(id),0) AS v FROM rtrust_route_groups UNION ALL SELECT COALESCE(MAX(CAST(object AS INTEGER)),0) AS v FROM rtrust_audit WHERE action IN ('route_group_create','route_group_delete'))").fetchone()[0]
         c.execute('INSERT INTO rtrust_route_counter VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET high_water=MAX(high_water,excluded.high_water)',(high_water,))
     cipher()
+    credentials.init()
 
 def install(application):
     """Call once from the existing portal main module, after constructing its app."""
+    credentials.install()
     previous = application.router.lifespan_context
     @asynccontextmanager
     async def lifespan(app):
-        async with previous(app) as state:
-            init()
-            yield state
+        import fcntl
+        Path(config.DATA_DIR).mkdir(parents=True,exist_ok=True)
+        # Acquire before upstream startup can spawn an endpoint. A second worker
+        # must fail, rather than manage a different process with the same files.
+        lock_fd=os.open(Path(config.DATA_DIR)/'.rtrust-endpoint-owner.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        try:
+            fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except Exception:
+            os.close(lock_fd)
+            raise RuntimeError('Portal requires one endpoint supervisor process')
+        try:
+            async with previous(app) as state:
+                init()
+                import threading
+                stop = threading.Event()
+                def retry():
+                    while not stop.wait(5):
+                        try: credentials.apply_pending()
+                        except Exception: pass
+                credentials.apply_pending()
+                worker = threading.Thread(target=retry, name='device-credential-retry', daemon=True)
+                worker.start()
+                try: yield state
+                finally:
+                    stop.set()
+                    worker.join()
+        finally:
+            os.close(lock_fd)
     application.router.lifespan_context = lifespan
     application.include_router(router)
     @application.middleware('http')
@@ -163,7 +190,7 @@ def accessible(c, owner, device, identifier):
         try: number=int(identifier[8:])
         except ValueError:raise HTTPException(404,'Profile not found')
         row=c.execute('SELECT * FROM configs WHERE id=? AND user_id=? AND revoked_at IS NULL',(number,owner)).fetchone()
-        if row is None:raise HTTPException(404,'Profile not found')
+        if row is None or (device is not None and row['device_id'] is not None and row['device_id']!=device):raise HTTPException(404,'Profile not found')
         result=managed_document(row)
         revision=hashlib.sha256(result['content'].encode()).hexdigest()
         return {'id':identifier,'revision':revision,'summary':result['summary'],'origin':'portal_managed'},result['content']
@@ -172,7 +199,7 @@ def accessible(c, owner, device, identifier):
     return {'id':identifier,'revision':str(row['revision']),'summary':json.loads(row['summary']),'origin':'external_stored'},unseal(owner,row['payload'])
 
 @router.get('/portal/v2/capabilities')
-def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code'],'max_profile_bytes':LIMIT,'routing':1},headers=HEADERS)
+def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code'],'max_profile_bytes':LIMIT,'routing':1,'managed_credentials':credentials.capabilities()},headers=HEADERS)
 
 @router.get('/profiles',response_class=HTMLResponse)
 def page(request:Request):
@@ -218,15 +245,21 @@ def devices(request:Request):
 def revoke_device(identifier:int,request:Request):
     owner,identity,device=actor(request,True)
     if device is not None:raise HTTPException(403,'Browser login required')
-    with db.connect() as c:
-        if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=?',(identifier,owner)).fetchone():raise HTTPException(404,'Device not found')
-        c.execute('DELETE FROM rtrust_tokens WHERE device=?',(identifier,));c.execute('DELETE FROM rtrust_grants WHERE device=?',(identifier,))
-        c.execute('DELETE FROM rtrust_route_members WHERE device=?',(identifier,))
-        c.execute('DELETE FROM rtrust_admin_route_members WHERE device=?',(identifier,))
-        c.execute('DELETE FROM rtrust_route_delivery WHERE device=?',(identifier,))
-        c.execute("UPDATE app_devices SET revoked_at=datetime('now') WHERE id=?",(identifier,))
-        audit(c,identity,'revoke_device',str(identifier))
-    return JSONResponse({'revoked':True},headers=HEADERS)
+    with credentials.endpoint.manager._lock:
+        with db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            credentials.device_row(c,owner,identifier)
+            credentials.revoke(c,owner,identifier)
+            c.execute('DELETE FROM rtrust_tokens WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_grants WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_route_members WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_admin_route_members WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_route_delivery WHERE device=?',(identifier,))
+            c.execute("UPDATE app_devices SET revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=?",(identifier,))
+            audit(c,identity,'revoke_device',str(identifier))
+        credentials.apply_pending()
+    result=credentials.snapshot(owner,identifier)
+    return JSONResponse({'revoked':True,'credentials':result},headers=HEADERS)
 
 @router.get('/portal/v2/profiles')
 def profiles(request:Request):
@@ -312,6 +345,9 @@ async def grant(identifier:str,request:Request):
     with db.connect() as c:
         accessible(c,owner,None,identifier)
         if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=? AND revoked_at IS NULL',(data['device_id'],owner)).fetchone():raise HTTPException(404,'Device not found')
+        if identifier.startswith('managed-'):
+            cfg=c.execute('SELECT device_id FROM configs WHERE id=?',(int(identifier[8:]),)).fetchone()
+            if cfg and cfg['device_id'] is not None and cfg['device_id']!=data['device_id']:raise HTTPException(409,'Device credential cannot be shared')
         if data['allow']:c.execute('INSERT OR IGNORE INTO rtrust_grants VALUES(?,?)',(identifier,data['device_id']))
         else:c.execute('DELETE FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id']))
         audit(c,identity,'grant' if data['allow'] else 'ungrant',identifier)
@@ -541,3 +577,48 @@ async def admin_routes_assign(identifier:int,request:Request):
             c.execute('INSERT INTO rtrust_admin_route_members(device,grp) VALUES(?,?) ON CONFLICT(device) DO UPDATE SET grp=excluded.grp',(identifier,data['group_id']))
         audit(c,identity,'admin_route_assign',f'{identifier}:{data["group_id"]}')
     return JSONResponse({'assigned':True},headers=HEADERS)
+
+
+@router.get('/portal/v2/device-credentials')
+def credential_list(request:Request):
+    owner,_,device=actor(request)
+    if device is not None:raise HTTPException(403,'Browser login required')
+    with db.connect() as c:
+        ids=[r[0] for r in c.execute('SELECT id FROM app_devices WHERE user_id=? ORDER BY id DESC LIMIT 200',(owner,))]
+    return JSONResponse({'devices':[credentials.snapshot(owner,i) for i in ids]},headers=HEADERS)
+
+@router.post('/portal/v2/devices/{identifier}/credentials/{action}')
+def credential_change(identifier:int,action:str,request:Request):
+    owner,identity,device=actor(request,True)
+    if device is not None:raise HTTPException(403,'Browser login required')
+    if action not in ('provision','rotate'):raise HTTPException(404,'Operation not found')
+    rate("credentials:"+identity,10)
+    result=credentials.mutate(owner,identifier,action,request.headers.get('idempotency-key'),identity)
+    return JSONResponse(result,headers=HEADERS)
+
+@router.post('/portal/v2/devices/{identifier}/credentials-retry')
+def credential_retry(identifier:int,request:Request):
+    owner,identity,device=actor(request,True)
+    if device is not None:raise HTTPException(403,'Browser login required')
+    with db.connect() as c:credentials.device_row(c,owner,identifier)
+    rate("credentials:"+identity,10)
+    credentials.apply_pending()
+    return JSONResponse(credentials.snapshot(owner,identifier),headers=HEADERS)
+
+@router.post('/portal/v2/device-token/renew')
+def renew_device_token(request:Request):
+    owner,identity,device=actor(request,True)
+    if device is None:raise HTTPException(403,'Device token required')
+    rate('renew:'+identity,10)
+    raw=secrets.token_urlsafe(32)
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        credentials.device_row(c,owner,device,active=True)
+        # Revalidate under the write lock: a concurrent renewal must not mint
+        # another token after the old token has already been consumed.
+        old=security.hash_api_token(request.headers['authorization'][7:])
+        deleted=c.execute('DELETE FROM rtrust_tokens WHERE hash=? AND device=? AND expires>?',(old,device,int(time.time()))).rowcount
+        if deleted!=1:raise HTTPException(401,'Device token expired or renewed')
+        c.execute('INSERT INTO rtrust_tokens VALUES(?,?,?)',(security.hash_api_token(raw),device,int(time.time())+30*86400))
+        audit(c,identity,'renew_token',str(device))
+    return JSONResponse({'token':raw,'expires_in':30*86400},headers=HEADERS)

@@ -61,7 +61,11 @@ db.init_db()
 exchange.init()
 exchange.init()
 assert json.loads(exchange.capabilities().body)['routing'] == 1
+assert json.loads(exchange.capabilities().body)['managed_credentials']['version'] == 1
 paths = app.openapi()['paths']
+assert 'post' in paths['/portal/v2/devices/{identifier}/credentials/{action}']
+assert 'get' in paths['/portal/v2/device-credentials']
+assert 'post' in paths['/portal/v2/device-token/renew']
 assert 'get' in paths['/portal/v2/routing']
 assert 'get' in paths['/admin/agent-routes']
 assert 'put' in paths['/admin/api/agent-routes/devices/{identifier}']

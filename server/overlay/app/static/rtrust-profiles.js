@@ -1,7 +1,7 @@
 'use strict';
 const el = id => document.getElementById(id);
 const csrf = document.querySelector('meta[name="csrf-token"]').content;
-let previewId = null, profiles = [], devices = [], groups = [], expiry;
+let previewId = null, profiles = [], devices = [], groups = [], credentialStates = [], expiry;
 async function api(path, method='GET', body, extra={}) {
   const response = await fetch('/portal/v2/'+path, {method, credentials:'same-origin', cache:'no-store', redirect:'error', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...extra}, body:body===undefined?undefined:JSON.stringify(body)});
   const result = await response.json();
@@ -12,8 +12,9 @@ function status(text){el('status').textContent=text;}
 function button(label, action){const node=document.createElement('button');node.textContent=label;node.onclick=()=>perform(node,action);return node;}
 async function perform(node,action){node.disabled=true;try{await action();}catch(error){status(error.message);}finally{node.disabled=false;}}
 function clearPreview(){previewId=null;el('preview-result').hidden=true;el('summary').textContent='';el('content').value='';el('file').value='';}
+const credentialKeys={};
 async function refresh(){
-  const values=await Promise.all([api('profiles'),api('devices'),api('route-groups')]);profiles=values[0].profiles;devices=values[1].devices;groups=values[2].groups;
+  const values=await Promise.all([api('profiles'),api('devices'),api('route-groups'),api('device-credentials'),api('capabilities')]);profiles=values[0].profiles;devices=values[1].devices;groups=values[2].groups;credentialStates=values[3].devices;const managedEnabled=values[4].managed_credentials.enabled;
   el('profiles').replaceChildren();el('devices').replaceChildren();
   for(const profile of profiles){
     const row=document.createElement('div');row.className='row';const title=document.createElement('strong');title.textContent=profile.summary.name+' — '+profile.summary.hostname;row.append(title);
@@ -33,7 +34,28 @@ async function refresh(){
   }
   if(!profiles.length)el('profiles').textContent='Профилей пока нет.';
   renderGroups();
-  for(const device of devices){const row=document.createElement('div');row.className='row';const title=document.createElement('strong');title.textContent=device.name+' ('+device.platform+')';const group=groups.find(g=>g.devices.includes(device.id));row.append(title,text('Группа маршрутов TUN: '+(group?group.name:'нет')),button('Отозвать устройство',async()=>{if(!confirm('Отозвать доступ устройства к получению конфигов?'))return;await api('devices/'+device.id,'DELETE');await refresh();}));el('devices').append(row);}
+  const stateNames={requested:'Запрошено',pending:'Применяется',applied:'Применено на endpoint',failed:'Не применено'};
+  for(const record of credentialStates){
+    const device=devices.find(d=>d.id===record.device_id);
+    const row=document.createElement('div');row.className='row';const title=document.createElement('strong');title.textContent=device?device.name+' ('+device.platform+')':'Устройство #'+record.device_id+' — отозвано';row.append(title);
+    const latest=record.operations[0];
+    row.append(text(record.management==='device_credentials'?'Отдельный VPN-пароль устройства':'Без гарантии отзыва VPN-пароля'));
+    if(latest)row.append(text(stateNames[latest.state]+(latest.error?' — '+latest.error:'')));
+    if(record.shared_credentials_unmanaged)row.append(text('Общий пароль из прежних профилей остаётся действующим.'));
+    if(device){const group=groups.find(g=>g.devices.includes(device.id));row.append(text('Группа маршрутов TUN: '+(group?group.name:'нет')));
+      if(managedEnabled)row.append(button(record.management==='device_credentials'?'Сменить VPN-пароль':'Выдать отдельный VPN-пароль',async()=>{
+        if(!confirm('Смена паролей перезапустит VPN endpoint и разорвёт все текущие соединения. Другие устройства смогут переподключиться. Продолжить?'))return;
+        const action=record.management==='device_credentials'?'rotate':'provision';
+        const keyName=record.device_id+':'+action+':'+record.generation;
+        credentialKeys[keyName] ||= crypto.randomUUID();
+        const result=await api('devices/'+device.id+'/credentials/'+action,'POST',undefined,{'Idempotency-Key':credentialKeys[keyName]});
+        await refresh();status(stateNames[result.operations[0].state]+'. Обновите профиль в приложении.');
+      }));
+      row.append(button('Отозвать устройство',async()=>{if(!confirm('Отозвать устройство? Отдельные пароли будут удалены с VPN endpoint через общий рестарт. Общие и внешние пароли остаются действующими.'))return;const result=await api('devices/'+device.id,'DELETE');await refresh();status(result.credentials.operations.length?stateNames[result.credentials.operations[0].state]+'.':'Доступ к порталу отозван. VPN-пароли не управляются.');}));
+    }
+    if(latest&&['requested','pending','failed'].includes(latest.state))row.append(button('Повторить применение',async()=>{await api('devices/'+record.device_id+'/credentials-retry','POST');await refresh();}));
+    el('devices').append(row);
+  }
 }
 el('file').onchange=async()=>{try{const file=el('file').files[0];if(!file)return;if(file.size>1048576)throw new Error('Файл больше 1 МиБ.');previewId=null;el('preview-result').hidden=true;el('content').value=new TextDecoder('utf-8',{fatal:true}).decode(await file.arrayBuffer());}catch(error){status(error.message);}};
 el('content').oninput=()=>{previewId=null;el('preview-result').hidden=true;};
