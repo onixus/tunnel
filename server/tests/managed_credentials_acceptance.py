@@ -138,7 +138,7 @@ try:
             def change(device,action):
                 response=case.client.post(f'/portal/v2/devices/{device}/credentials/{action}',headers={**case.headers,'Idempotency-Key':str(uuid.uuid4())})
                 assert response.status_code==200,response.text
-                assert response.json()['operations'][0]['state']=='applied',response.text
+                assert response.json()['operations'][0]['state']=='applied',(response.text,{'endpoint_process_exit':endpoint.manager._proc.poll() if endpoint.manager._proc else None})
             change(lost,'provision');change(neighbor,'provision')
             old=profile(lost,protocol);other=profile(neighbor,protocol)
             probe(old);probe(other)
@@ -149,17 +149,19 @@ try:
                 revoked=case.client.delete(f'/portal/v2/devices/{lost}',headers=case.headers)
                 assert revoked.status_code==200,revoked.text
                 assert revoked.json()['credentials']['operations'][0]['state']=='applied'
+                apply_elapsed=time.monotonic()-started
+                assert apply_elapsed<15, 'Endpoint application exceeded acceptance bound'
                 active.settimeout(3)
                 try:
                     active.sendall(b'after');data=active.recv(32)
                     assert data==b'', 'Revoked active tunnel still carries traffic'
                 except (BrokenPipeError,ConnectionResetError,TimeoutError):pass
                 elapsed=time.monotonic()-started
-                assert elapsed<15, 'Revocation exceeded isolated acceptance bound'
+                assert elapsed<18, 'Server application plus client observation exceeded acceptance bound'
             # Portal access is gone; saved credentials are tested without any API.
             assert case.client.get('/portal/v2/profiles',headers=auth).status_code==401
             probe(saved,False);probe(other)
-            print(f'PASS {protocol}: distinct credentials, rotation denies old password, saved revoked password denied with portal token invalid, active server session terminated (client EOF or timeout), neighbor reconnects; revoke {elapsed:.2f}s',flush=True)
+            print(f'PASS {protocol}: distinct credentials, rotation denies old password, saved revoked password denied with portal token invalid, active server session terminated (client EOF or timeout), neighbor reconnects; endpoint apply {apply_elapsed:.2f}s; client observation complete {elapsed:.2f}s',flush=True)
         print('PASS real isolated endpoint acceptance (no production changes)',flush=True)
 finally:
     kill()

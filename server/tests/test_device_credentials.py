@@ -132,6 +132,12 @@ class CredentialTests(ExchangeTests):
         self.assertEqual(result.status_code,503)
         self.assertNotIn('/missing/',result.text)
 
+    def test_delayed_listener_can_apply_within_deadline(self):
+        device,_=self.enrolled()
+        with patch.object(managed,'listener_ready',side_effect=[False,False]+[True]*20),patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            result=self.change(device,'provision')
+        self.assertEqual(result.json()['operations'][0]['state'],'applied')
+
     def test_live_process_without_listener_is_not_applied(self):
         device,_=self.enrolled()
         with patch.object(managed,'listener_ready',return_value=False),patch.object(managed.time,'monotonic',side_effect=range(1000)):

@@ -84,6 +84,7 @@ def apply_pending():
             ids = [r['id'] for r in pending]
             c.executemany("UPDATE rtrust_credential_operations SET state='pending',error=NULL WHERE id=?", [(i,) for i in ids])
         state, error = 'failed', 'endpoint_unavailable'
+        attempt_started=time.monotonic()
         try:
             with db.connect() as fence:
                 fence.execute('BEGIN IMMEDIATE')
@@ -106,11 +107,17 @@ def apply_pending():
                     endpoint.manager.reconcile()
                 finally:
                     endpoint.ensure_letsencrypt=issue
-                deadline = time.monotonic() + 2
-                while endpoint.manager._is_running() and time.monotonic() < deadline:
+                deadline=attempt_started+15
+                ready_since=None
+                while endpoint.manager._is_running() and time.monotonic()<deadline:
+                    now=time.monotonic()
+                    if listener_ready(int(settings.get('conn_port') or '8443')):
+                        if ready_since is None:ready_since=now
+                        if now-ready_since>=2:
+                            state,error='applied',None
+                            break
+                    else:ready_since=None
                     time.sleep(.05)
-                if endpoint.manager._is_running() and listener_ready(int(settings.get('conn_port') or '8443')):
-                    state, error = 'applied', None
                 fence.executemany('UPDATE rtrust_credential_operations SET state=?,error=?,applied=? WHERE id=?',
                                   [(state, error, int(time.time()) if state == 'applied' else None, i) for i in ids])
         except Exception:
