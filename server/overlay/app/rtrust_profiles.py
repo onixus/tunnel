@@ -9,6 +9,9 @@ import stat
 import subprocess
 import time
 import uuid
+import base64
+import io
+from urllib.parse import urlsplit
 from pathlib import Path
 from contextlib import asynccontextmanager
 import tempfile
@@ -66,7 +69,7 @@ def install(application):
         response = await call_next(request)
         if request.url.path in ('/profiles', '/admin/agent-routes') or request.url.path.startswith(('/portal/v2/', '/admin/api/agent-routes')):
             response.headers.update(HEADERS)
-            response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         return response
 
 def cipher():
@@ -181,7 +184,7 @@ def accessible(c, owner, device, identifier, settings=None):
 @router.get('/portal/v2/capabilities')
 def capabilities():
     from . import device_credentials
-    value={'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1}
+    value={'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1}
     if device_credentials.enabled():value['device_credentials']={'version':1,'protocols':['http2','http3'],'session_policy':'restart_all_endpoint_sessions','legacy_shared_access':'unmanaged'}
     return JSONResponse(value,headers=HEADERS)
 
@@ -192,13 +195,32 @@ def page(request:Request):
     return templates.TemplateResponse(request,'rtrust_profiles.html',{'user':user,'brand':db.get_setting('brand_name'),'csrf':csrf(request)},headers=HEADERS)
 
 @router.post('/portal/v2/enrollment-codes')
-def enrollment_code(request:Request):
+async def enrollment_code(request:Request):
     owner,identity,device=actor(request,True)
     if device is not None:raise HTTPException(403,'Browser login required')
     rate(identity)
+    data=await body(request,['origin'])
+    origin=data.get('origin')
+    if origin is not None:
+        if not isinstance(origin,str) or len(origin)>512 or not origin.isascii() or origin!=request.headers.get('origin'):
+            raise HTTPException(422,'Same browser origin required for QR')
+        try:
+            parsed=urlsplit(origin); port=parsed.port
+        except ValueError:raise HTTPException(422,'Invalid HTTPS origin')
+        if parsed.scheme!='https' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or port==0 or any(ch.isspace() for ch in origin):
+            raise HTTPException(422,'HTTPS origin required for QR')
+    expires=int(time.time())+180
     raw=secrets.token_urlsafe(24)
     db.create_enroll_code(owner,security.hash_api_token(raw),180)
-    return JSONResponse({'code':raw,'expires_in':180},headers=HEADERS)
+    result={'code':raw,'expires_in':180,'expires_at':expires}
+    if origin is not None:
+        import qrcode
+        from qrcode.image.svg import SvgPathFillImage
+        invitation={'kind':'rtrust_enrollment','version':1,'origin':origin,'code':raw,'expires_at':expires}
+        buffer=io.BytesIO()
+        qrcode.make(json.dumps(invitation,separators=(',',':')),image_factory=SvgPathFillImage).save(buffer)
+        result.update(invitation=invitation,qr_svg=base64.b64encode(buffer.getvalue()).decode('ascii'))
+    return JSONResponse(result,headers=HEADERS)
 
 @router.post('/portal/v2/enroll')
 async def enroll(request:Request):
@@ -217,6 +239,23 @@ async def enroll(request:Request):
         c.execute('INSERT INTO rtrust_tokens VALUES(?,?,?)',(security.hash_api_token(raw),device,now+30*86400))
         audit(c,f'd:{device}','enroll',str(device))
     return JSONResponse({'token':raw,'device_id':device,'expires_in':30*86400},headers=HEADERS)
+
+@router.post('/portal/v2/token/renew')
+async def renew_token(request:Request):
+    owner,identity,device=actor(request)
+    if device is None:raise HTTPException(403,'Device token required')
+    rate(identity)
+    data=await body(request,['consent'])
+    if data.get('consent') is not True:raise HTTPException(422,'Explicit renewal consent required')
+    token=request.headers.get('authorization','')[7:]
+    hashed=security.hash_api_token(token); now=int(time.time())
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        current=c.execute("SELECT t.device FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.revoked_at IS NULL AND u.status='active' AND u.id=?",(hashed,device,now,owner)).fetchone()
+        if current is None:raise HTTPException(401,'Device access expired or revoked')
+        c.execute('UPDATE rtrust_tokens SET expires=? WHERE hash=?',(now+30*86400,hashed))
+        audit(c,identity,'token_renew',str(device))
+    return JSONResponse({'expires_in':30*86400,'scope':'portal_access_only'},headers=HEADERS)
 
 @router.get('/portal/v2/devices')
 def devices(request:Request,include_revoked:bool=False):

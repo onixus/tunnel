@@ -68,6 +68,40 @@ class ExchangeTests(unittest.TestCase):
         self.client.cookies.clear()
         self.assertEqual(self.client.get('/profiles',follow_redirects=False).status_code,302)
 
+    def test_qr_uses_browser_https_origin_and_only_one_time_code(self):
+        response=self.client.post('/portal/v2/enrollment-codes',json={'origin':'https://panel.example'},headers={**self.headers,'origin':'https://panel.example'})
+        self.assertEqual(response.status_code,200,response.text)
+        value=response.json(); invite=value['invitation']
+        self.assertEqual(invite['kind'],'rtrust_enrollment'); self.assertEqual(invite['origin'],'https://panel.example')
+        self.assertEqual(set(invite),{'kind','version','origin','code','expires_at'})
+        self.assertEqual(invite['code'],value['code']); self.assertTrue(value['qr_svg'])
+        self.assertEqual(response.headers['cache-control'],'no-store')
+        for origin in ['http://panel.example','https://panel.example/path','https://user@panel.example','https://foreign.example']:
+            rejected=self.client.post('/portal/v2/enrollment-codes',json={'origin':origin},headers={**self.headers,'origin':'https://panel.example'})
+            self.assertEqual(rejected.status_code,422)
+        body={'code':invite['code'],'name':'QR fixture','platform':'android'}
+        self.assertEqual(self.post('enroll',body).status_code,200)
+        self.assertEqual(self.post('enroll',body).status_code,401)
+
+    def test_token_renewal_requires_current_device_and_rechecks_expiry_in_transaction(self):
+        from unittest.mock import patch
+        device,auth=self.enrolled('renew')
+        path='/portal/v2/token/renew'
+        self.assertEqual(self.client.post(path,json={'consent':False},headers=auth).status_code,422)
+        self.assertEqual(self.post('token/renew',{'consent':True}).status_code,403)
+        response=self.client.post(path,json={'consent':True},headers=auth)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json(),{'expires_in':30*86400,'scope':'portal_access_only'})
+        self.assertEqual(self.client.post(path,json={'consent':True,'device_id':999},headers=auth).status_code,422)
+        original=exchange.actor
+        def expire(request,*args):
+            result=original(request,*args)
+            with db.connect() as c:c.execute('UPDATE rtrust_tokens SET expires=1 WHERE device=?',(device,))
+            return result
+        with patch.object(exchange,'actor',side_effect=expire):
+            self.assertEqual(self.client.post(path,json={'consent':True},headers=auth).status_code,401)
+        self.assertEqual(self.client.post(path,json={'consent':True},headers=auth).status_code,401)
+
     def test_roundtrip_encryption_and_idempotency(self):
         preview = self.preview()
         body = {'action':'create','consent':True}

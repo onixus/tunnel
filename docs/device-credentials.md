@@ -40,11 +40,26 @@ enrollment/grant/rotation/revoke against the actual endpoint and private checker
 inside a disposable `--network none` container. It requires ENDPOINT_BIN,
 RTRUST_CODEC and RTRUST_ENDPOINT_CHECK. API/SQLite tests with mocked probes are
 separate and do not prove endpoint behavior. Physical sessions, adjacent-device
-continuity, legacy shared-password migration, renewal and publisher packaging
+continuity, legacy shared-password migration and publisher packaging
 remain acceptance requirements for #22.
+
+HTTPS browser enrollment can return a locally rendered QR with exactly kind,
+version, origin, one-time code and expiry. The origin must equal the browser's
+Origin header; CSRF and owner authentication remain required. Rust compares it
+with the selected portal origin before sending the code; Android displays the
+origin for confirmation. Server expiry/reuse checks remain authoritative. This
+does not carry an administrator credential.
+
+Explicit device token renewal extends only portal API access by 30 days while
+the token remains active. The device must consent; the token is rechecked in
+the write transaction, so concurrent expiry/revocation cannot resurrect it.
+No token, device identity, profile, grant or endpoint credential is rotated by
+renewal. Browser sessions cannot renew a device token. Expired access needs
+one-time enrollment again. Clients retain conservative expiry if persistence
+fails; no automatic renewal is scheduled.
 
 The isolated real-endpoint test passed on Fedora for both H2 and H3: initial
 issue, old/new rotation, saved credential rejection after revoke and neighbor
-device reconnect after both operations. Full client workspace tests and 86
+device reconnect after both operations. Full client workspace tests and 90
 scoped portal/routing/agent/protocol tests passed. This evidence is deliberately
 separate from installed-package and active-session acceptance.
