@@ -24,6 +24,10 @@ from app import config, db, endpoint
 
 binary=Path(sys.argv[1]).resolve()
 inspect=Path(sys.argv[2]).resolve()
+# Image acquisition is fixture setup, not endpoint application latency. A cold
+# runner must not spend the two-second readiness window downloading an image.
+if subprocess.run(['docker','image','inspect','debian:12-slim'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
+    subprocess.run(['docker','pull','debian:12-slim'],check=True,timeout=180,stdout=subprocess.DEVNULL)
 name='tunnel-credentials-test-'+uuid.uuid4().hex[:12]
 work=Path(SANDBOX.name)
 runtime=work/'runtime';runtime.mkdir()
