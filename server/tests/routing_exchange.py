@@ -12,6 +12,7 @@ import uvicorn
 
 case = ExchangeTests()
 case.setUp()
+# TestClient owns the application lifecycle; the HTTPS listener serves it.
 with case.client:
     work = pathlib.Path(SANDBOX.name)
     cert, key = work / 'routes.pem', work / 'routes.key'
@@ -23,7 +24,7 @@ with case.client:
         reserve.bind(('127.0.0.1', 0))
         port = reserve.getsockname()[1]
     server = uvicorn.Server(uvicorn.Config(case.client.app, host='127.0.0.1', port=port,
-                            ssl_certfile=str(cert), ssl_keyfile=str(key), access_log=False, log_level='error'))
+                            ssl_certfile=str(cert), ssl_keyfile=str(key), access_log=False, log_level='error',lifespan='off'))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     process = None
