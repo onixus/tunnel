@@ -115,6 +115,50 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,401)
         self.assertEqual(self.client.get('/portal/v2/profiles',headers={'Authorization':'Bearer invalid'}).status_code,401)
 
+    def test_atomic_snapshot_rechecks_token_and_freezes_policy_with_profiles(self):
+        from unittest.mock import patch
+        item=self.imported(); device,auth=self.enrolled()
+        self.post('profiles/'+item['id']+'/grants', {'device_id':device,'allow':True})
+        group=self.group(); self.post('route-groups/'+str(group['id'])+'/members',{'device_id':device,'member':True})
+        original=exchange.accessible
+        changed=[]
+        def concurrent_change(c, owner, device_id, identifier, settings=None):
+            value=original(c,owner,device_id,identifier,settings)
+            if not changed:
+                changed.append(True)
+                with db.connect() as writer:
+                    writer.execute('UPDATE rtrust_route_groups SET revision=revision+1,name=? WHERE id=?',('Updated concurrently',group['id']))
+            return value
+        with patch.object(exchange,'accessible',side_effect=concurrent_change):
+            response=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth)
+        self.assertEqual(response.status_code,200,response.text)
+        value=response.json()
+        self.assertEqual(value['routing']['policy']['revision'],str(group['id'])+':1')
+        self.assertEqual(value['profiles'][0]['metadata']['id'],item['id'])
+        self.assertEqual(len(value['revision']),64)
+        self.assertEqual(response.headers['cache-control'],'no-store')
+        current=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth).json()
+        self.assertNotEqual(value['revision'],current['revision'])
+        self.assertEqual(current['routing']['policy']['revision'],str(group['id'])+':2')
+        # A revoke committed after actor() must still be rejected by the
+        # token check inside the snapshot's own transaction.
+        actor=exchange.actor
+        def revoke_after_actor(request, mutate=False):
+            result=actor(request,mutate)
+            with db.connect() as writer:writer.execute('DELETE FROM rtrust_tokens WHERE device=?',(device,))
+            return result
+        with patch.object(exchange,'actor',side_effect=revoke_after_actor):
+            response=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth)
+        self.assertEqual(response.status_code,401)
+
+    def test_snapshot_requires_device_and_explicit_secret_consent(self):
+        self.assertEqual(self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=self.headers).status_code,403)
+        _,auth=self.enrolled()
+        self.assertEqual(self.client.post('/portal/v2/snapshot',json={},headers=auth).status_code,422)
+        response=self.client.post('/portal/v2/snapshot',json={'include_secrets':True,'unknown':True},headers=auth)
+        self.assertEqual(response.status_code,422)
+        self.assertEqual(self.client.get('/portal/v2/capabilities').json()['snapshot'],1)
+
     def test_ios_enrollment_is_accepted(self):
         code = self.post('enrollment-codes', {}).json()['code']
         response = self.post('enroll', {'code': code, 'name': 'iPhone fixture', 'platform': 'ios'})

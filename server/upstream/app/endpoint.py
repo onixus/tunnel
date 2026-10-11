@@ -203,6 +203,7 @@ def write_credentials_toml(creds: list[dict]) -> bool:
 class EndpointManager:
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
+        self._generation = 0
         self._lock = threading.RLock()
         self._cert_mtime: float | None = None
         self._watcher_stop = threading.Event()
@@ -221,12 +222,14 @@ class EndpointManager:
                 [str(bin_path), "vpn.toml", "hosts.toml"],
                 cwd=config.ENDPOINT_WORKDIR,
             )
+            self._generation += 1
             print(f"[endpoint] started (pid={self._proc.pid})")
         except OSError as e:
             print(f"[endpoint] failed to start: {e}")
             self._proc = None
 
     def _kill(self) -> None:
+        self._generation += 1
         if self._is_running():
             assert self._proc is not None
             self._proc.terminate()
@@ -234,10 +237,11 @@ class EndpointManager:
                 self._proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+                self._proc.wait(timeout=5)
         self._proc = None
 
     # -- публичные операции --
-    def reconcile(self, restart_for_creds: bool = False) -> None:
+    def reconcile(self, restart_for_creds: bool = False, force_restart: bool = False) -> None:
         """Свести файлы endpoint'а к текущим настройкам/кредам и (пере)запустить.
 
         restart_for_creds=True → форсируем рестарт (смена кредов).
@@ -274,7 +278,7 @@ class EndpointManager:
             if not self._is_running():
                 self._spawn()
                 return
-            if restart_for_creds and creds_changed:
+            if restart_for_creds and (creds_changed or force_restart):
                 print("[endpoint] credentials changed — restarting")
                 self._kill()
                 self._spawn()
@@ -286,6 +290,17 @@ class EndpointManager:
     def apply_credentials(self) -> None:
         """Вызывать после создания/удаления конфига или блокировки юзера."""
         self.reconcile(restart_for_creds=True)
+
+    def credential_generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def apply_device_credentials(self) -> int:
+        # A prior read-only reconcile may already have written the new file
+        # while an old process still serves it. Force a reload for a receipt.
+        with self._lock:
+            self.reconcile(restart_for_creds=True, force_restart=True)
+            return self._generation
 
     def apply_settings(self) -> None:
         """Вызывать после сохранения настроек (домен/порт/серт/SNI)."""
