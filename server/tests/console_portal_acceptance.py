@@ -29,6 +29,16 @@ export=codec(managed_document(db.get_config(key['id']))['content'],'tt')['conten
 ui.perform('trusttunnel.revoke',{'id':key['id']},admin);assert db.get_config(key['id'])['revoked_at']
 device=db.create_device(u['id'],'fixture',secrets.token_hex(32))
 device_key=db.create_device_config(u['id'],device,'fixture-device',secrets.token_hex(24),'fixture')
-ui.perform('trusttunnel.device-revoke',{'id':device},admin)
+try:
+    ui.perform('trusttunnel.device-revoke',{'id':device},admin)
+except RuntimeError as error:
+    # With the credentials overlay the portal records the revocation and then
+    # needs the endpoint to apply it. No endpoint runs here, so the operation
+    # must stay retryable instead of being reported as applied.
+    with db.connect() as c:
+        operations=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rtrust_credential_operations'").fetchone()
+        revoke=operations and c.execute("SELECT state,error FROM rtrust_credential_operations WHERE device=? AND action='revoke'",(device,)).fetchone()
+    if not revoke or 'endpoint не подтвердил' not in str(error):raise
+    assert tuple(revoke)==('failed','endpoint_unavailable'),tuple(revoke)
 assert db.get_device(device)['revoked_at'] and db.get_config(device_key)['revoked_at']
 print('PASS real portal HTTP create/password/block/unblock/key/rotate/revoke/device + real Rust export')
