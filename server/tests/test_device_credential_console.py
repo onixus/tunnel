@@ -37,4 +37,19 @@ class ConsoleCredentialTests(unittest.TestCase):
             console.perform('trusttunnel.rotate',{'id':cfg},1)
         self.assertEqual(db.get_config(cfg)['tt_password'],'synthetic')
 
+    def test_console_shared_key_revocation_removes_grants(self):
+        case=fixture.ExchangeTests();case.setUp()
+        device,_=case.enrolled()
+        from app import db
+        cfg=db.create_config(case.owner,'console-shared','synthetic','Shared')
+        keep=db.create_config(case.owner,'console-keep','synthetic','Shared')
+        db.set_settings({'panel_domain':'vpn.example.invalid'})
+        for target in (cfg,keep):
+            self.assertEqual(case.post(f'profiles/managed-{target}/grants',{'device_id':device,'allow':True}).status_code,200)
+        with patch.object(console,'legacy',return_value={'message':'reconciled'}):
+            console.perform('trusttunnel.revoke',{'id':cfg},1)
+        self.assertTrue(db.get_config(cfg)['revoked_at'])
+        with db.connect() as c:
+            self.assertEqual([r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=?',(device,))],[f'managed-{keep}'])
+
 if __name__=='__main__':unittest.main()

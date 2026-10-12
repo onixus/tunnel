@@ -64,6 +64,8 @@ def init():
         # Preserve legacy IDs and reserve deleted IDs recorded by earlier versions.
         high_water=c.execute("SELECT MAX(v) FROM (SELECT COALESCE(MAX(id),0) AS v FROM rtrust_route_groups UNION ALL SELECT COALESCE(MAX(CAST(object AS INTEGER)),0) AS v FROM rtrust_audit WHERE action IN ('route_group_create','route_group_delete'))").fetchone()[0]
         c.execute('INSERT INTO rtrust_route_counter VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET high_water=MAX(high_water,excluded.high_water)',(high_water,))
+        # Earlier versions kept grants to revoked/deleted managed configs.
+        credentials.purge_dead_managed_grants(c)
     cipher()
     credentials.init()
 
@@ -243,8 +245,8 @@ def live_row(c, owner, device, identifier):
     if device is not None and not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,device)).fetchone():
         return None
     if identifier.startswith('managed-'):
-        try: number=int(identifier[8:])
-        except ValueError:return None
+        number=credentials.managed_number(identifier)
+        if number is None:return None
         row=c.execute('SELECT * FROM configs WHERE id=? AND user_id=? AND revoked_at IS NULL',(number,owner)).fetchone()
         if row is None or (device is not None and row['device_id'] is not None and row['device_id']!=device):return None
         return row
@@ -506,16 +508,21 @@ def _grant(identifier:str,request:Request, payload:dict, context:tuple):
     if type(data.get('device_id')) is not int or type(data.get('allow')) is not bool:raise HTTPException(422,'Invalid grant')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')  # serializes the capacity check with the insert
-        accessible(c,owner,None,identifier)
+        # Revoking needs only the owner's device: a grant to a revoked/deleted
+        # profile must stay removable. The answer is the same whether or not the
+        # profile exists, so it reveals nothing about other owners' profiles.
+        live=data['allow'] or live_row(c,owner,None,identifier) is not None
+        if live:accessible(c,owner,None,identifier)
         if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=? AND revoked_at IS NULL',(data['device_id'],owner)).fetchone():raise HTTPException(404,'Device not found')
-        if identifier.startswith('managed-'):
-            cfg=c.execute('SELECT device_id FROM configs WHERE id=?',(int(identifier[8:]),)).fetchone()
+        if live and identifier.startswith('managed-'):
+            cfg=c.execute('SELECT device_id FROM configs WHERE id=?',(credentials.managed_number(identifier),)).fetchone()
             if cfg and cfg['device_id'] is not None and cfg['device_id']!=data['device_id']:raise HTTPException(409,'Device credential cannot be shared')
         if data['allow']:
             if not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id'])).fetchone():
                 require_device_capacity(c,owner,data['device_id'])
             c.execute('INSERT OR IGNORE INTO rtrust_grants VALUES(?,?)',(identifier,data['device_id']))
-        else:c.execute('DELETE FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id']))
+        elif not c.execute('DELETE FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id'])).rowcount and not live:
+            return JSONResponse({'updated':True},headers=HEADERS)  # idempotent no-op, not audited
         audit(c,identity,'grant' if data['allow'] else 'ungrant',identifier)
     return JSONResponse({'updated':True},headers=HEADERS)
 

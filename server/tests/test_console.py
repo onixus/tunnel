@@ -150,6 +150,12 @@ class ConsoleTests(unittest.TestCase):
         self.assertTrue(db.get_config(key)['revoked_at'])
         self.assertIsNone(db.get_config(other)['revoked_at'])
 
+    def test_shared_key_revocation_without_portal_tables(self):
+        key=db.create_config(self.user,'shared-key','not-logged','shared')
+        self.assertEqual(self.job('trusttunnel.revoke',{'id':key}).status_code,200)
+        with patch.object(ui,'legacy',return_value={'message':'reconciled'}):ui.work_once()
+        self.assertTrue(db.get_config(key)['revoked_at'])
+
     def deliver_setup(self,chat=None):
         db.set_settings({'conn_address':'vpn.example.invalid','conn_port':'8443','panel_domain':'vpn.example.invalid','smtp_host':'smtp.example.invalid'})
         id=db.create_config(self.user,'test-key','delivered-secret','phone')

@@ -166,7 +166,12 @@ def perform(action,data,admin):
         # Persist desired state first; if endpoint reload fails, job reports failure.
         with db.connect() as c:
             if action.endswith('.rotate'): c.execute('UPDATE configs SET tt_password=? WHERE id=?',(secrets.token_urlsafe(24),cfg['id']))
-            else: c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE id=?",(cfg['id'],))
+            else:
+                c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE id=?",(cfg['id'],))
+                # A revoked config never becomes live again; drop its portal grants
+                # in the same transaction (table exists only with the overlay).
+                if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rtrust_grants'").fetchone():
+                    c.execute('DELETE FROM rtrust_grants WHERE profile=?',('managed-'+str(cfg['id']),))
         u=db.get_user(cfg['user_id'])
         return legacy(admin,f"users/{cfg['user_id']}/status",{'status':u['status']})
     if action=='campaign.send': return send_campaign(data['id'])
