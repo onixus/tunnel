@@ -24,6 +24,10 @@ from fastapi.testclient import TestClient
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
+def valid_origin_label(value):
+    # Client contract (docs/device-credentials.md): 1-80 printable ASCII bytes.
+    return isinstance(value, str) and 1 <= len(value) <= 80 and all(0x20 <= ord(ch) <= 0x7e for ch in value)
+
 class ExchangeTests(unittest.TestCase):
     def test_explicit_freshness_snapshot_caps_token_lifetime_and_preserves_legacy_shape(self):
         from unittest.mock import patch
@@ -66,6 +70,7 @@ class ExchangeTests(unittest.TestCase):
         response = self.post('profile-imports/preview', {'content':self.content,'intent':'external_stored'})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn('content', response.json())
+        self.assertEqual(response.json()['origin'], exchange.ORIGIN_STORED)
         return response.json()['preview_id']
 
     def imported(self):
@@ -243,6 +248,22 @@ class ExchangeTests(unittest.TestCase):
             self.assertEqual(exchange.codec(response.json()['content'])['summary']['hostname'],'endpoint.example.invalid')
         preview=self.preview()
         self.assertEqual(self.post('profile-imports/'+preview+'/commit',{'action':'replace','target_id':item['id'],'base_revision':item['revision'],'consent':True}).status_code,403)
+
+    def test_profile_origin_labels_follow_client_contract(self):
+        # Android/iOS reject a whole managed batch unless origin is 1-80 printable ASCII.
+        for label in ['', 'x'*81, 'portal\u200bmanaged', 'caf\u00e9', 'line\n', '\x7f', None, 1]:
+            self.assertFalse(valid_origin_label(label), repr(label))
+        for label in ['portal_managed', 'external_stored', '~', 'x'*80, *exchange.ORIGIN_LABELS]:
+            self.assertTrue(valid_origin_label(label), label)
+        with db.connect() as c:
+            c.execute("UPDATE settings SET value='endpoint.example.invalid' WHERE key='panel_domain'")
+            c.execute('INSERT INTO configs(user_id,tt_username,tt_password,label) VALUES(?,?,?,?)',(self.owner,'fixture-user',secrets.token_urlsafe(24),'Managed fixture'))
+        self.assertEqual(self.post('profile-imports/'+self.preview()+'/commit',{'action':'create','consent':True}).status_code,200)
+        items=self.client.get('/portal/v2/profiles').json()['profiles']
+        self.assertEqual(sorted(item['origin'] for item in items),['external_stored','portal_managed'])
+        for item in items:
+            self.assertIn(item['origin'],exchange.ORIGIN_LABELS)
+            self.assertTrue(valid_origin_label(item['origin']))
 
     def test_invalid_import_cannot_commit_and_body_limit(self):
         self.assertEqual(self.post('profile-imports/preview', {'content':'not a profile','intent':'external_stored'}).status_code,422)

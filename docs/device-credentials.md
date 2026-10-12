@@ -117,6 +117,17 @@ candidate, затем заменить образ в согласованное 
 выдачу, но не отменяет уже сохранённые отзывы. Откат образа не должен восстанавливать
 старую базу: это вернёт отозванные пароли. Клиент issue #35 остаётся отдельным.
 
+## Profile origin label
+
+`GET /portal/v2/profiles` returns `origin` for every item as a fixed label, not an
+authentication claim: `portal_managed` (account-managed config) or
+`external_stored` (user import). A label is 1–80 printable ASCII bytes
+(0x20–0x7E) and clients compare it byte-wise. Android and iOS reject the whole
+managed batch on any other value; a missing or `null` origin means an unknown
+source. New labels must stay within this alphabet and are declared in
+`ORIGIN_LABELS` in `server/overlay/app/rtrust_profiles.py`, which
+`test_profile_origin_labels_follow_client_contract` checks.
+
 ## Atomic snapshot and offline freshness
 
 The paired client requests an authenticated, transactionally frozen snapshot
