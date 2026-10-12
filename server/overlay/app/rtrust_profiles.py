@@ -13,6 +13,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 import tempfile
 from cryptography.fernet import Fernet, InvalidToken
+from starlette.concurrency import run_in_threadpool
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from . import config, db, security, webauth, rtrust_credentials as credentials
@@ -52,6 +53,7 @@ def init():
 def install(application):
     """Call once from the existing portal main module, after constructing its app."""
     credentials.install()
+    install_legacy_handlers(application)
     previous = application.router.lifespan_context
     @asynccontextmanager
     async def lifespan(app):
@@ -92,6 +94,37 @@ def install(application):
             response.headers.update(HEADERS)
             response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         return response
+
+
+def install_legacy_handlers(application):
+    """The additive overlay also owns offloading the installed settings writer."""
+    from . import routes_admin
+    # Older FastAPI copies included routes; newer releases retain the router.
+    for route in [*application.routes, *routes_admin.router.routes]:
+        if getattr(route, 'path', None) == '/admin/settings' and 'POST' in (getattr(route, 'methods', None) or set()):
+            route.endpoint = legacy_settings_save
+            route.dependant.call = legacy_settings_save
+
+
+async def legacy_settings_save(request:Request):
+    if not await run_in_threadpool(webauth.current_admin, request):
+        return RedirectResponse('/admin/login',302)
+    form = await request.form()
+    return await run_in_threadpool(legacy_settings_apply, form)
+
+
+def legacy_settings_apply(form):
+    from .routes_admin import _SETTING_KEYS, _CHECKBOX_KEYS
+    from . import endpoint
+    updates = {}
+    for key in _SETTING_KEYS:
+        if key in _CHECKBOX_KEYS:
+            updates[key] = '1' if form.get(key) else '0'
+        elif key in form:
+            updates[key] = str(form.get(key)).strip()
+    db.set_settings(updates)
+    endpoint.manager.apply_settings()
+    return RedirectResponse('/admin/settings?msg=Настройки сохранены',302)
 
 def cipher():
     path = Path(config.DATA_DIR) / '.rtrust-profile-key'
@@ -223,8 +256,16 @@ def enrollment_code(request:Request):
 
 @router.post('/portal/v2/enroll')
 async def enroll(request:Request):
+    context=await run_in_threadpool(_enroll_prepare, request)
+    payload=await body(request,['code','name','platform'])
+    return await run_in_threadpool(_enroll, request=request, payload=payload, context=context)
+
+def _enroll_prepare(request:Request):
     rate('enroll:'+str(request.client.host if request.client else 'unknown'),10)
-    data=await body(request,['code','name','platform'])
+    return ()
+
+def _enroll(request:Request, payload:dict, context:tuple):
+    data=payload
     code=data.get('code');name=data.get('name');platform=data.get('platform')
     if not isinstance(code,str) or not 20<=len(code)<=128 or not isinstance(name,str) or not 1<=len(name)<=80 or platform not in ('windows','linux','macos','android','ios'):
         raise HTTPException(422,'Invalid enrollment')
@@ -238,6 +279,7 @@ async def enroll(request:Request):
         c.execute('INSERT INTO rtrust_tokens VALUES(?,?,?)',(security.hash_api_token(raw),device,now+30*86400))
         audit(c,f'd:{device}','enroll',str(device))
     return JSONResponse({'token':raw,'device_id':device,'expires_in':30*86400},headers=HEADERS)
+
 
 @router.get('/portal/v2/devices')
 def devices(request:Request):
@@ -283,8 +325,17 @@ def profiles(request:Request):
 
 @router.post('/portal/v2/profiles/{identifier}/export')
 async def export(identifier:str,request:Request):
+    context=await run_in_threadpool(_export_prepare, request)
+    payload=await body(request,['format','revision','include_secrets','accept_losses'])
+    return await run_in_threadpool(_export, identifier=identifier, request=request, payload=payload, context=context)
+
+def _export_prepare(request:Request):
     owner,identity,device=actor(request,True)
-    data=await body(request,['format','revision','include_secrets','accept_losses'])
+    return (owner, identity, device,)
+
+def _export(identifier:str,request:Request, payload:dict, context:tuple):
+    owner, identity, device=context
+    data=payload
     if data.get('include_secrets') is not True:raise HTTPException(422,'Explicit secret export consent required')
     with db.connect() as c:
         meta,document=accessible(c,owner,device,identifier)
@@ -295,10 +346,20 @@ async def export(identifier:str,request:Request):
         audit(c,identity,'export',identifier)
     return JSONResponse(result,headers=HEADERS)
 
+
 @router.post('/portal/v2/profile-imports/preview')
 async def preview(request:Request):
+    context=await run_in_threadpool(_preview_prepare, request)
+    payload=await body(request,['content','intent'])
+    return await run_in_threadpool(_preview, request=request, payload=payload, context=context)
+
+def _preview_prepare(request:Request):
     owner,identity,_=actor(request,True);rate(identity)
-    data=await body(request,['content','intent'])
+    return (owner, identity, _,)
+
+def _preview(request:Request, payload:dict, context:tuple):
+    owner, identity, _=context
+    data=payload
     if data.get('intent')!='external_stored':raise HTTPException(422,'Only external storage import is supported; endpoint credentials are unchanged')
     result=codec(data.get('content'))
     identifier=str(uuid.uuid4())
@@ -307,10 +368,20 @@ async def preview(request:Request):
         c.execute('INSERT INTO rtrust_imports VALUES(?,?,?,?,?,NULL)',(identifier,owner,identity,seal(owner,result['content']),int(time.time())+600))
     return JSONResponse({'preview_id':identifier,'summary':result['summary'],'expires_in':600,'origin':'external_stored','secrets_present':True},headers=HEADERS)
 
+
 @router.post('/portal/v2/profile-imports/{identifier}/commit')
 async def commit(identifier:str,request:Request):
+    context=await run_in_threadpool(_commit_prepare, request)
+    payload=await body(request,['action','target_id','base_revision','consent'])
+    return await run_in_threadpool(_commit, identifier=identifier, request=request, payload=payload, context=context)
+
+def _commit_prepare(request:Request):
     owner,identity,device=actor(request,True)
-    data=await body(request,['action','target_id','base_revision','consent'])
+    return (owner, identity, device,)
+
+def _commit(identifier:str,request:Request, payload:dict, context:tuple):
+    owner, identity, device=context
+    data=payload
     if data.get('consent') is not True or data.get('action') not in ('create','replace'):raise HTTPException(422,'Explicit import consent and action required')
     signature=hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
     with db.connect() as c:
@@ -341,11 +412,21 @@ async def commit(identifier:str,request:Request):
     result.pop('signature')
     return JSONResponse(result,headers=HEADERS)
 
+
 @router.post('/portal/v2/profiles/{identifier}/grants')
 async def grant(identifier:str,request:Request):
+    context=await run_in_threadpool(_grant_prepare, request)
+    payload=await body(request,['device_id','allow'])
+    return await run_in_threadpool(_grant, identifier=identifier, request=request, payload=payload, context=context)
+
+def _grant_prepare(request:Request):
     owner,identity,device=actor(request,True)
     if device is not None:raise HTTPException(403,'Browser login required')
-    data=await body(request,['device_id','allow'])
+    return (owner, identity, device,)
+
+def _grant(identifier:str,request:Request, payload:dict, context:tuple):
+    owner, identity, device=context
+    data=payload
     if type(data.get('device_id')) is not int or type(data.get('allow')) is not bool:raise HTTPException(422,'Invalid grant')
     with db.connect() as c:
         accessible(c,owner,None,identifier)
@@ -357,6 +438,7 @@ async def grant(identifier:str,request:Request):
         else:c.execute('DELETE FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id']))
         audit(c,identity,'grant' if data['allow'] else 'ungrant',identifier)
     return JSONResponse({'updated':True},headers=HEADERS)
+
 
 @router.delete('/portal/v2/profiles/{identifier}')
 def delete(identifier:str,request:Request):
@@ -411,8 +493,17 @@ def list_route_groups(request:Request):
 
 @router.post('/portal/v2/route-groups')
 async def create_route_group(request:Request):
+    context=await run_in_threadpool(_create_route_group_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan'])
+    return await run_in_threadpool(_create_route_group, request=request, payload=payload, context=context)
+
+def _create_route_group_prepare(request:Request):
     owner,identity=browser(request,True);rate('routes:'+identity,60)
-    name,policy=route_policy(await body(request,['name','include','exclude','exclude_lan']))
+    return (owner, identity,)
+
+def _create_route_group(request:Request, payload:dict, context:tuple):
+    owner, identity=context
+    name,policy=route_policy(payload)
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT count(*) FROM rtrust_route_groups WHERE owner=?',(owner,)).fetchone()[0]>=50:raise HTTPException(409,'Route group limit reached')
@@ -424,10 +515,20 @@ async def create_route_group(request:Request):
         audit(c,identity,'route_group_create',str(identifier))
         return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
 
+
 @router.put('/portal/v2/route-groups/{identifier}')
 async def update_route_group(identifier:int,request:Request):
+    context=await run_in_threadpool(_update_route_group_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan','revision'])
+    return await run_in_threadpool(_update_route_group, identifier=identifier, request=request, payload=payload, context=context)
+
+def _update_route_group_prepare(request:Request):
     owner,identity=browser(request,True);rate('routes:'+identity,60)
-    data=await body(request,['name','include','exclude','exclude_lan','revision'])
+    return (owner, identity,)
+
+def _update_route_group(identifier:int,request:Request, payload:dict, context:tuple):
+    owner, identity=context
+    data=payload
     name,policy=route_policy(data)
     if type(data.get('revision')) is not int:raise HTTPException(422,'Revision required')
     with db.connect() as c:
@@ -437,6 +538,7 @@ async def update_route_group(identifier:int,request:Request):
         c.execute('UPDATE rtrust_route_groups SET name=?,policy=?,revision=? WHERE id=?',(name,json.dumps(policy),row['revision']+1,identifier))
         audit(c,identity,'route_group_update',str(identifier))
         return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
+
 
 @router.delete('/portal/v2/route-groups/{identifier}')
 def delete_route_group(identifier:int,request:Request):
@@ -452,8 +554,17 @@ def delete_route_group(identifier:int,request:Request):
 
 @router.post('/portal/v2/route-groups/{identifier}/members')
 async def route_group_member(identifier:int,request:Request):
+    context=await run_in_threadpool(_route_group_member_prepare, request)
+    payload=await body(request,['device_id','member'])
+    return await run_in_threadpool(_route_group_member, identifier=identifier, request=request, payload=payload, context=context)
+
+def _route_group_member_prepare(request:Request):
     owner,identity=browser(request,True);rate('routes:'+identity,60)
-    data=await body(request,['device_id','member'])
+    return (owner, identity,)
+
+def _route_group_member(identifier:int,request:Request, payload:dict, context:tuple):
+    owner, identity=context
+    data=payload
     if type(data.get('device_id')) is not int or type(data.get('member')) is not bool:raise HTTPException(422,'Invalid membership')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -463,6 +574,7 @@ async def route_group_member(identifier:int,request:Request):
         else:c.execute('DELETE FROM rtrust_route_members WHERE device=? AND grp=?',(data['device_id'],identifier))
         audit(c,identity,'route_member_add' if data['member'] else 'route_member_remove',f'{identifier}:{data["device_id"]}')
         return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
+
 
 @router.get('/portal/v2/routing')
 def routing(request:Request):
@@ -518,8 +630,17 @@ def admin_routes_state(request:Request):
 
 @router.post('/admin/api/agent-routes/enrollment-codes')
 async def admin_routes_enroll(request:Request):
+    context=await run_in_threadpool(_admin_routes_enroll_prepare, request)
+    payload=await body(request,['user_id'])
+    return await run_in_threadpool(_admin_routes_enroll, request=request, payload=payload, context=context)
+
+def _admin_routes_enroll_prepare(request:Request):
     identity=route_admin(request,True);rate(identity)
-    data=await body(request,['user_id'])
+    return (identity,)
+
+def _admin_routes_enroll(request:Request, payload:dict, context:tuple):
+    identity,=context
+    data=payload
     if type(data.get('user_id')) is not int:raise HTTPException(422,'User required')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -529,10 +650,20 @@ async def admin_routes_enroll(request:Request):
         audit(c,identity,'admin_route_enroll',str(data['user_id']))
     return JSONResponse({'code':raw,'expires_in':180},headers=HEADERS)
 
+
 @router.post('/admin/api/agent-routes/groups')
 async def admin_routes_create(request:Request):
+    context=await run_in_threadpool(_admin_routes_create_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan'])
+    return await run_in_threadpool(_admin_routes_create, request=request, payload=payload, context=context)
+
+def _admin_routes_create_prepare(request:Request):
     identity=route_admin(request,True);rate(identity,60)
-    name,policy=route_policy(await body(request,['name','include','exclude','exclude_lan']))
+    return (identity,)
+
+def _admin_routes_create(request:Request, payload:dict, context:tuple):
+    identity,=context
+    name,policy=route_policy(payload)
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT count(*) FROM rtrust_admin_route_groups').fetchone()[0]>=200:raise HTTPException(409,'Group limit reached')
@@ -540,10 +671,20 @@ async def admin_routes_create(request:Request):
         audit(c,identity,'admin_route_create',str(identifier))
     return JSONResponse({'id':identifier},headers=HEADERS)
 
+
 @router.put('/admin/api/agent-routes/groups/{identifier}')
 async def admin_routes_update(identifier:int,request:Request):
+    context=await run_in_threadpool(_admin_routes_update_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan','revision'])
+    return await run_in_threadpool(_admin_routes_update, identifier=identifier, request=request, payload=payload, context=context)
+
+def _admin_routes_update_prepare(request:Request):
     identity=route_admin(request,True);rate(identity,60)
-    data=await body(request,['name','include','exclude','exclude_lan','revision']);name,policy=route_policy(data)
+    return (identity,)
+
+def _admin_routes_update(identifier:int,request:Request, payload:dict, context:tuple):
+    identity,=context
+    data=payload;name,policy=route_policy(data)
     if type(data.get('revision')) is not int:raise HTTPException(422,'Revision required')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE');row=admin_group(c,identifier)
@@ -551,6 +692,7 @@ async def admin_routes_update(identifier:int,request:Request):
         c.execute('UPDATE rtrust_admin_route_groups SET name=?,policy=?,revision=revision+1 WHERE id=?',(name,json.dumps(policy),identifier))
         audit(c,identity,'admin_route_update',str(identifier))
     return JSONResponse({'updated':True},headers=HEADERS)
+
 
 @router.delete('/admin/api/agent-routes/groups/{identifier}')
 def admin_routes_delete(identifier:int,request:Request):
@@ -565,8 +707,17 @@ def admin_routes_delete(identifier:int,request:Request):
 
 @router.put('/admin/api/agent-routes/devices/{identifier}')
 async def admin_routes_assign(identifier:int,request:Request):
+    context=await run_in_threadpool(_admin_routes_assign_prepare, request)
+    payload=await body(request,['group_id','previous_group_id'])
+    return await run_in_threadpool(_admin_routes_assign, identifier=identifier, request=request, payload=payload, context=context)
+
+def _admin_routes_assign_prepare(request:Request):
     identity=route_admin(request,True);rate(identity,120)
-    data=await body(request,['group_id','previous_group_id'])
+    return (identity,)
+
+def _admin_routes_assign(identifier:int,request:Request, payload:dict, context:tuple):
+    identity,=context
+    data=payload
     for key in ('group_id','previous_group_id'):
         if key not in data or (data[key] is not None and type(data[key]) is not int):raise HTTPException(422,'Group id or null required')
     with db.connect() as c:
@@ -582,6 +733,7 @@ async def admin_routes_assign(identifier:int,request:Request):
             c.execute('INSERT INTO rtrust_admin_route_members(device,grp) VALUES(?,?) ON CONFLICT(device) DO UPDATE SET grp=excluded.grp',(identifier,data['group_id']))
         audit(c,identity,'admin_route_assign',f'{identifier}:{data["group_id"]}')
     return JSONResponse({'assigned':True},headers=HEADERS)
+
 
 
 @router.get('/portal/v2/device-credentials')

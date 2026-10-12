@@ -2,10 +2,12 @@
 import os
 import secrets
 import uuid
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from test_exchange import ExchangeTests
 from app import db, endpoint, rtrust_credentials as managed
+from fastapi import HTTPException
 
 
 class CredentialTests(ExchangeTests):
@@ -35,6 +37,79 @@ class CredentialTests(ExchangeTests):
     def change(self, device, action, key=None):
         return self.client.post(f'/portal/v2/devices/{device}/credentials/{action}',
                                 headers={**self.headers, 'Idempotency-Key': key or str(uuid.uuid4())})
+
+    def test_legacy_connect_stale_read_reuses_managed_binding(self):
+        from app import routes_device, security
+        self.client.app.include_router(routes_device.router)
+        token=security.new_token(32)
+        device=db.create_device(self.owner,'Legacy',security.hash_api_token(token))
+        read=threading.Event();resume=threading.Event()
+        original=db.get_device_config
+        def paused(identifier):
+            result=original(identifier)
+            if identifier==device and result is None:
+                read.set()
+                if not resume.wait(5):raise RuntimeError('Race synchronization timeout')
+            return result
+        with patch.object(db,'get_device_config',side_effect=paused),patch.object(endpoint.manager,'apply_credentials'),patch.object(routes_device.conninfo,'build_deeplink',return_value='tt://synthetic'),ThreadPoolExecutor(1) as pool:
+            future=pool.submit(self.client.post,'/portal/v1/device/connect',json={},headers={'X-Device-Token':token})
+            try:
+                self.assertTrue(read.wait(5))
+                with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+                    provision=self.change(device,'provision')
+                self.assertEqual(provision.status_code,200,provision.text)
+            finally:resume.set()
+            legacy=future.result(5)
+        self.assertEqual(legacy.status_code,200,legacy.text)
+        self.assertEqual('managed-'+str(legacy.json()['config_id']),provision.json()['profile_id'])
+        with db.connect() as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM configs WHERE device_id=? AND revoked_at IS NULL',(device,)).fetchone()[0],1)
+        old=db.get_config(legacy.json()['config_id'])['tt_password']
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.assertEqual(self.change(device,'rotate').status_code,200)
+        self.assertNotIn(old,[c['password'] for c in managed.active_credentials()])
+
+    def test_legacy_insertion_boundary_revalidates_lifecycle(self):
+        device,_=self.enrolled()
+        managed.install();managed.install()
+        self.assertIs(db.create_device_config,managed.create_device_config)
+        with ThreadPoolExecutor(2) as pool:
+            ids=list(pool.map(lambda n:db.create_device_config(self.owner,device,'legacy-'+str(n),'secret-'+str(n),'Legacy'),range(2)))
+        self.assertEqual(ids[0],ids[1])
+        with self.assertRaises(HTTPException) as denied:db.create_device_config(self.other,device,'wrong','wrong','Wrong')
+        self.assertEqual(denied.exception.status_code,404)
+        with db.connect() as c:c.execute("UPDATE users SET status='blocked' WHERE id=?",(self.owner,))
+        with self.assertRaises(HTTPException):db.create_device_config(self.owner,device,'blocked','blocked','Blocked')
+        with db.connect() as c:c.execute("UPDATE users SET status='active' WHERE id=?",(self.owner,))
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.change(device,'provision')
+        bound=managed.snapshot(self.owner,device)['profile_id']
+        db.delete_config(int(bound.removeprefix('managed-')))
+        with self.assertRaises(HTTPException):db.create_device_config(self.owner,device,'removed','removed','Removed')
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.client.delete(f'/portal/v2/devices/{device}',headers=self.headers)
+        with self.assertRaises(HTTPException):db.create_device_config(self.owner,device,'revoked','revoked','Revoked')
+
+    def test_rotation_removes_historical_duplicates_from_endpoint_file(self):
+        import tempfile,tomllib
+        from pathlib import Path
+        device,_=self.enrolled();neighbor,_=self.enrolled('Neighbor')
+        shared=db.create_config(self.owner,'shared','shared-secret','Shared')
+        other=db.create_device_config(self.owner,neighbor,'neighbor','neighbor-secret','Neighbor')
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.change(device,'provision')
+        with db.connect() as c:
+            duplicate=c.execute('INSERT INTO configs(user_id,device_id,tt_username,tt_password,label) VALUES(?,?,?,?,?)',(self.owner,device,'extra','cached-extra','Extra')).lastrowid
+        self.assertNotIn('cached-extra',[c['password'] for c in managed.active_credentials()])
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.assertEqual(self.change(device,'rotate').status_code,200)
+        self.assertIsNotNone(db.get_config(duplicate)['revoked_at'])
+        self.assertIsNone(db.get_config(shared)['revoked_at']);self.assertIsNone(db.get_config(other)['revoked_at'])
+        with tempfile.TemporaryDirectory() as folder,patch.object(endpoint.config,'ENDPOINT_WORKDIR',folder):
+            endpoint.write_credentials_toml(db.active_credentials())
+            passwords=[r['password'] for r in tomllib.loads((Path(folder)/'credentials.toml').read_text())['client']]
+        self.assertNotIn('cached-extra',passwords)
+        self.assertIn('shared-secret',passwords);self.assertIn('neighbor-secret',passwords)
 
     def test_distinct_credentials_idempotency_rotation_and_revoke(self):
         device,auth=self.enrolled(); neighbor,other_auth=self.enrolled('neighbor')

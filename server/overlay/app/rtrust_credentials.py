@@ -59,13 +59,38 @@ def active_credentials():
     # Defense in depth: v1 revocation, user blocking and retained configs cannot
     # put a revoked device back in the generated endpoint file.
     with db.connect() as c:
+        has_bindings = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rtrust_credentials'").fetchone()
+        binding_filter = ''' AND (c.device_id IS NULL OR NOT EXISTS(
+          SELECT 1 FROM rtrust_credentials b WHERE b.device=c.device_id)
+          OR EXISTS(SELECT 1 FROM rtrust_credentials b WHERE b.device=c.device_id AND b.config=c.id))''' if has_bindings else ''
         rows = c.execute('''SELECT c.tt_username AS username,c.tt_password AS password
           FROM configs c JOIN users u ON u.id=c.user_id
           LEFT JOIN app_devices d ON d.id=c.device_id
           WHERE c.revoked_at IS NULL AND u.status='active'
           AND (c.device_id IS NULL OR (d.revoked_at IS NULL AND d.user_id=c.user_id))
-          ORDER BY c.id''').fetchall()
+          ''' + binding_filter + ' ORDER BY c.id').fetchall()
     return [dict(r) for r in rows]
+
+
+def create_device_config(user_id, device_id, tt_username, tt_password, label):
+    """Serialize legacy issuance with managed provisioning and revocation."""
+    with endpoint.manager._lock:
+        with db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            device_row(c, user_id, device_id, active=True)
+            binding = c.execute('SELECT config FROM rtrust_credentials WHERE device=?', (device_id,)).fetchone()
+            if binding:
+                current = c.execute('SELECT id FROM configs WHERE id=? AND device_id=? AND user_id=? AND revoked_at IS NULL',
+                                    (binding['config'], device_id, user_id)).fetchone()
+                if current is None:
+                    raise HTTPException(409, 'Credential removed; revoke device')
+            else:
+                current = c.execute('SELECT id FROM configs WHERE device_id=? AND user_id=? AND revoked_at IS NULL ORDER BY id LIMIT 1',
+                                    (device_id, user_id)).fetchone()
+            if current:
+                return current['id']
+            return c.execute('INSERT INTO configs(user_id,device_id,tt_username,tt_password,label) VALUES(?,?,?,?,?)',
+                             (user_id, device_id, tt_username, tt_password, label)).lastrowid
 
 
 def apply_pending():
@@ -140,7 +165,7 @@ def snapshot(owner, device):
         operations = [dict(r) for r in c.execute('SELECT id,action,generation,state,requested,applied,error FROM rtrust_credential_operations WHERE device=? ORDER BY rowid DESC LIMIT 20', (device,))]
         # Shared profiles granted to this device remain usable independently.
         shared = c.execute("SELECT count(*) FROM rtrust_grants g JOIN configs c ON g.profile='managed-'||c.id WHERE g.device=? AND c.device_id IS NULL AND c.revoked_at IS NULL", (device,)).fetchone()[0]
-    return {'device_id': device, 'revoked': row['revoked_at'] is not None,
+    return {'device_id': device, 'name': row['name'], 'platform': row['platform'], 'revoked': row['revoked_at'] is not None,
             'profile_id': 'managed-' + str(binding['config']) if binding and binding['config'] else None,
             'generation': binding['generation'] if binding else None,
             'management': 'device_credentials' if binding else 'unmanaged',
@@ -174,6 +199,7 @@ def mutate(owner, device, action, key, identity=None):
                     cfg = c.execute('SELECT * FROM configs WHERE id=? AND device_id=? AND user_id=? AND revoked_at IS NULL', (binding['config'], device, owner)).fetchone()
                     if cfg is None: raise HTTPException(409, 'Credential removed; revoke device')
                     c.execute('UPDATE configs SET tt_password=? WHERE id=?', (secrets.token_urlsafe(32), cfg['id']))
+                    c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE device_id=? AND user_id=? AND id!=? AND revoked_at IS NULL", (device, owner, cfg['id']))
                     c.execute('UPDATE rtrust_credentials SET generation=? WHERE device=?', (generation, device))
                 else:
                     # Migrate v1 device-owned credentials only. Never touch a
@@ -204,6 +230,7 @@ def revoke(c, owner, device):
 
 def install():
     db.active_credentials = active_credentials
+    db.create_device_config = create_device_config
     endpoint.write_credentials_toml = write_credentials
     db.revoke_device = revoke_legacy
     if not getattr(endpoint.manager, '_rtrust_credentials_installed', False):

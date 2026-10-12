@@ -14,6 +14,9 @@ from app import endpoint
 def test_credential_browser(viewport):
     fixture=ExchangeTests();fixture.setUp();device,_=fixture.enrolled('Managed fixture')
     from app import db
+    # Token expiry must not imply VPN revocation or hide owner controls.
+    with db.connect() as c:c.execute('UPDATE rtrust_tokens SET expires=0 WHERE device=?',(device,))
+    assert fixture.client.get('/portal/v2/devices').json()['devices']==[]
     db.set_settings({'panel_domain':'vpn.example.invalid'})
     listener=socket.socket();listener.bind(('127.0.0.1',0))
     origin=f'http://127.0.0.1:{listener.getsockname()[1]}'
@@ -35,6 +38,8 @@ def test_credential_browser(viewport):
                     # The private HTTP portal may lack secure-context randomUUID.
                     page.evaluate("Object.defineProperty(crypto,'randomUUID',{value:undefined})")
                     expect(page.locator('#devices')).to_contain_text('Managed fixture')
+                    expect(page.locator('#devices')).not_to_contain_text('отозвано')
+                    expect(page.get_by_role('button',name='Отозвать устройство',exact=True)).to_be_visible()
                     page.once('dialog',lambda d:d.accept())
                     page.get_by_role('button',name='Выдать отдельный VPN-пароль',exact=True).click()
                     expect(page.locator('#devices')).to_contain_text('Не применено')

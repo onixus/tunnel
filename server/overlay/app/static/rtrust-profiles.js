@@ -41,13 +41,13 @@ async function refresh(){
   renderGroups();
   const stateNames={requested:'Запрошено',pending:'Применяется',applied:'Применено на endpoint',failed:'Не применено'};
   for(const record of credentialStates){
-    const device=devices.find(d=>d.id===record.device_id);
-    const row=document.createElement('div');row.className='row';const title=document.createElement('strong');title.textContent=device?device.name+' ('+device.platform+')':'Устройство #'+record.device_id+' — отозвано';row.append(title);
+    const device={id:record.device_id,name:record.name,platform:record.platform};
+    const row=document.createElement('div');row.className='row';const title=document.createElement('strong');title.textContent=device.name+' ('+device.platform+')'+(record.revoked?' — отозвано':'');row.append(title);
     const latest=record.operations[0];
     row.append(text(record.management==='device_credentials'?'Отдельный VPN-пароль устройства':'Без гарантии отзыва VPN-пароля'));
     if(latest)row.append(text(stateNames[latest.state]+(latest.error?' — '+latest.error:'')));
     if(record.shared_credentials_unmanaged)row.append(text('Общий пароль из прежних профилей остаётся действующим.'));
-    if(device){const group=groups.find(g=>g.devices.includes(device.id));row.append(text('Группа маршрутов TUN: '+(group?group.name:'нет')));
+    if(!record.revoked){const group=groups.find(g=>g.devices.includes(device.id));row.append(text('Группа маршрутов TUN: '+(group?group.name:'нет')));
       if(managedEnabled)row.append(button(record.management==='device_credentials'?'Сменить VPN-пароль':'Выдать отдельный VPN-пароль',async()=>{
         if(!confirm('Смена паролей перезапустит VPN endpoint и разорвёт все текущие соединения. Другие устройства смогут переподключиться. Продолжить?'))return;
         const action=record.management==='device_credentials'?'rotate':'provision';
