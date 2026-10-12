@@ -47,6 +47,7 @@ jobs:
         run: |
           python server/tests/test_exchange.py
           python server/tests/test_agent_routes.py
+          python -m pytest -q server/tests/test_device_credentials.py server/tests/test_portal_update_context.py
           python -m pytest -q server/tests/test_agent_routes_browser.py
           python server/tests/native_exchange.py
           python server/tests/routing_exchange.py

@@ -32,12 +32,15 @@ def prepare(base, tag):
     # Give the resolved local image a content-derived tag before building.
     pinned = 'rtrust-portal-base:' + image.removeprefix('sha256:')
     run('docker', 'tag', image, pinned)
-    # Pass only the public overlay and patcher to Docker, never the working tree/data.
+    # Stage only selected application sources, never the working tree/data.
     with tempfile.TemporaryDirectory(prefix='rtrust-portal-build-') as folder:
         import shutil
         context = Path(folder)
         shutil.copytree(ROOT / 'server/overlay/app', context / 'server/overlay/app',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        supervisor = context / 'server/upstream/app'
+        supervisor.mkdir(parents=True)
+        shutil.copy2(ROOT / 'server/upstream/app/endpoint.py', supervisor / 'endpoint.py')
         (context / 'deploy').mkdir()
         for name in ('portal_patch.py', 'portal-update.Dockerfile'):
             shutil.copy2(ROOT / 'deploy' / name, context / 'deploy' / name)

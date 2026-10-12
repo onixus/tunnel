@@ -59,8 +59,13 @@ def install(application):
     previous = application.router.lifespan_context
     @asynccontextmanager
     async def lifespan(app):
+        # Register persisted per-device credentials before the existing owner
+        # starts its endpoint. Initializing after its yield drops these users
+        # from the first endpoint configuration on every fresh process.
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        db.init_db()
+        init()
         async with previous(app) as state:
-            init()
             yield state
     application.router.lifespan_context = lifespan
     application.include_router(router)
@@ -248,9 +253,10 @@ async def renew_token(request:Request):
     data=await body(request,['consent'])
     if data.get('consent') is not True:raise HTTPException(422,'Explicit renewal consent required')
     token=request.headers.get('authorization','')[7:]
-    hashed=security.hash_api_token(token); now=int(time.time())
+    hashed=security.hash_api_token(token)
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
+        now=int(time.time())
         current=c.execute("SELECT t.device FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.revoked_at IS NULL AND u.status='active' AND u.id=?",(hashed,device,now,owner)).fetchone()
         if current is None:raise HTTPException(401,'Device access expired or revoked')
         c.execute('UPDATE rtrust_tokens SET expires=? WHERE hash=?',(now+30*86400,hashed))

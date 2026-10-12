@@ -5,6 +5,28 @@ import test_exchange as fixture
 from app import db, rtrust_profiles as exchange, device_credentials as credentials, endpoint
 
 class DeviceCredentialTests(fixture.ExchangeTests):
+    def test_fresh_lifespan_registers_persisted_credentials_before_endpoint_owner(self):
+        from contextlib import asynccontextmanager
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        profile=self.managed(); device,_=self.enrolled(); self.grant(profile,device)
+        self.reconcile(device,self.positive)
+        with db.connect() as c:
+            row=c.execute('SELECT * FROM rtrust_device_credentials WHERE device=?',(device,)).fetchone()
+            expected=exchange.unseal(self.owner,row['payload'])
+        # Simulate a fresh module's unwrapped shared-credential function, without
+        # starting an endpoint or opening any network connection.
+        observed=[]
+        @asynccontextmanager
+        async def original_owner(app):
+            observed.extend(db.active_credentials())
+            yield
+        api=FastAPI(lifespan=original_owner)
+        with patch.object(db,'active_credentials',new=lambda: []):
+            exchange.install(api)
+            with TestClient(api): pass
+        self.assertIn(expected,observed)
+
     def managed(self):
         with db.connect() as c:
             c.execute("UPDATE settings SET value='endpoint.example.invalid' WHERE key='panel_domain'")
