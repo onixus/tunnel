@@ -60,6 +60,9 @@ fails; no automatic renewal is scheduled.
 
 The isolated real-endpoint test passed on Fedora for both H2 and H3: initial
 issue, old/new rotation, saved credential rejection after revoke and neighbor
-device reconnect after both operations. Full client workspace tests and 90
+device reconnect after both operations. A fresh interpreter then started the
+original endpoint owner with the persisted database: the neighboring device
+authenticated and the retired device stayed rejected on both protocols.
+Full client workspace tests and 92
 scoped portal/routing/agent/protocol tests passed. This evidence is deliberately
 separate from installed-package and active-session acceptance.
