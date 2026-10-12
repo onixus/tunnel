@@ -174,6 +174,24 @@ class CredentialTests(ExchangeTests):
         self.assertEqual(managed.active_credentials()[0]['username'],'legacy')
         self.assertIsNone(db.get_config(cfg)['revoked_at'])
 
+    def test_provision_refuses_device_at_client_profile_limit(self):
+        device,auth=self.enrolled()
+        ids=self.seed_profiles(64,device)
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            refused=self.change(device,'provision')
+        self.assertEqual(refused.status_code,409,refused.text);self.assertIn('64',refused.text)
+        with db.connect() as c:
+            self.assertIsNone(c.execute('SELECT 1 FROM rtrust_credentials WHERE device=?',(device,)).fetchone())
+            self.assertEqual(c.execute('SELECT count(*) FROM configs WHERE device_id=?',(device,)).fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT count(*) FROM rtrust_credential_operations WHERE device=?',(device,)).fetchone()[0],0)
+        self.assertEqual(len(self.client.get('/portal/v2/profiles',headers=auth).json()['profiles']),64)
+        with db.connect() as c:c.execute('DELETE FROM rtrust_grants WHERE profile=?',(ids[0],))
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            result=self.change(device,'provision')
+        self.assertEqual(result.status_code,200,result.text)
+        listed=self.client.get('/portal/v2/profiles',headers=auth).json()['profiles']
+        self.assertEqual(len(listed),64);self.assertIn(result.json()['profile_id'],[p['id'] for p in listed])
+
     def test_auth_disabled_token_renewal_and_file_permissions(self):
         device,auth=self.enrolled()
         self.assertEqual(self.client.post(f'/portal/v2/devices/{device}/credentials/provision',headers=auth).status_code,403)

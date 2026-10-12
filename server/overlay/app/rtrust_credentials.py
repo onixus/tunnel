@@ -205,6 +205,10 @@ def mutate(owner, device, action, key, identity=None):
                     # Migrate v1 device-owned credentials only. Never touch a
                     # legacy/shared config: neighboring devices keep access.
                     c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE device_id=? AND user_id=? AND revoked_at IS NULL", (device, owner))
+                    # The new device credential becomes a client-visible grant;
+                    # refuse (and roll back) rather than exceed the sync limit.
+                    from .rtrust_profiles import require_capacity
+                    require_capacity(c, owner, device)
                     cfg_id = c.execute('INSERT INTO configs(user_id,device_id,tt_username,tt_password,label) VALUES(?,?,?,?,?)',
                                        (owner, device, 'd' + str(device) + '-' + secrets.token_hex(12), secrets.token_urlsafe(32), row['name'])).lastrowid
                     c.execute('INSERT INTO rtrust_credentials(device,config,generation,legacy_shared) VALUES(?,?,?,?)', (device, cfg_id, generation, int(c.execute("SELECT EXISTS(SELECT 1 FROM rtrust_grants g JOIN configs c ON g.profile='managed-'||c.id WHERE g.device=? AND c.device_id IS NULL AND c.revoked_at IS NULL)",(device,)).fetchone()[0])))

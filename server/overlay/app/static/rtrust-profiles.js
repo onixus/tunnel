@@ -5,7 +5,7 @@ let previewId = null, profiles = [], devices = [], groups = [], credentialStates
 async function api(path, method='GET', body, extra={}) {
   const response = await fetch('/portal/v2/'+path, {method, credentials:'same-origin', cache:'no-store', redirect:'error', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,...extra}, body:body===undefined?undefined:JSON.stringify(body)});
   const result = await response.json();
-  if (!response.ok) { const error = new Error(response.status===401?'Войдите в кабинет заново.':response.status===409?'Конфиг изменён или требуется согласие на потерю полей. Обновите список.':'Операция отклонена ('+response.status+').'); error.result=result; error.status=response.status; throw error; }
+  if (!response.ok) { const error = new Error(response.status===401?'Войдите в кабинет заново.':response.status===409&&/limit reached|Too many profiles/.test(String(result&&result.detail))?'Достигнут лимит 64 профиля для синхронизации клиентов. Отзовите лишние доступы или профили.':response.status===409?'Конфиг изменён или требуется согласие на потерю полей. Обновите список.':'Операция отклонена ('+response.status+').'); error.result=result; error.status=response.status; throw error; }
   return result;
 }
 function status(text){el('status').textContent=text;}

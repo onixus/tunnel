@@ -128,6 +128,34 @@ source. New labels must stay within this alphabet and are declared in
 `ORIGIN_LABELS` in `server/overlay/app/rtrust_profiles.py`, which
 `test_profile_origin_labels_follow_client_contract` checks.
 
+## Client profile limit
+
+Android and iOS reject a whole managed batch with more than 64 profiles, so the
+server caps every client-visible set at `MAX_CLIENT_PROFILES = 64`
+(`server/overlay/app/rtrust_profiles.py`, advertised as
+`max_client_profiles` in `/portal/v2/capabilities`). A device sees its live
+grants; the owner browser view sees live stored imports plus live account
+configs. Grants to revoked profiles or configs do not count.
+
+- Creation is refused with HTTP 409 and no partial write: an import commit
+  (`Profile limit reached (64)` for the owner set, `Device profile limit
+  reached (64)` when the importing device is full), a new grant to a full
+  device, and managed credential provisioning that would add a 65th grant
+  (the transaction, including migration of v1 device configs, rolls back).
+  Re-granting an existing grant stays idempotent.
+- Historical data above the limit is never truncated: `GET /portal/v2/profiles`
+  and `POST /portal/v2/snapshot` return HTTP 409
+  `{"detail":"Too many profiles for client sync"}`. A truncated list would make
+  clients delete the omitted managed profiles. Android, iOS and the desktop
+  client treat any non-200 as a failed sync and keep their last applied set.
+  Remediation is an owner action: revoke grants or profiles until the set is
+  at most 64.
+- Error bodies carry no profile, device or credential identifiers.
+
+Account configs created outside the overlay (legacy panel issuance) are not
+capped at creation; an owner above the limit gets the same explicit 409 in the
+browser profile view until configs are revoked.
+
 ## Atomic snapshot and offline freshness
 
 The paired client requests an authenticated, transactionally frozen snapshot
