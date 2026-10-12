@@ -515,7 +515,7 @@ def _grant(identifier:str,request:Request, payload:dict, context:tuple):
         if live:accessible(c,owner,None,identifier)
         if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=? AND revoked_at IS NULL',(data['device_id'],owner)).fetchone():raise HTTPException(404,'Device not found')
         if live and identifier.startswith('managed-'):
-            cfg=c.execute('SELECT device_id FROM configs WHERE id=?',(int(identifier[8:]),)).fetchone()
+            cfg=c.execute('SELECT device_id FROM configs WHERE id=?',(credentials.managed_number(identifier),)).fetchone()
             if cfg and cfg['device_id'] is not None and cfg['device_id']!=data['device_id']:raise HTTPException(409,'Device credential cannot be shared')
         if data['allow']:
             if not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id'])).fetchone():

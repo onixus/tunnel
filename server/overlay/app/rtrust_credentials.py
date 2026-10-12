@@ -13,6 +13,7 @@ import uuid
 from fastapi import HTTPException
 from . import db, endpoint
 
+SQLITE_MAX_INTEGER = 2 ** 63 - 1
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS rtrust_credentials(
  device INTEGER PRIMARY KEY REFERENCES app_devices(id) ON DELETE CASCADE,
@@ -47,13 +48,19 @@ def init():
 
 
 def managed_number(identifier):
-    """Config id named by a `managed-N` profile id, parsed exactly as reads do."""
+    """Config id of a canonical `managed-N` profile id (N > 0, SQLite range).
+
+    Variants such as `managed-01` or `managed-+1` name no profile: accepting
+    them would grant one config several times under different ids."""
     if not isinstance(identifier, str) or not identifier.startswith('managed-'):
         return None
     try:
-        return int(identifier[8:])
-    except ValueError:
+        number = int(identifier[8:])
+    except (ValueError, OverflowError):
         return None
+    if not 0 < number <= SQLITE_MAX_INTEGER or 'managed-' + str(number) != identifier:
+        return None
+    return number
 
 
 def revoke_configs(c, where, params):
@@ -76,8 +83,9 @@ def drop_config_grants(c, ids):
 def purge_dead_managed_grants(c):
     """Idempotent sweep of grants whose managed config is revoked or deleted.
 
-    Uses the same id parsing as profile reads, so a grant that a device can
-    still read is never removed. Runs inside the caller's transaction."""
+    Uses the same canonical id parsing as profile reads, so a grant that a
+    device can still read is never removed; non-canonical or unparsable
+    `managed-` ids are dead by definition. Runs inside the caller's transaction."""
     dead = []
     for row in c.execute("SELECT profile,device FROM rtrust_grants WHERE substr(profile,1,8)='managed-'").fetchall():
         number = managed_number(row[0])

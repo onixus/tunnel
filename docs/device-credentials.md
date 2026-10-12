@@ -158,11 +158,16 @@ live grants; grants to revoked profiles or configs do not count.
   reaching that bound is the same explicit 409, never a truncated set.
 - Grants do not outlive their managed config. Every overlay path that revokes
   a config (device revocation, legacy `revoke_device`, migration of v1 device
-  configs on provisioning, rotation of extra device configs) and the upstream
-  admin hard delete (`db.delete_config`, wrapped by the overlay) remove the
-  config's `managed-N` grants in the same transaction. Startup (`init()`) runs
-  an idempotent, transactional sweep of grants to revoked or deleted configs
-  left by earlier versions; grants a device can still read are never removed.
+  configs on provisioning, rotation of extra device configs), the console
+  shared-key revoke (`trusttunnel.revoke`) and the upstream admin hard delete
+  (`db.delete_config`, wrapped by the overlay) remove the config's `managed-N`
+  grants in the same transaction. Startup (`init()`) runs an idempotent,
+  transactional sweep of grants to revoked or deleted configs left by earlier
+  versions; grants a device can still read are never removed.
+- A managed profile id is only the canonical `managed-N` (`N` a positive
+  decimal SQLite integer without sign, padding or separators). Variants such
+  as `managed-01` or `managed-+1` name no profile (`404` on grant, ignored on
+  read); historical rows with such ids are removed by the startup sweep.
   Revoked stored imports keep the existing behaviour (owner delete already
   removes their grants).
 - `POST /portal/v2/profiles/{id}/grants` with `allow:false` only needs a live

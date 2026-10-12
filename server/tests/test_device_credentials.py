@@ -329,6 +329,32 @@ class CredentialTests(ExchangeTests):
         self.assertEqual(self.post('profiles/'+live[0]+'/grants',{'device_id':device,'allow':False}).status_code,200)
         self.assertEqual(self.post('profiles/'+self.seed_profiles(1)[0]+'/grants',{'device_id':device,'allow':True}).status_code,200)
 
+    def test_noncanonical_managed_ids_are_not_profiles(self):
+        from app import rtrust_profiles as exchange
+        device,auth=self.enrolled()
+        cfg=db.create_config(self.owner,'canonical',secrets.token_urlsafe(32),'Shared')
+        variants=[f'managed-0{cfg}',f'managed-+{cfg}',f'managed- {cfg}',f'managed-{cfg}_0','managed-0','managed--1',
+                  'managed-'+str(2**63),'managed-'+'9'*40,'managed-'+'1'*5000]
+        for profile in variants:
+            self.assertIsNone(managed.managed_number(profile),profile)
+            self.assertEqual(self.post(f'profiles/{profile}/grants',{'device_id':device,'allow':True}).status_code,404,profile)
+            self.assertEqual(self.post(f'profiles/{profile}/grants',{'device_id':device,'allow':False}).status_code,200,profile)
+        self.assertEqual(managed.managed_number(f'managed-{cfg}'),cfg)
+        self.assertEqual(self.post(f'profiles/managed-{cfg}/grants',{'device_id':device,'allow':True}).status_code,200)
+        # Historical variant rows (older versions accepted them) are not readable
+        # and do not break reads, then init() removes them.
+        with db.connect() as c:c.executemany('INSERT INTO rtrust_grants VALUES(?,?)',[(p,device) for p in variants])
+        listed=self.client.get('/portal/v2/profiles',headers=auth)
+        self.assertEqual(listed.status_code,200,listed.text)
+        self.assertEqual([p['id'] for p in listed.json()['profiles']],[f'managed-{cfg}'])
+        self.assertEqual(self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth).status_code,200)
+        with db.connect() as c:
+            for profile in variants:self.assertIsNone(exchange.live_row(c,self.owner,device,profile),profile)
+        exchange.init()
+        self.assertEqual(self.grant_rows(device),{f'managed-{cfg}'})
+        managed.install();db.delete_config(cfg)
+        self.assertEqual(self.grant_rows(device),set())
+
     def test_auth_disabled_token_renewal_and_file_permissions(self):
         device,auth=self.enrolled()
         self.assertEqual(self.client.post(f'/portal/v2/devices/{device}/credentials/provision',headers=auth).status_code,403)
