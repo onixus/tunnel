@@ -38,6 +38,8 @@ ORIGIN_LABELS = (ORIGIN_MANAGED, ORIGIN_STORED)
 # historical excess: list/snapshot fail closed so clients keep their last set.
 MAX_CLIENT_PROFILES = 64
 SYNC_LIMIT_ERROR = 'Too many profiles for client sync'
+# Upper bound on raw (possibly stale) grant rows scanned per device request.
+MAX_DEVICE_GRANT_SCAN = 1000
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS rtrust_profiles(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,revision INTEGER NOT NULL,payload BLOB,summary TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rtrust_imports(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,actor TEXT NOT NULL,payload BLOB NOT NULL,expires INTEGER NOT NULL,result TEXT);
@@ -259,14 +261,20 @@ def client_profile_ids(c, owner, device):
         ids=[r[0] for r in c.execute('SELECT id FROM rtrust_profiles WHERE owner=? AND revoked=0 ORDER BY id LIMIT 100',(owner,))]
         ids += ['managed-'+str(r[0]) for r in c.execute('SELECT id FROM configs WHERE user_id=? AND revoked_at IS NULL ORDER BY id LIMIT 100',(owner,))]
         return ids
-    ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile',(device,)) if live_row(c,owner,device,r[0]) is not None]
+    ids=device_live_ids(c,owner,device,SYNC_LIMIT_ERROR)
     if len(ids)>MAX_CLIENT_PROFILES:raise HTTPException(409,SYNC_LIMIT_ERROR)
     return ids
 
+def device_live_ids(c, owner, device, error):
+    # Bounded scan; reaching the bound fails closed instead of truncating.
+    rows=c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile LIMIT ?',(device,MAX_DEVICE_GRANT_SCAN+1)).fetchall()
+    if len(rows)>MAX_DEVICE_GRANT_SCAN:raise HTTPException(409,error)
+    return [r[0] for r in rows if live_row(c,owner,device,r[0]) is not None]
+
 def require_device_capacity(c, owner, device, adding=1):
     """Refuse a mutation that would grow a device's sync set beyond the limit."""
-    current=sum(1 for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=?',(device,)).fetchall() if live_row(c,owner,device,r[0]) is not None)
-    if current+adding>MAX_CLIENT_PROFILES:raise HTTPException(409,f'Device profile limit reached ({MAX_CLIENT_PROFILES})')
+    error=f'Device profile limit reached ({MAX_CLIENT_PROFILES})'
+    if len(device_live_ids(c,owner,device,error))+adding>MAX_CLIENT_PROFILES:raise HTTPException(409,error)
 
 def accessible(c, owner, device, identifier,settings=None):
     if device is not None and not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,device)).fetchone():

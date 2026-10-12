@@ -192,6 +192,40 @@ class CredentialTests(ExchangeTests):
         listed=self.client.get('/portal/v2/profiles',headers=auth).json()['profiles']
         self.assertEqual(len(listed),64);self.assertIn(result.json()['profile_id'],[p['id'] for p in listed])
 
+    def test_stale_grants_do_not_consume_device_capacity(self):
+        device,auth=self.enrolled()
+        ids=self.seed_profiles(63,device)
+        cfg=db.create_config(self.owner,'stale-shared',secrets.token_urlsafe(32),'Shared')
+        self.assertEqual(self.post(f'profiles/managed-{cfg}/grants',{'device_id':device,'allow':True}).status_code,200)
+        free=self.seed_profiles(1)[0]
+        self.assertEqual(self.post('profiles/'+free+'/grants',{'device_id':device,'allow':True}).status_code,409)
+        # Revoked config keeps its grant row, which must not count.
+        with db.connect() as c:c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE id=?",(cfg,))
+        granted=self.post('profiles/'+free+'/grants',{'device_id':device,'allow':True})
+        self.assertEqual(granted.status_code,200,granted.text)
+        # Revoked stored profile keeps its grant row: the device can import.
+        with db.connect() as c:c.execute('UPDATE rtrust_profiles SET revoked=1,payload=NULL WHERE id=?',(ids[0],))
+        preview=self.client.post('/portal/v2/profile-imports/preview',json={'content':self.content,'intent':'external_stored'},headers=auth).json()['preview_id']
+        imported=self.client.post('/portal/v2/profile-imports/'+preview+'/commit',json={'action':'create','consent':True},headers=auth)
+        self.assertEqual(imported.status_code,200,imported.text)
+        # And again for provisioning.
+        with db.connect() as c:c.execute('UPDATE rtrust_profiles SET revoked=1,payload=NULL WHERE id=?',(ids[1],))
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            provisioned=self.change(device,'provision')
+        self.assertEqual(provisioned.status_code,200,provisioned.text)
+        listed=self.client.get('/portal/v2/profiles',headers=auth)
+        self.assertEqual(listed.status_code,200,listed.text);self.assertEqual(len(listed.json()['profiles']),64)
+
+    def test_device_grant_scan_is_bounded_and_fails_closed(self):
+        from app import rtrust_profiles as exchange
+        device,auth=self.enrolled()
+        self.seed_profiles(3,device)
+        with patch.object(exchange,'MAX_DEVICE_GRANT_SCAN',2):
+            self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,409)
+            self.assertEqual(self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth).status_code,409)
+            self.assertEqual(self.post('profiles/'+self.seed_profiles(1)[0]+'/grants',{'device_id':device,'allow':True}).status_code,409)
+        self.assertEqual(len(self.client.get('/portal/v2/profiles',headers=auth).json()['profiles']),3)
+
     def test_auth_disabled_token_renewal_and_file_permissions(self):
         device,auth=self.enrolled()
         self.assertEqual(self.client.post(f'/portal/v2/devices/{device}/credentials/provision',headers=auth).status_code,403)

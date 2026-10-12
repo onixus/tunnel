@@ -154,6 +154,10 @@ live grants; grants to revoked profiles or configs do not count.
   previous bounds (up to 100 stored imports plus 100 account configs). Owner
   imports keep the previous cap of 100 stored profiles; account configs are not
   counted there.
+- Device checks scan at most `MAX_DEVICE_GRANT_SCAN = 1000` raw grant rows;
+  reaching that bound is the same explicit 409, never a truncated set.
+- Capacity check and grant insert share one `BEGIN IMMEDIATE` transaction, so
+  concurrent grants cannot push a device past the limit.
 - Error bodies carry no profile, device or credential identifiers.
 
 ## Atomic snapshot and offline freshness

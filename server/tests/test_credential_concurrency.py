@@ -72,3 +72,34 @@ def test_all_async_writer_categories_preserve_event_loop():
             asyncio.run(exercise())
         assert db.get_setting('brand_name')=='Updated'
     finally:fixture.client.close()
+
+
+def test_concurrent_grants_cannot_exceed_device_limit():
+    from fastapi import HTTPException
+    fixture=ExchangeTests();fixture.setUp()
+    try:
+        device,_=fixture.enrolled()
+        fixture.seed_profiles(exchange.MAX_CLIENT_PROFILES-1,device)
+        candidates=fixture.seed_profiles(2)
+        # Both writers finish the capacity check before either inserts, unless
+        # the transaction serializes them (then the barrier times out).
+        barrier=threading.Barrier(2,timeout=1)
+        original=exchange.require_device_capacity
+        def paused(*args,**kwargs):
+            original(*args,**kwargs)
+            try:barrier.wait()
+            except threading.BrokenBarrierError:pass
+        context=(fixture.owner,'u:test',None)
+        results=[]
+        def grant(identifier):
+            try:results.append(exchange._grant(identifier,None,{'device_id':device,'allow':True},context).status_code)
+            except HTTPException as error:results.append(error.status_code)
+        with patch.object(exchange,'require_device_capacity',paused):
+            threads=[threading.Thread(target=grant,args=(i,)) for i in candidates]
+            for t in threads:t.start()
+            for t in threads:t.join(30)
+        assert sorted(results)==[200,409],results
+        with db.connect() as c:
+            assert c.execute('SELECT count(*) FROM rtrust_grants WHERE device=?',(device,)).fetchone()[0]==exchange.MAX_CLIENT_PROFILES
+    finally:
+        fixture.client.close()
