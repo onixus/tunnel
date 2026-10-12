@@ -29,6 +29,7 @@ jobs:
         working-directory: rtrust-client
         run: |
           cargo build --locked -p rtrust-codec
+          cargo build --locked -p rtrust-inspect
           cargo build --locked -p rtrust-portal --examples
       - uses: actions/setup-python@v5
         with:
@@ -46,7 +47,16 @@ jobs:
       - name: Profile exchange, admin API and desktop/mobile browser lifecycle
         run: |
           python server/tests/test_exchange.py
+          python server/tests/test_device_credentials.py
+          python server/tests/test_device_credential_console.py
           python server/tests/test_agent_routes.py
-          python -m pytest -q server/tests/test_agent_routes_browser.py
+          python -m pytest -q server/tests/test_credential_concurrency.py server/tests/test_agent_routes_browser.py server/tests/test_device_credentials_browser.py
           python server/tests/native_exchange.py
           python server/tests/routing_exchange.py
+      - name: Real device credential revocation on HTTP/2 and HTTP/3
+        run: |
+          mkdir -p endpoint-fixture
+          curl -fL --retry 3 https://github.com/TrustTunnel/TrustTunnel/releases/download/v1.1.0/trusttunnel-v1.1.0-linux-x86_64.tar.gz -o endpoint-fixture/endpoint.tar.gz
+          echo "91c2ea3db7416a01b5258a4c047ec22890490bc55e1b194206031aa75144f0e7  endpoint-fixture/endpoint.tar.gz" | sha256sum -c -
+          tar -xzf endpoint-fixture/endpoint.tar.gz -C endpoint-fixture
+          python server/tests/managed_credentials_acceptance.py "$(find endpoint-fixture -name trusttunnel_endpoint -type f)" rtrust-client/target/debug/rtrust-inspect
