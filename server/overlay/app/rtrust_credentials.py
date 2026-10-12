@@ -46,6 +46,55 @@ def init():
         c.executescript(SCHEMA)
 
 
+def managed_number(identifier):
+    """Config id named by a `managed-N` profile id, parsed exactly as reads do."""
+    if not isinstance(identifier, str) or not identifier.startswith('managed-'):
+        return None
+    try:
+        return int(identifier[8:])
+    except ValueError:
+        return None
+
+
+def revoke_configs(c, where, params):
+    """Revoke matching live configs and drop their grants in the caller's transaction.
+
+    A grant to a revoked config can never become live again (ids are
+    AUTOINCREMENT, revocation is final), and owners cannot address it any more,
+    so leaving it would only grow the device's raw grant scan."""
+    ids = [r[0] for r in c.execute('SELECT id FROM configs WHERE revoked_at IS NULL AND ' + where, params)]
+    if ids:
+        c.executemany("UPDATE configs SET revoked_at=datetime('now') WHERE id=? AND revoked_at IS NULL", [(i,) for i in ids])
+        drop_config_grants(c, ids)
+    return ids
+
+
+def drop_config_grants(c, ids):
+    c.executemany('DELETE FROM rtrust_grants WHERE profile=?', [('managed-' + str(i),) for i in ids])
+
+
+def purge_dead_managed_grants(c):
+    """Idempotent sweep of grants whose managed config is revoked or deleted.
+
+    Uses the same id parsing as profile reads, so a grant that a device can
+    still read is never removed. Runs inside the caller's transaction."""
+    dead = []
+    for row in c.execute("SELECT profile,device FROM rtrust_grants WHERE substr(profile,1,8)='managed-'").fetchall():
+        number = managed_number(row[0])
+        if number is None or not c.execute('SELECT 1 FROM configs WHERE id=? AND revoked_at IS NULL', (number,)).fetchone():
+            dead.append((row[0], row[1]))
+    c.executemany('DELETE FROM rtrust_grants WHERE profile=? AND device=?', dead)
+    return len(dead)
+
+
+def delete_config(config_id):
+    """Upstream admin hard delete, plus removal of grants to that config."""
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        drop_config_grants(c, [config_id])
+        c.execute('DELETE FROM configs WHERE id = ?', (config_id,))
+
+
 def device_row(c, owner, device, active=False):
     row = c.execute('SELECT d.*,u.status FROM app_devices d JOIN users u ON u.id=d.user_id WHERE d.id=? AND d.user_id=?', (device, owner)).fetchone()
     if row is None:
@@ -199,12 +248,12 @@ def mutate(owner, device, action, key, identity=None):
                     cfg = c.execute('SELECT * FROM configs WHERE id=? AND device_id=? AND user_id=? AND revoked_at IS NULL', (binding['config'], device, owner)).fetchone()
                     if cfg is None: raise HTTPException(409, 'Credential removed; revoke device')
                     c.execute('UPDATE configs SET tt_password=? WHERE id=?', (secrets.token_urlsafe(32), cfg['id']))
-                    c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE device_id=? AND user_id=? AND id!=? AND revoked_at IS NULL", (device, owner, cfg['id']))
+                    revoke_configs(c, 'device_id=? AND user_id=? AND id!=?', (device, owner, cfg['id']))
                     c.execute('UPDATE rtrust_credentials SET generation=? WHERE device=?', (generation, device))
                 else:
                     # Migrate v1 device-owned credentials only. Never touch a
                     # legacy/shared config: neighboring devices keep access.
-                    c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE device_id=? AND user_id=? AND revoked_at IS NULL", (device, owner))
+                    revoke_configs(c, 'device_id=? AND user_id=?', (device, owner))
                     # The new device credential becomes a client-visible grant;
                     # refuse (and roll back) rather than exceed the sync limit.
                     from .rtrust_profiles import require_device_capacity
@@ -223,7 +272,7 @@ def revoke(c, owner, device):
     """Called inside the portal revocation transaction; no endpoint I/O here."""
     binding = c.execute('SELECT * FROM rtrust_credentials WHERE device=?', (device,)).fetchone()
     owned = c.execute('SELECT 1 FROM configs WHERE device_id=? AND user_id=? AND revoked_at IS NULL', (device, owner)).fetchone()
-    c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE device_id=? AND user_id=? AND revoked_at IS NULL", (device, owner))
+    revoke_configs(c, 'device_id=? AND user_id=?', (device, owner))
     if binding or owned:
         # Earlier un-applied provision/rotation is superseded, never reported as
         # applied after revocation removed its credential.
@@ -237,6 +286,7 @@ def install():
     db.create_device_config = create_device_config
     endpoint.write_credentials_toml = write_credentials
     db.revoke_device = revoke_legacy
+    db.delete_config = delete_config
     if not getattr(endpoint.manager, '_rtrust_credentials_installed', False):
         original = endpoint.manager.reconcile
         def reconcile(restart_for_creds=False):

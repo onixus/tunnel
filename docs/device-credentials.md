@@ -148,7 +148,7 @@ live grants; grants to revoked profiles or configs do not count.
   list would make clients delete the omitted managed profiles. Android, iOS and
   the desktop client treat any non-200 as a failed sync and keep their last
   applied set. Remediation: the owner revokes grants until the device has at
-  most 64.
+  most 64 (revoked or deleted profiles included, see below).
 - The owner browser view (session login, no device token) is a management
   view, not a client sync: it is unaffected by this limit and keeps its
   previous bounds (up to 100 stored imports plus 100 account configs). Owner
@@ -156,6 +156,22 @@ live grants; grants to revoked profiles or configs do not count.
   counted there.
 - Device checks scan at most `MAX_DEVICE_GRANT_SCAN = 1000` raw grant rows;
   reaching that bound is the same explicit 409, never a truncated set.
+- Grants do not outlive their managed config. Every overlay path that revokes
+  a config (device revocation, legacy `revoke_device`, migration of v1 device
+  configs on provisioning, rotation of extra device configs) and the upstream
+  admin hard delete (`db.delete_config`, wrapped by the overlay) remove the
+  config's `managed-N` grants in the same transaction. Startup (`init()`) runs
+  an idempotent, transactional sweep of grants to revoked or deleted configs
+  left by earlier versions; grants a device can still read are never removed.
+  Revoked stored imports keep the existing behaviour (owner delete already
+  removes their grants).
+- `POST /portal/v2/profiles/{id}/grants` with `allow:false` only needs a live
+  device of the caller: it removes a grant even when the profile is revoked,
+  deleted or never existed, and answers `200 {"updated":true}` in all those
+  cases, so it neither fails nor reveals whether another owner's profile
+  exists. Another owner's device is still `404 Device not found`. Removing a
+  grant that does not exist is a no-op and is not audited. `allow:true` still
+  requires an accessible profile.
 - Capacity check and grant insert share one `BEGIN IMMEDIATE` transaction, so
   concurrent grants cannot push a device past the limit.
 - Error bodies carry no profile, device or credential identifiers.

@@ -226,6 +226,109 @@ class CredentialTests(ExchangeTests):
             self.assertEqual(self.post('profiles/'+self.seed_profiles(1)[0]+'/grants',{'device_id':device,'allow':True}).status_code,409)
         self.assertEqual(len(self.client.get('/portal/v2/profiles',headers=auth).json()['profiles']),3)
 
+    def grant_rows(self, device):
+        with db.connect() as c:return {r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=?',(device,))}
+
+    def test_config_revocation_removes_its_grants(self):
+        device,_=self.enrolled();neighbor,_=self.enrolled('neighbor')
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            first=self.change(device,'provision').json()['profile_id']
+        self.assertIn(first,self.grant_rows(device))
+        # A v1 device config revoked by migration to managed credentials loses its grant.
+        legacy=db.create_device_config(self.owner,neighbor,'legacy-n','secret-n','Legacy')
+        self.assertEqual(self.post(f'profiles/managed-{legacy}/grants',{'device_id':neighbor,'allow':True}).status_code,200)
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            second=self.change(neighbor,'provision').json()['profile_id']
+        self.assertEqual(self.grant_rows(neighbor),{second})
+        # Device revocation revokes its config; that config's grants elsewhere go too.
+        with db.connect() as c:c.execute('INSERT INTO rtrust_grants VALUES(?,?)',(first,neighbor))
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.assertEqual(self.client.delete(f'/portal/v2/devices/{device}',headers=self.headers).status_code,200)
+        self.assertEqual(self.grant_rows(neighbor),{second})
+        # Upstream admin hard delete goes through the overlay cleanup.
+        managed.install()
+        shared=db.create_config(self.owner,'shared-del',secrets.token_urlsafe(32),'Shared')
+        self.assertEqual(self.post(f'profiles/managed-{shared}/grants',{'device_id':neighbor,'allow':True}).status_code,200)
+        db.delete_config(shared)
+        self.assertIsNone(db.get_config(shared))
+        self.assertEqual(self.grant_rows(neighbor),{second})
+
+    def test_rotation_revokes_extra_configs_and_their_grants(self):
+        device,_=self.enrolled()
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            current=self.change(device,'provision').json()['profile_id']
+        with db.connect() as c:
+            extra=c.execute("INSERT INTO configs(user_id,device_id,tt_username,tt_password,label) VALUES(?,?,'extra',?,'x')",(self.owner,device,secrets.token_urlsafe(32))).lastrowid
+            c.execute('INSERT INTO rtrust_grants VALUES(?,?)',('managed-'+str(extra),device))
+        with patch.object(managed.time,'monotonic',side_effect=range(1000)):
+            self.assertEqual(self.change(device,'rotate').status_code,200)
+        self.assertEqual(self.grant_rows(device),{current})
+
+    def test_owner_can_ungrant_revoked_profile_without_disclosure(self):
+        device,auth=self.enrolled()
+        cfg=db.create_config(self.owner,'revoked-shared',secrets.token_urlsafe(32),'Shared')
+        stored=self.seed_profiles(1,device)[0]
+        self.assertEqual(self.post(f'profiles/managed-{cfg}/grants',{'device_id':device,'allow':True}).status_code,200)
+        # Historical revocation that bypassed the cleanup (an older version).
+        with db.connect() as c:
+            c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE id=?",(cfg,))
+            c.execute('UPDATE rtrust_profiles SET revoked=1,payload=NULL WHERE id=?',(stored,))
+        for profile in (f'managed-{cfg}',stored):
+            self.assertEqual(self.post(f'profiles/{profile}/grants',{'device_id':device,'allow':True}).status_code,404)
+            removed=self.post(f'profiles/{profile}/grants',{'device_id':device,'allow':False})
+            self.assertEqual(removed.status_code,200,removed.text);self.assertEqual(removed.json(),{'updated':True})
+            # Idempotent, and indistinguishable from a profile that never existed.
+            again=self.post(f'profiles/{profile}/grants',{'device_id':device,'allow':False})
+            self.assertEqual((again.status_code,again.json()),(200,{'updated':True}))
+        missing=self.post('profiles/managed-999999/grants',{'device_id':device,'allow':False})
+        self.assertEqual((missing.status_code,missing.json()),(200,{'updated':True}))
+        self.assertEqual(self.grant_rows(device),set())
+        with db.connect() as c:
+            self.assertEqual(c.execute("SELECT count(*) FROM rtrust_audit WHERE action='ungrant'").fetchone()[0],2)
+        self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).json()['profiles'],[])
+
+    def test_ungrant_is_limited_to_owner_devices(self):
+        device,auth=self.enrolled()
+        cfg=db.create_config(self.owner,'owner-shared',secrets.token_urlsafe(32),'Shared')
+        self.assertEqual(self.post(f'profiles/managed-{cfg}/grants',{'device_id':device,'allow':True}).status_code,200)
+        with db.connect() as c:c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE id=?",(cfg,))
+        self.login(self.other)
+        other_device,_=self.enrolled('foreign')
+        for profile in (f'managed-{cfg}','managed-999999'):
+            self.assertEqual(self.post(f'profiles/{profile}/grants',{'device_id':device,'allow':False}).status_code,404)
+        # Another owner's profile on one's own device: same answer as a missing one.
+        live=db.create_config(self.owner,'owner-live',secrets.token_urlsafe(32),'Shared')
+        for profile in (f'managed-{cfg}',f'managed-{live}'):
+            answer=self.post(f'profiles/{profile}/grants',{'device_id':other_device,'allow':False})
+            self.assertEqual((answer.status_code,answer.json()),(200,{'updated':True}))
+        self.assertEqual(self.grant_rows(device),{f'managed-{cfg}'})
+        # Device tokens cannot manage grants at all.
+        self.assertEqual(self.client.post(f'/portal/v2/profiles/managed-{cfg}/grants',json={'device_id':device,'allow':False},headers=auth).status_code,403)
+        self.assertEqual(self.grant_rows(device),{f'managed-{cfg}'})
+
+    def test_init_purges_historical_dangling_grants(self):
+        from app import rtrust_profiles as exchange
+        device,auth=self.enrolled()
+        live=self.seed_profiles(63,device)
+        keep=db.create_config(self.owner,'keep',secrets.token_urlsafe(32),'Shared')
+        with db.connect() as c:
+            c.execute('INSERT INTO rtrust_grants VALUES(?,?)',('managed-'+str(keep),device))
+            dead=[c.execute("INSERT INTO configs(user_id,tt_username,tt_password,label,revoked_at) VALUES(?,?,'unused','x',datetime('now'))",(self.owner,'dead-'+str(i))).lastrowid for i in range(5)]
+            deleted=c.execute("INSERT INTO configs(user_id,tt_username,tt_password,label) VALUES(?,'gone','unused','x')",(self.owner,)).lastrowid
+            c.execute('DELETE FROM configs WHERE id=?',(deleted,))
+            c.executemany('INSERT INTO rtrust_grants VALUES(?,?)',[('managed-'+str(i),device) for i in dead+[deleted]]+[('managed-x',device)])
+        with patch.object(exchange,'MAX_DEVICE_GRANT_SCAN',66):
+            self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,409)
+            exchange.init();exchange.init()
+            self.assertEqual(self.grant_rows(device),set(live)|{'managed-'+str(keep)})
+            listed=self.client.get('/portal/v2/profiles',headers=auth)
+            self.assertEqual(listed.status_code,200,listed.text);self.assertEqual(len(listed.json()['profiles']),64)
+            # Limit semantics are unchanged after the cleanup.
+            refused=self.post('profiles/'+self.seed_profiles(1)[0]+'/grants',{'device_id':device,'allow':True})
+            self.assertEqual(refused.status_code,409);self.assertIn('64',refused.text)
+        self.assertEqual(self.post('profiles/'+live[0]+'/grants',{'device_id':device,'allow':False}).status_code,200)
+        self.assertEqual(self.post('profiles/'+self.seed_profiles(1)[0]+'/grants',{'device_id':device,'allow':True}).status_code,200)
+
     def test_auth_disabled_token_renewal_and_file_permissions(self):
         device,auth=self.enrolled()
         self.assertEqual(self.client.post(f'/portal/v2/devices/{device}/credentials/provision',headers=auth).status_code,403)
