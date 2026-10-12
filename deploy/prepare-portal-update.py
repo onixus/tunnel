@@ -32,15 +32,14 @@ def prepare(base, tag):
     # Give the resolved local image a content-derived tag before building.
     pinned = 'rtrust-portal-base:' + image.removeprefix('sha256:')
     run('docker', 'tag', image, pinned)
-    # Stage only selected application sources, never the working tree/data.
+    # Pass only the public overlay and patcher to Docker, never the working tree/data.
     with tempfile.TemporaryDirectory(prefix='rtrust-portal-build-') as folder:
         import shutil
         context = Path(folder)
         shutil.copytree(ROOT / 'server/overlay/app', context / 'server/overlay/app',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-        supervisor = context / 'server/upstream/app'
-        supervisor.mkdir(parents=True)
-        shutil.copy2(ROOT / 'server/upstream/app/endpoint.py', supervisor / 'endpoint.py')
+        (context / 'server/console').mkdir()
+        shutil.copy2(ROOT / 'server/console/console_app.py', context / 'server/console/console_app.py')
         (context / 'deploy').mkdir()
         for name in ('portal_patch.py', 'portal-update.Dockerfile'):
             shutil.copy2(ROOT / 'deploy' / name, context / 'deploy' / name)
@@ -64,7 +63,12 @@ db.init_db()
 exchange.init()
 exchange.init()
 assert json.loads(exchange.capabilities().body)['routing'] == 1
+assert json.loads(exchange.capabilities().body)['managed_credentials']['version'] == 1
 paths = app.openapi()['paths']
+assert 'post' in paths['/portal/v2/devices/{identifier}/credentials/{action}']
+assert 'get' in paths['/portal/v2/device-credentials']
+assert 'post' in paths['/portal/v2/device-token/renew']
+assert 'post' in paths['/admin/api/device-credentials/{identifier}/revoke']
 assert 'get' in paths['/portal/v2/routing']
 assert 'get' in paths['/admin/agent-routes']
 assert 'put' in paths['/admin/api/agent-routes/devices/{identifier}']

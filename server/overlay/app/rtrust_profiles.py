@@ -1,4 +1,8 @@
 """Additive v2 profile exchange. Shared Rust codec; no endpoint mutation on import."""
+import base64
+import io
+import hmac
+from urllib.parse import urlsplit
 import hashlib
 import hmac
 import ipaddress
@@ -9,17 +13,14 @@ import stat
 import subprocess
 import time
 import uuid
-import base64
-import io
-from urllib.parse import urlsplit
 from pathlib import Path
 from contextlib import asynccontextmanager
 import tempfile
 from cryptography.fernet import Fernet, InvalidToken
+from starlette.concurrency import run_in_threadpool
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from . import config, db, security, webauth
+from . import config, db, security, webauth, rtrust_credentials as credentials
 from .templating import templates
 
 router = APIRouter()
@@ -51,31 +52,83 @@ def init():
         high_water=c.execute("SELECT MAX(v) FROM (SELECT COALESCE(MAX(id),0) AS v FROM rtrust_route_groups UNION ALL SELECT COALESCE(MAX(CAST(object AS INTEGER)),0) AS v FROM rtrust_audit WHERE action IN ('route_group_create','route_group_delete'))").fetchone()[0]
         c.execute('INSERT INTO rtrust_route_counter VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET high_water=MAX(high_water,excluded.high_water)',(high_water,))
     cipher()
-    from . import device_credentials
-    device_credentials.init()
+    credentials.init()
 
 def install(application):
     """Call once from the existing portal main module, after constructing its app."""
+    credentials.install()
+    install_legacy_handlers(application)
     previous = application.router.lifespan_context
     @asynccontextmanager
     async def lifespan(app):
-        # Register persisted per-device credentials before the existing owner
-        # starts its endpoint. Initializing after its yield drops these users
-        # from the first endpoint configuration on every fresh process.
-        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        db.init_db()
-        init()
-        async with previous(app) as state:
-            yield state
+        import fcntl
+        Path(config.DATA_DIR).mkdir(parents=True,exist_ok=True)
+        # Acquire before upstream startup can spawn an endpoint. A second worker
+        # must fail, rather than manage a different process with the same files.
+        lock_fd=os.open(Path(config.DATA_DIR)/'.rtrust-endpoint-owner.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        try:
+            fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except Exception:
+            os.close(lock_fd)
+            raise RuntimeError('Portal requires one endpoint supervisor process')
+        try:
+            async with previous(app) as state:
+                init()
+                import threading
+                stop = threading.Event()
+                def retry():
+                    while not stop.wait(5):
+                        try: credentials.apply_pending()
+                        except Exception: pass
+                credentials.apply_pending()
+                worker = threading.Thread(target=retry, name='device-credential-retry', daemon=True)
+                worker.start()
+                try: yield state
+                finally:
+                    stop.set()
+                    worker.join()
+        finally:
+            os.close(lock_fd)
     application.router.lifespan_context = lifespan
     application.include_router(router)
     @application.middleware('http')
     async def private_responses(request, call_next):
         response = await call_next(request)
-        if request.url.path in ('/profiles', '/admin/agent-routes') or request.url.path.startswith(('/portal/v2/', '/admin/api/agent-routes')):
+        if request.url.path in ('/profiles', '/admin/agent-routes') or request.url.path.startswith(('/portal/v2/', '/admin/api/agent-routes', '/admin/api/device-credentials')):
             response.headers.update(HEADERS)
             response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         return response
+
+
+def install_legacy_handlers(application):
+    """The additive overlay also owns offloading the installed settings writer."""
+    from . import routes_admin
+    # Older FastAPI copies included routes; newer releases retain the router.
+    for route in [*application.routes, *routes_admin.router.routes]:
+        if getattr(route, 'path', None) == '/admin/settings' and 'POST' in (getattr(route, 'methods', None) or set()):
+            route.endpoint = legacy_settings_save
+            route.dependant.call = legacy_settings_save
+
+
+async def legacy_settings_save(request:Request):
+    if not await run_in_threadpool(webauth.current_admin, request):
+        return RedirectResponse('/admin/login',302)
+    form = await request.form()
+    return await run_in_threadpool(legacy_settings_apply, form)
+
+
+def legacy_settings_apply(form):
+    from .routes_admin import _SETTING_KEYS, _CHECKBOX_KEYS
+    from . import endpoint
+    updates = {}
+    for key in _SETTING_KEYS:
+        if key in _CHECKBOX_KEYS:
+            updates[key] = '1' if form.get(key) else '0'
+        elif key in form:
+            updates[key] = str(form.get(key)).strip()
+    db.set_settings(updates)
+    endpoint.manager.apply_settings()
+    return RedirectResponse('/admin/settings?msg=Настройки сохранены',302)
 
 def cipher():
     path = Path(config.DATA_DIR) / '.rtrust-profile-key'
@@ -156,7 +209,7 @@ async def body(request, allowed):
     if not isinstance(value,dict) or set(value)-set(allowed):raise HTTPException(422,'Unknown request fields')
     return value
 
-def managed_document(cfg, settings=None):
+def managed_document(cfg,settings=None):
     # Freeze settings once, then use the same Rust serializer for every format.
     from . import endpoint
     settings=db.get_settings() if settings is None else settings
@@ -165,33 +218,30 @@ def managed_document(cfg, settings=None):
     port=int(settings.get('conn_port') or '8443')
     if ':' in address and not address.startswith('['):address='['+address+']'
     raw={'schema_version':1,'name':cfg['label'] or cfg['tt_username'],'endpoint':{'hostname':hostname,'addresses':[f'{address}:{port}'],'username':cfg['tt_username'],'password':cfg['tt_password'],'custom_sni':settings.get('conn_sni') or '', 'has_ipv6':False,'anti_dpi':False,'upstream_protocol':'http3' if settings.get('conn_protocol')=='QUIC' else 'http2'}}
+    ca_path=os.environ.get('CLIENT_CA_FILE')
+    if ca_path:
+        try:
+            raw['endpoint']['certificate']=Path(ca_path).read_text(encoding='utf-8')
+        except (OSError,UnicodeError):raise HTTPException(503,'Client trust certificate unavailable')
     return codec(json.dumps(raw))
 
-def accessible(c, owner, device, identifier, settings=None):
+def accessible(c, owner, device, identifier,settings=None):
     if device is not None and not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,device)).fetchone():
         raise HTTPException(404,'Profile not found')
     if identifier.startswith('managed-'):
         try: number=int(identifier[8:])
         except ValueError:raise HTTPException(404,'Profile not found')
         row=c.execute('SELECT * FROM configs WHERE id=? AND user_id=? AND revoked_at IS NULL',(number,owner)).fetchone()
-        if row is None:raise HTTPException(404,'Profile not found')
-        origin='portal_managed'
-        if device is not None:
-            from . import device_credentials
-            row,origin=device_credentials.exported(c,owner,device,number,row)
-        result=managed_document(row, settings)
+        if row is None or (device is not None and row['device_id'] is not None and row['device_id']!=device):raise HTTPException(404,'Profile not found')
+        result=managed_document(row,settings)
         revision=hashlib.sha256(result['content'].encode()).hexdigest()
-        return {'id':identifier,'revision':revision,'summary':result['summary'],'origin':origin},result['content']
+        return {'id':identifier,'revision':revision,'summary':result['summary'],'origin':'portal_managed'},result['content']
     row=c.execute('SELECT * FROM rtrust_profiles WHERE id=? AND owner=? AND revoked=0',(identifier,owner)).fetchone()
     if row is None:raise HTTPException(404,'Profile not found')
     return {'id':identifier,'revision':str(row['revision']),'summary':json.loads(row['summary']),'origin':'external_stored'},unseal(owner,row['payload'])
 
 @router.get('/portal/v2/capabilities')
-def capabilities():
-    from . import device_credentials
-    value={'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1,'offline_freshness':1}
-    if device_credentials.enabled():value['device_credentials']={'version':1,'protocols':['http2','http3'],'session_policy':'restart_all_endpoint_sessions','legacy_shared_access':'unmanaged'}
-    return JSONResponse(value,headers=HEADERS)
+def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1,'offline_freshness':1,'managed_credentials':credentials.capabilities()},headers=HEADERS)
 
 @router.get('/profiles',response_class=HTMLResponse)
 def page(request:Request):
@@ -201,10 +251,14 @@ def page(request:Request):
 
 @router.post('/portal/v2/enrollment-codes')
 async def enrollment_code(request:Request):
-    owner,identity,device=actor(request,True)
+    context=await run_in_threadpool(actor,request,True)
+    data=await body(request,["origin"])
+    return await run_in_threadpool(_enrollment_code,request,data,context)
+
+def _enrollment_code(request,data,context):
+    owner,identity,device=context
     if device is not None:raise HTTPException(403,'Browser login required')
     rate(identity)
-    data=await body(request,['origin'])
     origin=data.get('origin')
     if origin is not None:
         if not isinstance(origin,str) or len(origin)>512 or not origin.isascii() or origin!=request.headers.get('origin'):
@@ -227,10 +281,19 @@ async def enrollment_code(request:Request):
         result.update(invitation=invitation,qr_svg=base64.b64encode(buffer.getvalue()).decode('ascii'))
     return JSONResponse(result,headers=HEADERS)
 
+
 @router.post('/portal/v2/enroll')
 async def enroll(request:Request):
+    context=await run_in_threadpool(_enroll_prepare, request)
+    payload=await body(request,['code','name','platform'])
+    return await run_in_threadpool(_enroll, request=request, payload=payload, context=context)
+
+def _enroll_prepare(request:Request):
     rate('enroll:'+str(request.client.host if request.client else 'unknown'),10)
-    data=await body(request,['code','name','platform'])
+    return ()
+
+def _enroll(request:Request, payload:dict, context:tuple):
+    data=payload
     code=data.get('code');name=data.get('name');platform=data.get('platform')
     if not isinstance(code,str) or not 20<=len(code)<=128 or not isinstance(name,str) or not 1<=len(name)<=80 or platform not in ('windows','linux','macos','android','ios'):
         raise HTTPException(422,'Invalid enrollment')
@@ -245,52 +308,33 @@ async def enroll(request:Request):
         audit(c,f'd:{device}','enroll',str(device))
     return JSONResponse({'token':raw,'device_id':device,'expires_in':30*86400},headers=HEADERS)
 
-@router.post('/portal/v2/token/renew')
-async def renew_token(request:Request):
-    owner,identity,device=actor(request)
-    if device is None:raise HTTPException(403,'Device token required')
-    rate(identity)
-    data=await body(request,['consent'])
-    if data.get('consent') is not True:raise HTTPException(422,'Explicit renewal consent required')
-    token=request.headers.get('authorization','')[7:]
-    hashed=security.hash_api_token(token)
-    with db.connect() as c:
-        c.execute('BEGIN IMMEDIATE')
-        now=int(time.time())
-        current=c.execute("SELECT t.device FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.revoked_at IS NULL AND u.status='active' AND u.id=?",(hashed,device,now,owner)).fetchone()
-        if current is None:raise HTTPException(401,'Device access expired or revoked')
-        c.execute('UPDATE rtrust_tokens SET expires=? WHERE hash=?',(now+30*86400,hashed))
-        audit(c,identity,'token_renew',str(device))
-    return JSONResponse({'expires_in':30*86400,'scope':'portal_access_only'},headers=HEADERS)
 
 @router.get('/portal/v2/devices')
-def devices(request:Request,include_revoked:bool=False):
+def devices(request:Request):
     owner,_,device=actor(request)
     if device is not None:raise HTTPException(403,'Browser login required')
     with db.connect() as c: rows=c.execute('SELECT DISTINCT d.id,d.name,d.platform FROM app_devices d JOIN rtrust_tokens t ON t.device=d.id WHERE d.user_id=? AND d.revoked_at IS NULL AND t.expires>?',(owner,int(time.time()))).fetchall()
-    result=[dict(r) for r in rows]
-    if include_revoked:
-        with db.connect() as c:
-            pending=c.execute("SELECT d.id,d.name,d.platform FROM app_devices d WHERE d.user_id=? AND d.revoked_at IS NOT NULL AND EXISTS(SELECT 1 FROM rtrust_device_credentials x WHERE x.device=d.id AND x.state!='applied') ORDER BY d.id DESC LIMIT 200",(owner,)).fetchall()
-        result.extend({**dict(row),'revoked':True} for row in pending)
-    return JSONResponse({'devices':result},headers=HEADERS)
+    return JSONResponse({'devices':[dict(r) for r in rows]},headers=HEADERS)
 
 @router.delete('/portal/v2/devices/{identifier}')
 def revoke_device(identifier:int,request:Request):
     owner,identity,device=actor(request,True)
     if device is not None:raise HTTPException(403,'Browser login required')
-    from . import device_credentials
-    with db.connect() as c:
-        c.execute('BEGIN IMMEDIATE')
-        if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=?',(identifier,owner)).fetchone():raise HTTPException(404,'Device not found')
-        has_managed=device_credentials.revoke_device(c,owner,identifier)
-        c.execute('DELETE FROM rtrust_tokens WHERE device=?',(identifier,));c.execute('DELETE FROM rtrust_grants WHERE device=?',(identifier,))
-        c.execute('DELETE FROM rtrust_route_members WHERE device=?',(identifier,))
-        c.execute('DELETE FROM rtrust_admin_route_members WHERE device=?',(identifier,))
-        c.execute('DELETE FROM rtrust_route_delivery WHERE device=?',(identifier,))
-        c.execute("UPDATE app_devices SET revoked_at=datetime('now') WHERE id=?",(identifier,))
-        audit(c,identity,'revoke_device',str(identifier))
-    return JSONResponse({'revoked':True,'scope':'portal_access','vpn':device_credentials.status(owner,identifier) if has_managed else {'state':'unmanaged'}},headers=HEADERS)
+    with credentials.endpoint.manager._lock:
+        with db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            credentials.device_row(c,owner,identifier)
+            credentials.revoke(c,owner,identifier)
+            c.execute('DELETE FROM rtrust_tokens WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_grants WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_route_members WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_admin_route_members WHERE device=?',(identifier,))
+            c.execute('DELETE FROM rtrust_route_delivery WHERE device=?',(identifier,))
+            c.execute("UPDATE app_devices SET revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=?",(identifier,))
+            audit(c,identity,'revoke_device',str(identifier))
+        credentials.apply_pending()
+    result=credentials.snapshot(owner,identifier)
+    return JSONResponse({'revoked':True,'credentials':result},headers=HEADERS)
 
 @router.get('/portal/v2/profiles')
 def profiles(request:Request):
@@ -309,8 +353,17 @@ def profiles(request:Request):
 
 @router.post('/portal/v2/profiles/{identifier}/export')
 async def export(identifier:str,request:Request):
+    context=await run_in_threadpool(_export_prepare, request)
+    payload=await body(request,['format','revision','include_secrets','accept_losses'])
+    return await run_in_threadpool(_export, identifier=identifier, request=request, payload=payload, context=context)
+
+def _export_prepare(request:Request):
     owner,identity,device=actor(request,True)
-    data=await body(request,['format','revision','include_secrets','accept_losses'])
+    return (owner, identity, device,)
+
+def _export(identifier:str,request:Request, payload:dict, context:tuple):
+    owner, identity, device=context
+    data=payload
     if data.get('include_secrets') is not True:raise HTTPException(422,'Explicit secret export consent required')
     with db.connect() as c:
         meta,document=accessible(c,owner,device,identifier)
@@ -321,10 +374,20 @@ async def export(identifier:str,request:Request):
         audit(c,identity,'export',identifier)
     return JSONResponse(result,headers=HEADERS)
 
+
 @router.post('/portal/v2/profile-imports/preview')
 async def preview(request:Request):
+    context=await run_in_threadpool(_preview_prepare, request)
+    payload=await body(request,['content','intent'])
+    return await run_in_threadpool(_preview, request=request, payload=payload, context=context)
+
+def _preview_prepare(request:Request):
     owner,identity,_=actor(request,True);rate(identity)
-    data=await body(request,['content','intent'])
+    return (owner, identity, _,)
+
+def _preview(request:Request, payload:dict, context:tuple):
+    owner, identity, _=context
+    data=payload
     if data.get('intent')!='external_stored':raise HTTPException(422,'Only external storage import is supported; endpoint credentials are unchanged')
     result=codec(data.get('content'))
     identifier=str(uuid.uuid4())
@@ -333,10 +396,20 @@ async def preview(request:Request):
         c.execute('INSERT INTO rtrust_imports VALUES(?,?,?,?,?,NULL)',(identifier,owner,identity,seal(owner,result['content']),int(time.time())+600))
     return JSONResponse({'preview_id':identifier,'summary':result['summary'],'expires_in':600,'origin':'external_stored','secrets_present':True},headers=HEADERS)
 
+
 @router.post('/portal/v2/profile-imports/{identifier}/commit')
 async def commit(identifier:str,request:Request):
+    context=await run_in_threadpool(_commit_prepare, request)
+    payload=await body(request,['action','target_id','base_revision','consent'])
+    return await run_in_threadpool(_commit, identifier=identifier, request=request, payload=payload, context=context)
+
+def _commit_prepare(request:Request):
     owner,identity,device=actor(request,True)
-    data=await body(request,['action','target_id','base_revision','consent'])
+    return (owner, identity, device,)
+
+def _commit(identifier:str,request:Request, payload:dict, context:tuple):
+    owner, identity, device=context
+    data=payload
     if data.get('consent') is not True or data.get('action') not in ('create','replace'):raise HTTPException(422,'Explicit import consent and action required')
     signature=hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
     with db.connect() as c:
@@ -367,65 +440,33 @@ async def commit(identifier:str,request:Request):
     result.pop('signature')
     return JSONResponse(result,headers=HEADERS)
 
+
 @router.post('/portal/v2/profiles/{identifier}/grants')
 async def grant(identifier:str,request:Request):
+    context=await run_in_threadpool(_grant_prepare, request)
+    payload=await body(request,['device_id','allow'])
+    return await run_in_threadpool(_grant, identifier=identifier, request=request, payload=payload, context=context)
+
+def _grant_prepare(request:Request):
     owner,identity,device=actor(request,True)
     if device is not None:raise HTTPException(403,'Browser login required')
-    data=await body(request,['device_id','allow'])
+    return (owner, identity, device,)
+
+def _grant(identifier:str,request:Request, payload:dict, context:tuple):
+    owner, identity, device=context
+    data=payload
     if type(data.get('device_id')) is not int or type(data.get('allow')) is not bool:raise HTTPException(422,'Invalid grant')
-    from . import device_credentials
     with db.connect() as c:
-        c.execute('BEGIN IMMEDIATE')
         accessible(c,owner,None,identifier)
         if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=? AND revoked_at IS NULL',(data['device_id'],owner)).fetchone():raise HTTPException(404,'Device not found')
-        if identifier.startswith('managed-') and (device_credentials.enabled() or not data['allow']):
-            device_credentials.request(c,owner,data['device_id'],device_credentials.number(identifier),revoke=not data['allow'])
+        if identifier.startswith('managed-'):
+            cfg=c.execute('SELECT device_id FROM configs WHERE id=?',(int(identifier[8:]),)).fetchone()
+            if cfg and cfg['device_id'] is not None and cfg['device_id']!=data['device_id']:raise HTTPException(409,'Device credential cannot be shared')
         if data['allow']:c.execute('INSERT OR IGNORE INTO rtrust_grants VALUES(?,?)',(identifier,data['device_id']))
         else:c.execute('DELETE FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id']))
         audit(c,identity,'grant' if data['allow'] else 'ungrant',identifier)
     return JSONResponse({'updated':True},headers=HEADERS)
 
-@router.get('/portal/v2/devices/{identifier}/credentials')
-def credential_status(identifier:int,request:Request):
-    owner,_,device=actor(request)
-    if device is not None and device!=identifier:raise HTTPException(404,'Device not found')
-    from . import device_credentials
-    return JSONResponse(device_credentials.status(owner,identifier),headers=HEADERS)
-
-@router.post('/portal/v2/profiles/{identifier}/device-credentials')
-async def rotate_device_credentials(identifier:str,request:Request):
-    owner,identity,device=actor(request,True)
-    if device is not None:raise HTTPException(403,'Browser login required')
-    from . import device_credentials
-    if not device_credentials.enabled():raise HTTPException(503,'Managed endpoint verifier is not configured')
-    data=await body(request,['device_id','expected_generation','request_key','consent'])
-    if type(data.get('device_id')) is not int or type(data.get('expected_generation')) is not int or data.get('expected_generation',0)<1 or data.get('consent') is not True:
-        raise HTTPException(422,'Explicit rotation consent and generation required')
-    key=data.get('request_key')
-    if not isinstance(key,str) or not 20<=len(key)<=80 or not all(ch.isascii() and (ch.isalnum() or ch in '-_') for ch in key):raise HTTPException(422,'Invalid rotation request key')
-    rate(identity,10)
-    profile=device_credentials.number(identifier)
-    with db.connect() as c:
-        c.execute('BEGIN IMMEDIATE')
-        accessible(c,owner,None,identifier)
-        if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=? AND revoked_at IS NULL',(data['device_id'],owner)).fetchone():raise HTTPException(404,'Device not found')
-        generation=device_credentials.request(c,owner,data['device_id'],profile,expected=data['expected_generation'],key=key)
-        audit(c,identity,'device_credential_rotate',str(data['device_id'])+':'+identifier)
-    with db.connect() as c:operation=c.execute('SELECT state FROM rtrust_credential_operations WHERE owner=? AND key=?',(owner,key)).fetchone()
-    state=operation['state']
-    return JSONResponse({'generation':generation,'state':state,'requires_reconcile':state!='applied'},headers=HEADERS)
-
-@router.post('/portal/v2/devices/{identifier}/credentials/reconcile')
-async def reconcile_device_credentials(identifier:int,request:Request):
-    owner,identity,device=actor(request,True)
-    if device is not None:raise HTTPException(403,'Browser login required')
-    data=await body(request,['consent_restart_endpoint'])
-    if data.get('consent_restart_endpoint') is not True:raise HTTPException(422,'Explicit endpoint restart consent required')
-    from . import device_credentials
-    device_credentials.status(owner,identifier)
-    rate(identity,10)
-    result=await run_in_threadpool(device_credentials.reconcile,owner,identifier)
-    return JSONResponse(result,headers=HEADERS)
 
 @router.delete('/portal/v2/profiles/{identifier}')
 def delete(identifier:str,request:Request):
@@ -480,8 +521,17 @@ def list_route_groups(request:Request):
 
 @router.post('/portal/v2/route-groups')
 async def create_route_group(request:Request):
+    context=await run_in_threadpool(_create_route_group_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan'])
+    return await run_in_threadpool(_create_route_group, request=request, payload=payload, context=context)
+
+def _create_route_group_prepare(request:Request):
     owner,identity=browser(request,True);rate('routes:'+identity,60)
-    name,policy=route_policy(await body(request,['name','include','exclude','exclude_lan']))
+    return (owner, identity,)
+
+def _create_route_group(request:Request, payload:dict, context:tuple):
+    owner, identity=context
+    name,policy=route_policy(payload)
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT count(*) FROM rtrust_route_groups WHERE owner=?',(owner,)).fetchone()[0]>=50:raise HTTPException(409,'Route group limit reached')
@@ -493,10 +543,20 @@ async def create_route_group(request:Request):
         audit(c,identity,'route_group_create',str(identifier))
         return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
 
+
 @router.put('/portal/v2/route-groups/{identifier}')
 async def update_route_group(identifier:int,request:Request):
+    context=await run_in_threadpool(_update_route_group_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan','revision'])
+    return await run_in_threadpool(_update_route_group, identifier=identifier, request=request, payload=payload, context=context)
+
+def _update_route_group_prepare(request:Request):
     owner,identity=browser(request,True);rate('routes:'+identity,60)
-    data=await body(request,['name','include','exclude','exclude_lan','revision'])
+    return (owner, identity,)
+
+def _update_route_group(identifier:int,request:Request, payload:dict, context:tuple):
+    owner, identity=context
+    data=payload
     name,policy=route_policy(data)
     if type(data.get('revision')) is not int:raise HTTPException(422,'Revision required')
     with db.connect() as c:
@@ -506,6 +566,7 @@ async def update_route_group(identifier:int,request:Request):
         c.execute('UPDATE rtrust_route_groups SET name=?,policy=?,revision=? WHERE id=?',(name,json.dumps(policy),row['revision']+1,identifier))
         audit(c,identity,'route_group_update',str(identifier))
         return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
+
 
 @router.delete('/portal/v2/route-groups/{identifier}')
 def delete_route_group(identifier:int,request:Request):
@@ -521,8 +582,17 @@ def delete_route_group(identifier:int,request:Request):
 
 @router.post('/portal/v2/route-groups/{identifier}/members')
 async def route_group_member(identifier:int,request:Request):
+    context=await run_in_threadpool(_route_group_member_prepare, request)
+    payload=await body(request,['device_id','member'])
+    return await run_in_threadpool(_route_group_member, identifier=identifier, request=request, payload=payload, context=context)
+
+def _route_group_member_prepare(request:Request):
     owner,identity=browser(request,True);rate('routes:'+identity,60)
-    data=await body(request,['device_id','member'])
+    return (owner, identity,)
+
+def _route_group_member(identifier:int,request:Request, payload:dict, context:tuple):
+    owner, identity=context
+    data=payload
     if type(data.get('device_id')) is not int or type(data.get('member')) is not bool:raise HTTPException(422,'Invalid membership')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -533,13 +603,6 @@ async def route_group_member(identifier:int,request:Request):
         audit(c,identity,'route_member_add' if data['member'] else 'route_member_remove',f'{identifier}:{data["device_id"]}')
         return JSONResponse(route_groups(c,owner,identifier)[0],headers=HEADERS)
 
-def policy_for(c, owner, device):
-    row=c.execute('SELECT g.* FROM rtrust_admin_route_members m JOIN rtrust_admin_route_groups g ON g.id=m.grp WHERE m.device=?',(device,)).fetchone()
-    prefix='admin:'
-    if row is None:
-        row=c.execute('SELECT g.* FROM rtrust_route_members m JOIN rtrust_route_groups g ON g.id=m.grp WHERE m.device=? AND g.owner=?',(device,owner)).fetchone()
-        prefix=''
-    return None if row is None else {'group':row['name'],'revision':f'{prefix}{row["id"]}:{row["revision"]}',**json.loads(row['policy'])}
 
 @router.get('/portal/v2/routing')
 def routing(request:Request):
@@ -547,55 +610,14 @@ def routing(request:Request):
     if device is None:raise HTTPException(403,'Device token required')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
-        policy=policy_for(c,owner,device)
+        row=c.execute('SELECT g.* FROM rtrust_admin_route_members m JOIN rtrust_admin_route_groups g ON g.id=m.grp WHERE m.device=?',(device,)).fetchone()
+        prefix='admin:'
+        if row is None:
+            row=c.execute('SELECT g.* FROM rtrust_route_members m JOIN rtrust_route_groups g ON g.id=m.grp WHERE m.device=? AND g.owner=?',(device,owner)).fetchone()
+            prefix=''
+        policy=None if row is None else {'group':row['name'],'revision':f'{prefix}{row["id"]}:{row["revision"]}',**json.loads(row['policy'])}
         c.execute('INSERT INTO rtrust_route_delivery(device,revision,requested) VALUES(?,?,?) ON CONFLICT(device) DO UPDATE SET revision=excluded.revision,requested=excluded.requested',(device,policy['revision'] if policy else None,int(time.time())))
     return JSONResponse({'policy':policy},headers=HEADERS)
-
-@router.post('/portal/v2/snapshot')
-async def snapshot(request:Request):
-    owner,identity,device=actor(request,True)
-    if device is None:raise HTTPException(403,'Device token required')
-    data=await body(request,['include_secrets','freshness_version'])
-    if data.get('include_secrets') is not True:raise HTTPException(422,'Explicit secret export consent required')
-    if 'freshness_version' in data and (type(data['freshness_version']) is not int or data['freshness_version']!=1):raise HTTPException(422,'Unsupported freshness contract')
-    rate(identity,10)
-    token=security.hash_api_token(request.headers['authorization'][7:])
-    return await run_in_threadpool(device_snapshot, owner, device, token, data.get('freshness_version')==1)
-
-def device_snapshot(owner, device, token, freshness=False):
-    with db.connect() as c:
-        # The token, grants, credentials, settings and policy share one SQLite
-        # snapshot. A double read outside this transaction cannot detect ABA.
-        c.execute('BEGIN')
-        if not c.execute("SELECT 1 FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.user_id=? AND d.revoked_at IS NULL AND u.status='active'",(token,device,int(time.time()),owner)).fetchone():
-            raise HTTPException(401,'Device expired or revoked')
-        settings=dict(c.execute('SELECT key,value FROM settings').fetchall())
-        ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile LIMIT 201',(device,))]
-        if len(ids)>200:raise HTTPException(413,'Snapshot profile limit exceeded')
-        result=[];total=0;deadline=time.monotonic()+20
-        for identifier in ids:
-            if time.monotonic()>deadline:raise HTTPException(503,'Snapshot time limit reached')
-            try:meta,document=accessible(c,owner,device,identifier,settings)
-            except HTTPException as error:
-                if error.status_code==404:continue
-                raise
-            total+=len(document.encode())
-            if total>4*LIMIT:raise HTTPException(413,'Snapshot size limit exceeded')
-            result.append({'metadata':meta,'content':document})
-        value={'version':1,'profiles':result,'routing':{'policy':policy_for(c,owner,device)}}
-        if freshness:
-            try: max_age=int(os.environ.get('RTRUST_OFFLINE_MAX_AGE_SECONDS','86400'))
-            except ValueError:raise HTTPException(503,'Invalid offline policy')
-            if not 60<=max_age<=86400:raise HTTPException(503,'Invalid offline policy')
-            current=c.execute('SELECT expires FROM rtrust_tokens WHERE hash=? AND device=?',(token,device)).fetchone()
-            remaining=current['expires']-int(time.time()) if current else 0
-            if remaining<=0:raise HTTPException(401,'Device expired or revoked')
-            value['freshness']={'version':1,'max_age_seconds':max_age,'token_remaining_seconds':remaining}
-        # Keyed revision avoids exposing a public password-derived fingerprint.
-        encoded=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
-        value['revision']=hmac.new(config.SECRET_KEY.encode(),str(device).encode()+b'\0'+encoded,hashlib.sha256).hexdigest()
-    if len(json.dumps(value,ensure_ascii=False,separators=(',',':')).encode())>8*LIMIT:raise HTTPException(413,'Snapshot wire size limit exceeded')
-    return JSONResponse(value,headers=HEADERS)
 
 # Administrative policy takes precedence over the user's group. Removing an
 # administrative assignment restores the user's policy on the next client poll.
@@ -636,8 +658,17 @@ def admin_routes_state(request:Request):
 
 @router.post('/admin/api/agent-routes/enrollment-codes')
 async def admin_routes_enroll(request:Request):
+    context=await run_in_threadpool(_admin_routes_enroll_prepare, request)
+    payload=await body(request,['user_id'])
+    return await run_in_threadpool(_admin_routes_enroll, request=request, payload=payload, context=context)
+
+def _admin_routes_enroll_prepare(request:Request):
     identity=route_admin(request,True);rate(identity)
-    data=await body(request,['user_id'])
+    return (identity,)
+
+def _admin_routes_enroll(request:Request, payload:dict, context:tuple):
+    identity,=context
+    data=payload
     if type(data.get('user_id')) is not int:raise HTTPException(422,'User required')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -647,10 +678,20 @@ async def admin_routes_enroll(request:Request):
         audit(c,identity,'admin_route_enroll',str(data['user_id']))
     return JSONResponse({'code':raw,'expires_in':180},headers=HEADERS)
 
+
 @router.post('/admin/api/agent-routes/groups')
 async def admin_routes_create(request:Request):
+    context=await run_in_threadpool(_admin_routes_create_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan'])
+    return await run_in_threadpool(_admin_routes_create, request=request, payload=payload, context=context)
+
+def _admin_routes_create_prepare(request:Request):
     identity=route_admin(request,True);rate(identity,60)
-    name,policy=route_policy(await body(request,['name','include','exclude','exclude_lan']))
+    return (identity,)
+
+def _admin_routes_create(request:Request, payload:dict, context:tuple):
+    identity,=context
+    name,policy=route_policy(payload)
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE')
         if c.execute('SELECT count(*) FROM rtrust_admin_route_groups').fetchone()[0]>=200:raise HTTPException(409,'Group limit reached')
@@ -658,10 +699,20 @@ async def admin_routes_create(request:Request):
         audit(c,identity,'admin_route_create',str(identifier))
     return JSONResponse({'id':identifier},headers=HEADERS)
 
+
 @router.put('/admin/api/agent-routes/groups/{identifier}')
 async def admin_routes_update(identifier:int,request:Request):
+    context=await run_in_threadpool(_admin_routes_update_prepare, request)
+    payload=await body(request,['name','include','exclude','exclude_lan','revision'])
+    return await run_in_threadpool(_admin_routes_update, identifier=identifier, request=request, payload=payload, context=context)
+
+def _admin_routes_update_prepare(request:Request):
     identity=route_admin(request,True);rate(identity,60)
-    data=await body(request,['name','include','exclude','exclude_lan','revision']);name,policy=route_policy(data)
+    return (identity,)
+
+def _admin_routes_update(identifier:int,request:Request, payload:dict, context:tuple):
+    identity,=context
+    data=payload;name,policy=route_policy(data)
     if type(data.get('revision')) is not int:raise HTTPException(422,'Revision required')
     with db.connect() as c:
         c.execute('BEGIN IMMEDIATE');row=admin_group(c,identifier)
@@ -669,6 +720,7 @@ async def admin_routes_update(identifier:int,request:Request):
         c.execute('UPDATE rtrust_admin_route_groups SET name=?,policy=?,revision=revision+1 WHERE id=?',(name,json.dumps(policy),identifier))
         audit(c,identity,'admin_route_update',str(identifier))
     return JSONResponse({'updated':True},headers=HEADERS)
+
 
 @router.delete('/admin/api/agent-routes/groups/{identifier}')
 def admin_routes_delete(identifier:int,request:Request):
@@ -683,8 +735,17 @@ def admin_routes_delete(identifier:int,request:Request):
 
 @router.put('/admin/api/agent-routes/devices/{identifier}')
 async def admin_routes_assign(identifier:int,request:Request):
+    context=await run_in_threadpool(_admin_routes_assign_prepare, request)
+    payload=await body(request,['group_id','previous_group_id'])
+    return await run_in_threadpool(_admin_routes_assign, identifier=identifier, request=request, payload=payload, context=context)
+
+def _admin_routes_assign_prepare(request:Request):
     identity=route_admin(request,True);rate(identity,120)
-    data=await body(request,['group_id','previous_group_id'])
+    return (identity,)
+
+def _admin_routes_assign(identifier:int,request:Request, payload:dict, context:tuple):
+    identity,=context
+    data=payload
     for key in ('group_id','previous_group_id'):
         if key not in data or (data[key] is not None and type(data[key]) is not int):raise HTTPException(422,'Group id or null required')
     with db.connect() as c:
@@ -700,3 +761,146 @@ async def admin_routes_assign(identifier:int,request:Request):
             c.execute('INSERT INTO rtrust_admin_route_members(device,grp) VALUES(?,?) ON CONFLICT(device) DO UPDATE SET grp=excluded.grp',(identifier,data['group_id']))
         audit(c,identity,'admin_route_assign',f'{identifier}:{data["group_id"]}')
     return JSONResponse({'assigned':True},headers=HEADERS)
+
+
+
+@router.get('/portal/v2/device-credentials')
+def credential_list(request:Request):
+    owner,_,device=actor(request)
+    if device is not None:raise HTTPException(403,'Browser login required')
+    with db.connect() as c:
+        ids=[r[0] for r in c.execute('SELECT id FROM app_devices WHERE user_id=? ORDER BY id DESC LIMIT 200',(owner,))]
+    return JSONResponse({'devices':[credentials.snapshot(owner,i) for i in ids]},headers=HEADERS)
+
+@router.post('/portal/v2/devices/{identifier}/credentials/{action}')
+def credential_change(identifier:int,action:str,request:Request):
+    owner,identity,device=actor(request,True)
+    if device is not None:raise HTTPException(403,'Browser login required')
+    if action not in ('provision','rotate'):raise HTTPException(404,'Operation not found')
+    rate("credentials:"+identity,10)
+    result=credentials.mutate(owner,identifier,action,request.headers.get('idempotency-key'),identity)
+    return JSONResponse(result,headers=HEADERS)
+
+@router.post('/portal/v2/devices/{identifier}/credentials-retry')
+def credential_retry(identifier:int,request:Request):
+    owner,identity,device=actor(request,True)
+    if device is not None:raise HTTPException(403,'Browser login required')
+    with db.connect() as c:credentials.device_row(c,owner,identifier)
+    rate("credentials:"+identity,10)
+    credentials.apply_pending()
+    return JSONResponse(credentials.snapshot(owner,identifier),headers=HEADERS)
+
+@router.post('/portal/v2/device-token/renew')
+def renew_device_token(request:Request):
+    owner,identity,device=actor(request,True)
+    if device is None:raise HTTPException(403,'Device token required')
+    rate('renew:'+identity,10)
+    raw=secrets.token_urlsafe(32)
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        credentials.device_row(c,owner,device,active=True)
+        # Revalidate under the write lock: a concurrent renewal must not mint
+        # another token after the old token has already been consumed.
+        old=security.hash_api_token(request.headers['authorization'][7:])
+        deleted=c.execute('DELETE FROM rtrust_tokens WHERE hash=? AND device=? AND expires>?',(old,device,int(time.time()))).rowcount
+        if deleted!=1:raise HTTPException(401,'Device token expired or renewed')
+        c.execute('INSERT INTO rtrust_tokens VALUES(?,?,?)',(security.hash_api_token(raw),device,int(time.time())+30*86400))
+        audit(c,identity,'renew_token',str(device))
+    return JSONResponse({'token':raw,'expires_in':30*86400},headers=HEADERS)
+
+
+@router.post('/admin/api/device-credentials/{identifier}/revoke')
+def admin_credential_revoke(identifier:int,request:Request):
+    identity=route_admin(request,True)
+    with credentials.endpoint.manager._lock:
+        with db.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT * FROM app_devices WHERE id=?',(identifier,)).fetchone()
+            if row is None:raise HTTPException(404,'Device not found')
+            owner=row['user_id']
+            credentials.revoke(c,owner,identifier)
+            c.execute("UPDATE app_devices SET revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=?",(identifier,))
+            for table in ('rtrust_tokens','rtrust_grants','rtrust_route_members','rtrust_admin_route_members','rtrust_route_delivery'):
+                c.execute('DELETE FROM '+table+' WHERE device=?',(identifier,))
+            audit(c,identity,'revoke_device',str(identifier))
+        credentials.apply_pending()
+    return JSONResponse(credentials.snapshot(owner,identifier),headers=HEADERS)
+
+@router.post('/portal/v2/token/renew')
+async def renew_token(request:Request):
+    context=await run_in_threadpool(actor,request)
+    data=await body(request,["consent"])
+    return await run_in_threadpool(_renew_token,request,data,context)
+
+def _renew_token(request,data,context):
+    owner,identity,device=context
+    if device is None:raise HTTPException(403,'Device token required')
+    rate(identity)
+    if data.get('consent') is not True:raise HTTPException(422,'Explicit renewal consent required')
+    token=request.headers.get('authorization','')[7:]
+    hashed=security.hash_api_token(token)
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        now=int(time.time())
+        current=c.execute("SELECT t.device FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.revoked_at IS NULL AND u.status='active' AND u.id=?",(hashed,device,now,owner)).fetchone()
+        if current is None:raise HTTPException(401,'Device access expired or revoked')
+        c.execute('UPDATE rtrust_tokens SET expires=? WHERE hash=?',(now+30*86400,hashed))
+        audit(c,identity,'token_renew',str(device))
+    return JSONResponse({'expires_in':30*86400,'scope':'portal_access_only'},headers=HEADERS)
+
+
+def policy_for(c, owner, device):
+    row=c.execute('SELECT g.* FROM rtrust_admin_route_members m JOIN rtrust_admin_route_groups g ON g.id=m.grp WHERE m.device=?',(device,)).fetchone()
+    prefix='admin:'
+    if row is None:
+        row=c.execute('SELECT g.* FROM rtrust_route_members m JOIN rtrust_route_groups g ON g.id=m.grp WHERE m.device=? AND g.owner=?',(device,owner)).fetchone()
+        prefix=''
+    return None if row is None else {'group':row['name'],'revision':f'{prefix}{row["id"]}:{row["revision"]}',**json.loads(row['policy'])}
+
+
+@router.post('/portal/v2/snapshot')
+async def snapshot(request:Request):
+    owner,identity,device=actor(request,True)
+    if device is None:raise HTTPException(403,'Device token required')
+    data=await body(request,['include_secrets','freshness_version'])
+    if data.get('include_secrets') is not True:raise HTTPException(422,'Explicit secret export consent required')
+    if 'freshness_version' in data and (type(data['freshness_version']) is not int or data['freshness_version']!=1):raise HTTPException(422,'Unsupported freshness contract')
+    rate(identity,10)
+    token=security.hash_api_token(request.headers['authorization'][7:])
+    return await run_in_threadpool(device_snapshot, owner, device, token, data.get('freshness_version')==1)
+
+
+def device_snapshot(owner, device, token, freshness=False):
+    with db.connect() as c:
+        # The token, grants, credentials, settings and policy share one SQLite
+        # snapshot. A double read outside this transaction cannot detect ABA.
+        c.execute('BEGIN')
+        if not c.execute("SELECT 1 FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.user_id=? AND d.revoked_at IS NULL AND u.status='active'",(token,device,int(time.time()),owner)).fetchone():
+            raise HTTPException(401,'Device expired or revoked')
+        settings=dict(c.execute('SELECT key,value FROM settings').fetchall())
+        ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile LIMIT 201',(device,))]
+        if len(ids)>200:raise HTTPException(413,'Snapshot profile limit exceeded')
+        result=[];total=0;deadline=time.monotonic()+20
+        for identifier in ids:
+            if time.monotonic()>deadline:raise HTTPException(503,'Snapshot time limit reached')
+            try:meta,document=accessible(c,owner,device,identifier,settings)
+            except HTTPException as error:
+                if error.status_code==404:continue
+                raise
+            total+=len(document.encode())
+            if total>4*LIMIT:raise HTTPException(413,'Snapshot size limit exceeded')
+            result.append({'metadata':meta,'content':document})
+        value={'version':1,'profiles':result,'routing':{'policy':policy_for(c,owner,device)}}
+        if freshness:
+            try: max_age=int(os.environ.get('RTRUST_OFFLINE_MAX_AGE_SECONDS','86400'))
+            except ValueError:raise HTTPException(503,'Invalid offline policy')
+            if not 60<=max_age<=86400:raise HTTPException(503,'Invalid offline policy')
+            current=c.execute('SELECT expires FROM rtrust_tokens WHERE hash=? AND device=?',(token,device)).fetchone()
+            remaining=current['expires']-int(time.time()) if current else 0
+            if remaining<=0:raise HTTPException(401,'Device expired or revoked')
+            value['freshness']={'version':1,'max_age_seconds':max_age,'token_remaining_seconds':remaining}
+        # Keyed revision avoids exposing a public password-derived fingerprint.
+        encoded=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+        value['revision']=hmac.new(config.SECRET_KEY.encode(),str(device).encode()+b'\0'+encoded,hashlib.sha256).hexdigest()
+    if len(json.dumps(value,ensure_ascii=False,separators=(',',':')).encode())>8*LIMIT:raise HTTPException(413,'Snapshot wire size limit exceeded')
+    return JSONResponse(value,headers=HEADERS)

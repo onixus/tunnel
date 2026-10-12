@@ -16,5 +16,7 @@ The Rust codec and native client remain in
 [Rust-trustvpn](https://github.com/onixus/Rust-trustvpn).
 [Device routing ownership and validation](../docs/device-routing.md) describe the
 client API, administrative precedence, migration and rollout.
+[Device credentials and endpoint revocation](../docs/device-credentials.md) describe
+the opt-in lifecycle, restart policy, API and real protocol acceptance.
 This repository does not contain private
 databases, account credentials, bot tokens or signing keys.

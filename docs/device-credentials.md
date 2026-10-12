@@ -1,85 +1,138 @@
-# Device credentials: opt-in propagation contract
+# Отдельные credentials устройств и отзыв на endpoint
 
-The portal owns credentials for `managed-N` profiles only. External imported
-profiles and previously shared credentials are unmanaged. Enablement requires
-`RTRUST_DEVICE_CREDENTIALS=1`, an owned, executable, non-group/world-writable
-`RTRUST_ENDPOINT_CHECK`, and the generation-aware endpoint supervisor. The
-checker is built from `onixus/Rust-trustvpn` as `rtrust-endpoint-check`; install
-its immutable reviewed binary separately before enabling the capability.
-The portal update image includes the supervisor adapter but does not enable
-managed credentials or install an unreviewed checker automatically.
+Issue [#22](https://github.com/onixus/tunnel/issues/22), клиентская интеграция
+[эпик #30 / #35](https://github.com/onixus/Rust-trustvpn/issues/35).
+Серверная реализация — `server/overlay/app/rtrust_credentials.py` и v2 API.
 
-New grants mint owner-encrypted random credentials per device/profile. They
-cannot be exported until endpoint propagation is verified. Rotation requires
-an expected generation and an owner-scoped idempotency key. Device revoke
-immediately revokes portal access, queues endpoint revocation, and returns the
-distinct endpoint state. Repeated revoke is idempotent. Revoked devices with
-unfinished propagation remain visible to the owner with include_revoked=1.
+## Поддерживаемая граница
 
-Reconciliation needs separate consent to restart the owned endpoint. This
-terminates all active endpoint sessions; other devices retain credentials and
-can reconnect. The supervisor waits for the old process to exit before spawning
-the replacement, even if credentials files were already written. Receipts
-require fresh TLS/auth responses from each declared H2/H3 listener, both new
-acceptance and old rejection for rotation. Process generation, credential
-generation and checker SHA-256 fence publication. A partial protocol response,
-outage, timeout or superseding generation cannot yield applied. The shared lock
-serializes writers; propagation states are requested/pending/applied/failed.
+Только локальный TrustTunnel endpoint под единственным supervisor портала:
+HTTP/2 и HTTP/3 (QUIC). Hysteria, AmneziaWG, импортированные внешние профили и
+legacy/shared credentials не получают обещание managed revocation.
+Администратор установки включает выдачу через `RTRUST_MANAGED_CREDENTIALS=1`.
+По умолчанию новая выдача выключена; отзыв уже выданных device credentials и
+повтор незавершённых операций продолжают работать даже после отключения выдачи.
 
-The verification batch has a 25-second budget after process replacement; each
-child is limited to the remaining budget or 12 seconds. Replacement itself
-allows 10 seconds TERM plus 5 seconds KILL wait. These are verification bounds,
-not a measured end-user revocation SLA. The checker accepts only numeric
-loopback endpoint addresses, uses the endpoint certificate with normal TLS
-verification, and relays no visited destination. API and logs contain no
-credential payloads. Rotation and revocation remain fail-closed if the feature
-is subsequently disabled.
+Устройство принадлежит пользователю. В таблице `rtrust_credentials` оно связано
+с одним `configs.id` локального endpoint и номером поколения. Username случайный
+и уникальный; пароль содержит 32 случайных байта. Ротация меняет пароль этого
+конфига. Нельзя выдать device credential соседнему устройству, даже того же
+пользователя. Старые v1 device-owned configs при миграции отзываются; общие
+configs с `device_id IS NULL` сохраняются. Их ранее скачанные пароли остаются
+действующими: интерфейс явно предупреждает об этой границе.
 
-`server/tests/device_credentials_endpoint_acceptance.py` runs synthetic
-enrollment/grant/rotation/revoke against the actual endpoint and private checker
-inside a disposable `--network none` container. It requires ENDPOINT_BIN,
-RTRUST_CODEC and RTRUST_ENDPOINT_CHECK. API/SQLite tests with mocked probes are
-separate and do not prove endpoint behavior. Physical sessions, adjacent-device
-continuity, legacy shared-password migration and publisher packaging
-remain acceptance requirements for #22.
+## Контракт API
 
-HTTPS browser enrollment can return a locally rendered QR with exactly kind,
-version, origin, one-time code and expiry. The origin must equal the browser's
-Origin header; CSRF and owner authentication remain required. Rust compares it
-with the selected portal origin before sending the code; Android displays the
-origin for confirmation. Server expiry/reuse checks remain authoritative. This
-does not carry an administrator credential.
+Все ответы `/portal/v2/` имеют `Cache-Control: no-store`; ошибки тоже.
+Секреты не входят в ответы состояния и аудит. Password хранится в существующем
+configs, необходимом endpoint; `credentials.toml` заменяется атомарно с правами
+0600. Доступ к базе, каталогу данных и резервным копиям остаётся административным.
 
-Explicit device token renewal extends only portal API access by 30 days while
-the token remains active. The device must consent; the token is rechecked in
-the write transaction, so concurrent expiry/revocation cannot resurrect it.
-No token, device identity, profile, grant or endpoint credential is rotated by
-renewal. Browser sessions cannot renew a device token. Expired access needs
-one-time enrollment again. Clients retain conservative expiry if persistence
-fails; no automatic renewal is scheduled.
+| Метод | Путь | Авторизация и результат |
+|---|---|---|
+| GET | `/portal/v2/capabilities` | Публичная информация: `managed_credentials`, включение, протоколы, политика сессий, предел применения и повтор |
+| GET | `/portal/v2/device-credentials` | Cookie пользователя; состояния его устройств, включая отозванные, последние 20 операций |
+| POST | `/portal/v2/devices/{id}/credentials/provision` | Cookie + CSRF; `Idempotency-Key`: canonical UUID; отдельный credential и grant его профиля |
+| POST | `/portal/v2/devices/{id}/credentials/rotate` | Те же требования; новое поколение и пароль |
+| DELETE | `/portal/v2/devices/{id}` | Cookie + CSRF; отзыв portal token, grants, маршрутов и **всех** device-owned configs; состояние применения в `credentials` |
+| POST | `/portal/v2/devices/{id}/credentials-retry` | Cookie + CSRF; повтор применения записанного желаемого состояния, включая отозванное устройство |
+| POST | `/portal/v2/device-token/renew` | Ещё действующий Bearer token; атомарная замена на новый сроком 30 суток |
 
-The isolated real-endpoint test passed on Fedora for both H2 and H3: initial
-issue, old/new rotation, saved credential rejection after revoke and neighbor
-device reconnect after both operations. A fresh interpreter then started the
-original endpoint owner with the persisted database: the neighboring device
-authenticated and the retired device stayed rejected on both protocols.
-Full client workspace tests and 92
-scoped portal/routing/agent/protocol tests passed. This evidence is deliberately
-separate from installed-package and active-session acceptance.
+Повтор provision/rotate с тем же UUID не меняет поколение и пароль; UUID нельзя
+переиспользовать для другого устройства или действия. Ответ показывает текущее
+состояние устройства, поэтому после последующих действий это не снимок первого
+ответа. DELETE повторно использует операцию revoke. Конкурирующие rotate/revoke
+сериализованы; отозванное устройство нельзя оживить ротацией. Межпользовательский
+доступ возвращает 404. Устройство не может управлять credentials через Bearer.
+Старый клиентский кабинет использует тот же durable отзыв через интеграцию
+`db.revoke_device`. Административная sidecar-консоль вызывает
+`POST /admin/api/device-credentials/{id}/revoke` на портале с admin cookie и CSRF,
+проверяет состояние revoke и показывает ошибку при pending/failed. Она не запускает
+endpoint. Общие операции rotate/revoke ключа не могут обойти lifecycle device key.
+Роль администратора проверяет API портала.
 
-## Finite offline freshness
+Привязка остаётся одноразовой: код живёт 180 секунд, его hash потребляется в
+транзакции вместе с созданием устройства. QR/code не содержит server admin secret.
+Portal token живёт 30 суток; renewal потребляет старый token. Просроченный token
+требует новой привязки через браузер; offline renewal невозможен. Без портала
+скачанный VPN-пароль работает до фактического отзыва на endpoint.
 
-Capabilities advertise `offline_freshness: 1`. A snapshot request may opt in
-with `freshness_version: 1`; its authenticated atomic response includes
-`freshness: {version, max_age_seconds, token_remaining_seconds}`. The TTL
-is bounded by both configured age and the token lifetime observed at the
-end of the frozen transaction. `RTRUST_OFFLINE_MAX_AGE_SECONDS` defaults
-to 86400 and accepts 60–86400; invalid configuration refuses the snapshot.
-Unnegotiated requests retain the original snapshot body shape.
+## Применение, рестарт и политика сессий
 
-Clients anchor TTL before downloading, refuse missing/unsupported receipts,
-and retain owned protection when a live lease expires. Android additionally
-binds its encrypted receipt to elapsed realtime and boot count. This contract
-bounds cached managed admission; endpoint revoke/rotation remains separate.
-It does not revoke independently owned local exports or claim protection
-against device owners with root access. No client LAN/boot evidence is uploaded.
+Операция сначала сохраняется как `requested`, затем `pending`. Применение
+пересобирает полный набор действующих credentials, завершает старый процесс и
+запускает новый. В пределах 15-секундного окна ожидается готовность нового локального TCP listener;
+после двух секунд непрерывной готовности и живого процесса записывается `applied`; отсутствие сертификата/процесса или исключение даёт `failed` с
+`endpoint_unavailable`. Это подтверждение применения локальным supervisor,
+а не результат клиентской диагностики сети. История applied не является текущим
+healthcheck. Ошибки не сохраняют exception text или secrets.
+
+При настроенном и здоровом endpoint целевой предел применения — 15 секунд
+(проверяемый bound изолированной приёмки, не гарантия при конкуренции за SQLite): до 10 секунд
+на завершение старого процесса, до одной секунды на reap после kill; оставшееся время используется
+для ожидания старта и двух секунд наблюдения готового нового процесса. Пропавшие сертификаты не запускают долгий certbot
+под блокировкой применения. Во время outage верхнего предела успешного отзыва
+нет: состояние остаётся failed/pending. После рестарта портала операции повторяются;
+фоновая попытка начинается каждые 5 секунд после окончания предыдущей. Устаревшая
+неприменённая ротация помечается `superseded_by_revoke`, не ложным applied.
+
+Политика активных сессий — **restart_all**: все серверные сессии завершаются.
+Другие устройства сохраняют свои пароли и переподключаются. HTTP/3 клиентский
+сокет может ожидать своего таймаута вместо немедленного EOF; сервер больше не
+передаёт его трафик. Бесшовность соседних активных соединений не поддерживается.
+
+Один процесс портала обязателен: эксклюзивная файловая блокировка захватывается
+до старта upstream supervisor, второй worker завершается с ошибкой. Порядок
+блокировок supervisor → SQLite; `BEGIN IMMEDIATE` защищает желаемое состояние
+во время применения. Повтор всегда перезапускает процесс, даже если предыдущая
+попытка уже записала файл, но не успела применить его.
+
+## Приёмка и rollout
+
+12.10.2026: изолированный официальный endpoint 1.1.0 linux-aarch64 проверен
+через Rust `rtrust-inspect` отдельно по HTTP/2 и HTTP/3 с профилем,
+скачанным через API экспорта. Настроенный `CLIENT_CA_FILE` переносится в
+managed profile; недоступный trust file возвращает 503 вместо неполного профиля. Два разных device
+credentials подключаются; после rotate старый пароль отклонён; после DELETE
+сохранённый пароль отклонён без portal API; активная серверная сессия завершена;
+соседнее устройство переподключается. Применение рестарта около 2–3 секунд;
+наблюдение клиентского HTTP/3 socket timeout увеличивает тест до около 5–6 секунд.
+Официальный архив SHA256:
+`c2aee17a1ced349283cba4775202e2baba053b8ea835d4cc23dc67d16c6b9686`.
+
+В CI используется x86_64 архив 1.1.0 с закреплённой checksum из `docs/versions.md`
+и клиент из закреплённого commit существующего device-routing workflow.
+Тест `server/tests/managed_credentials_acceptance.py` запускает только disposable
+Docker endpoint с синтетическими accounts. Private connections разрешены только
+в тестовом шаблоне для локальных echo/HTTP targets; рабочий шаблон не меняется.
+Регрессии проверяют concurrency, idempotency, outage/retry, SQLite schema restart,
+изоляцию владельцев, secret-free audit, renewal и права файла. Browser checks
+проверяют видимый failed и возможность повторить отзыв на desktop/mobile.
+
+Для rollout: сохранить image ID и согласованную защищённую копию данных,
+собрать additive overlay через `deploy/prepare-portal-update.py` для портала и,
+если установлена, отдельной sidecar-консоли; отдельно проверить
+candidate, затем заменить образ в согласованное окно рестарта и включить env.
+Живая установка этой реализацией не менялась. Отключение env запрещает новую
+выдачу, но не отменяет уже сохранённые отзывы. Откат образа не должен восстанавливать
+старую базу: это вернёт отозванные пароли. Клиент issue #35 остаётся отдельным.
+
+## Atomic snapshot and offline freshness
+
+The paired client requests an authenticated, transactionally frozen snapshot
+with explicit `include_secrets: true`. Capabilities advertise `snapshot: 1`
+and `offline_freshness: 1`; `freshness_version: 1` adds the finite receipt.
+The receipt age is limited by `RTRUST_OFFLINE_MAX_AGE_SECONDS` (default 86400,
+range 60–86400) and the token lifetime at the end of the transaction.
+Unnegotiated snapshots retain their original body shape. Invalid configuration
+or expired access refuses the whole snapshot. Clients anchor TTL before the
+request; Android additionally binds the encrypted receipt to boot count and
+elapsed realtime. No LAN, boot or diagnostic evidence is uploaded.
+
+This bounds cached managed admission, independently of endpoint revocation.
+It does not revoke independently owned exports or protect against a root owner.
+QR invitations require the same HTTPS browser origin and expire after three
+minutes. The additional paired-client `/token/renew` consent keeps its existing token
+and extends only a still-active portal
+token; it does not change endpoint credentials. Existing managed credential
+issuance, rotation, revocation and its single endpoint owner remain unchanged.
