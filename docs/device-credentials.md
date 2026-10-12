@@ -66,3 +66,20 @@ authenticated and the retired device stayed rejected on both protocols.
 Full client workspace tests and 92
 scoped portal/routing/agent/protocol tests passed. This evidence is deliberately
 separate from installed-package and active-session acceptance.
+
+## Finite offline freshness
+
+Capabilities advertise `offline_freshness: 1`. A snapshot request may opt in
+with `freshness_version: 1`; its authenticated atomic response includes
+`freshness: {version, max_age_seconds, token_remaining_seconds}`. The TTL
+is bounded by both configured age and the token lifetime observed at the
+end of the frozen transaction. `RTRUST_OFFLINE_MAX_AGE_SECONDS` defaults
+to 86400 and accepts 60–86400; invalid configuration refuses the snapshot.
+Unnegotiated requests retain the original snapshot body shape.
+
+Clients anchor TTL before downloading, refuse missing/unsupported receipts,
+and retain owned protection when a live lease expires. Android additionally
+binds its encrypted receipt to elapsed realtime and boot count. This contract
+bounds cached managed admission; endpoint revoke/rotation remains separate.
+It does not revoke independently owned local exports or claim protection
+against device owners with root access. No client LAN/boot evidence is uploaded.

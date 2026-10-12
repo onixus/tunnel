@@ -25,6 +25,23 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 class ExchangeTests(unittest.TestCase):
+    def test_explicit_freshness_snapshot_caps_token_lifetime_and_preserves_legacy_shape(self):
+        from unittest.mock import patch
+        import time
+        device,auth=self.enrolled('freshness')
+        with db.connect() as c:c.execute('UPDATE rtrust_tokens SET expires=? WHERE device=?',(int(time.time())+120,device))
+        request={'include_secrets':True,'freshness_version':1}
+        with patch.dict(os.environ,{'RTRUST_OFFLINE_MAX_AGE_SECONDS':'3600'}):
+            response=self.client.post('/portal/v2/snapshot',json=request,headers=auth)
+        self.assertEqual(response.status_code,200,response.text)
+        lease=response.json()['freshness'];self.assertEqual(lease['version'],1);self.assertEqual(lease['max_age_seconds'],3600)
+        self.assertTrue(0<lease['token_remaining_seconds']<=120)
+        legacy=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth)
+        self.assertEqual(legacy.status_code,200);self.assertNotIn('freshness',legacy.json())
+        self.assertEqual(self.client.post('/portal/v2/snapshot',json={**request,'freshness_version':2},headers=auth).status_code,422)
+        with patch.dict(os.environ,{'RTRUST_OFFLINE_MAX_AGE_SECONDS':'86401'}):
+            self.assertEqual(self.client.post('/portal/v2/snapshot',json=request,headers=auth).status_code,503)
+
     def setUp(self):
         config.DB_PATH = str(Path(SANDBOX.name)/(secrets.token_hex(8)+'.db'))
         db.init_db(); exchange.init()

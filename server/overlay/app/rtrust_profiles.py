@@ -189,7 +189,7 @@ def accessible(c, owner, device, identifier, settings=None):
 @router.get('/portal/v2/capabilities')
 def capabilities():
     from . import device_credentials
-    value={'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1}
+    value={'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1,'offline_freshness':1}
     if device_credentials.enabled():value['device_credentials']={'version':1,'protocols':['http2','http3'],'session_policy':'restart_all_endpoint_sessions','legacy_shared_access':'unmanaged'}
     return JSONResponse(value,headers=HEADERS)
 
@@ -555,13 +555,14 @@ def routing(request:Request):
 async def snapshot(request:Request):
     owner,identity,device=actor(request,True)
     if device is None:raise HTTPException(403,'Device token required')
-    data=await body(request,['include_secrets'])
+    data=await body(request,['include_secrets','freshness_version'])
     if data.get('include_secrets') is not True:raise HTTPException(422,'Explicit secret export consent required')
+    if 'freshness_version' in data and (type(data['freshness_version']) is not int or data['freshness_version']!=1):raise HTTPException(422,'Unsupported freshness contract')
     rate(identity,10)
     token=security.hash_api_token(request.headers['authorization'][7:])
-    return await run_in_threadpool(device_snapshot, owner, device, token)
+    return await run_in_threadpool(device_snapshot, owner, device, token, data.get('freshness_version')==1)
 
-def device_snapshot(owner, device, token):
+def device_snapshot(owner, device, token, freshness=False):
     with db.connect() as c:
         # The token, grants, credentials, settings and policy share one SQLite
         # snapshot. A double read outside this transaction cannot detect ABA.
@@ -582,6 +583,14 @@ def device_snapshot(owner, device, token):
             if total>4*LIMIT:raise HTTPException(413,'Snapshot size limit exceeded')
             result.append({'metadata':meta,'content':document})
         value={'version':1,'profiles':result,'routing':{'policy':policy_for(c,owner,device)}}
+        if freshness:
+            try: max_age=int(os.environ.get('RTRUST_OFFLINE_MAX_AGE_SECONDS','86400'))
+            except ValueError:raise HTTPException(503,'Invalid offline policy')
+            if not 60<=max_age<=86400:raise HTTPException(503,'Invalid offline policy')
+            current=c.execute('SELECT expires FROM rtrust_tokens WHERE hash=? AND device=?',(token,device)).fetchone()
+            remaining=current['expires']-int(time.time()) if current else 0
+            if remaining<=0:raise HTTPException(401,'Device expired or revoked')
+            value['freshness']={'version':1,'max_age_seconds':max_age,'token_remaining_seconds':remaining}
         # Keyed revision avoids exposing a public password-derived fingerprint.
         encoded=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
         value['revision']=hmac.new(config.SECRET_KEY.encode(),str(device).encode()+b'\0'+encoded,hashlib.sha256).hexdigest()
