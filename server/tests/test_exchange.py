@@ -25,6 +25,23 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 class ExchangeTests(unittest.TestCase):
+    def test_explicit_freshness_snapshot_caps_token_lifetime_and_preserves_legacy_shape(self):
+        from unittest.mock import patch
+        import time
+        device,auth=self.enrolled('freshness')
+        with db.connect() as c:c.execute('UPDATE rtrust_tokens SET expires=? WHERE device=?',(int(time.time())+120,device))
+        request={'include_secrets':True,'freshness_version':1}
+        with patch.dict(os.environ,{'RTRUST_OFFLINE_MAX_AGE_SECONDS':'3600'}):
+            response=self.client.post('/portal/v2/snapshot',json=request,headers=auth)
+        self.assertEqual(response.status_code,200,response.text)
+        lease=response.json()['freshness'];self.assertEqual(lease['version'],1);self.assertEqual(lease['max_age_seconds'],3600)
+        self.assertTrue(0<lease['token_remaining_seconds']<=120)
+        legacy=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth)
+        self.assertEqual(legacy.status_code,200);self.assertNotIn('freshness',legacy.json())
+        self.assertEqual(self.client.post('/portal/v2/snapshot',json={**request,'freshness_version':2},headers=auth).status_code,422)
+        with patch.dict(os.environ,{'RTRUST_OFFLINE_MAX_AGE_SECONDS':'86401'}):
+            self.assertEqual(self.client.post('/portal/v2/snapshot',json=request,headers=auth).status_code,503)
+
     def setUp(self):
         config.DB_PATH = str(Path(SANDBOX.name)/(secrets.token_hex(8)+'.db'))
         db.init_db(); exchange.init()
@@ -67,6 +84,40 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(self.client.get('/static/rtrust-profiles.css').status_code,200)
         self.client.cookies.clear()
         self.assertEqual(self.client.get('/profiles',follow_redirects=False).status_code,302)
+
+    def test_qr_uses_browser_https_origin_and_only_one_time_code(self):
+        response=self.client.post('/portal/v2/enrollment-codes',json={'origin':'https://panel.example'},headers={**self.headers,'origin':'https://panel.example'})
+        self.assertEqual(response.status_code,200,response.text)
+        value=response.json(); invite=value['invitation']
+        self.assertEqual(invite['kind'],'rtrust_enrollment'); self.assertEqual(invite['origin'],'https://panel.example')
+        self.assertEqual(set(invite),{'kind','version','origin','code','expires_at'})
+        self.assertEqual(invite['code'],value['code']); self.assertTrue(value['qr_svg'])
+        self.assertEqual(response.headers['cache-control'],'no-store')
+        for origin in ['http://panel.example','https://panel.example/path','https://user@panel.example','https://foreign.example']:
+            rejected=self.client.post('/portal/v2/enrollment-codes',json={'origin':origin},headers={**self.headers,'origin':'https://panel.example'})
+            self.assertEqual(rejected.status_code,422)
+        body={'code':invite['code'],'name':'QR fixture','platform':'android'}
+        self.assertEqual(self.post('enroll',body).status_code,200)
+        self.assertEqual(self.post('enroll',body).status_code,401)
+
+    def test_token_renewal_requires_current_device_and_rechecks_expiry_in_transaction(self):
+        from unittest.mock import patch
+        device,auth=self.enrolled('renew')
+        path='/portal/v2/token/renew'
+        self.assertEqual(self.client.post(path,json={'consent':False},headers=auth).status_code,422)
+        self.assertEqual(self.post('token/renew',{'consent':True}).status_code,403)
+        response=self.client.post(path,json={'consent':True},headers=auth)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json(),{'expires_in':30*86400,'scope':'portal_access_only'})
+        self.assertEqual(self.client.post(path,json={'consent':True,'device_id':999},headers=auth).status_code,422)
+        original=exchange.actor
+        def expire(request,*args):
+            result=original(request,*args)
+            with db.connect() as c:c.execute('UPDATE rtrust_tokens SET expires=1 WHERE device=?',(device,))
+            return result
+        with patch.object(exchange,'actor',side_effect=expire):
+            self.assertEqual(self.client.post(path,json={'consent':True},headers=auth).status_code,401)
+        self.assertEqual(self.client.post(path,json={'consent':True},headers=auth).status_code,401)
 
     def test_roundtrip_encryption_and_idempotency(self):
         preview = self.preview()
@@ -114,6 +165,50 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(revoked.status_code,200,revoked.text)
         self.assertEqual(self.client.get('/portal/v2/profiles',headers=auth).status_code,401)
         self.assertEqual(self.client.get('/portal/v2/profiles',headers={'Authorization':'Bearer invalid'}).status_code,401)
+
+    def test_atomic_snapshot_rechecks_token_and_freezes_policy_with_profiles(self):
+        from unittest.mock import patch
+        item=self.imported(); device,auth=self.enrolled()
+        self.post('profiles/'+item['id']+'/grants', {'device_id':device,'allow':True})
+        group=self.group(); self.post('route-groups/'+str(group['id'])+'/members',{'device_id':device,'member':True})
+        original=exchange.accessible
+        changed=[]
+        def concurrent_change(c, owner, device_id, identifier, settings=None):
+            value=original(c,owner,device_id,identifier,settings)
+            if not changed:
+                changed.append(True)
+                with db.connect() as writer:
+                    writer.execute('UPDATE rtrust_route_groups SET revision=revision+1,name=? WHERE id=?',('Updated concurrently',group['id']))
+            return value
+        with patch.object(exchange,'accessible',side_effect=concurrent_change):
+            response=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth)
+        self.assertEqual(response.status_code,200,response.text)
+        value=response.json()
+        self.assertEqual(value['routing']['policy']['revision'],str(group['id'])+':1')
+        self.assertEqual(value['profiles'][0]['metadata']['id'],item['id'])
+        self.assertEqual(len(value['revision']),64)
+        self.assertEqual(response.headers['cache-control'],'no-store')
+        current=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth).json()
+        self.assertNotEqual(value['revision'],current['revision'])
+        self.assertEqual(current['routing']['policy']['revision'],str(group['id'])+':2')
+        # A revoke committed after actor() must still be rejected by the
+        # token check inside the snapshot's own transaction.
+        actor=exchange.actor
+        def revoke_after_actor(request, mutate=False):
+            result=actor(request,mutate)
+            with db.connect() as writer:writer.execute('DELETE FROM rtrust_tokens WHERE device=?',(device,))
+            return result
+        with patch.object(exchange,'actor',side_effect=revoke_after_actor):
+            response=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth)
+        self.assertEqual(response.status_code,401)
+
+    def test_snapshot_requires_device_and_explicit_secret_consent(self):
+        self.assertEqual(self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=self.headers).status_code,403)
+        _,auth=self.enrolled()
+        self.assertEqual(self.client.post('/portal/v2/snapshot',json={},headers=auth).status_code,422)
+        response=self.client.post('/portal/v2/snapshot',json={'include_secrets':True,'unknown':True},headers=auth)
+        self.assertEqual(response.status_code,422)
+        self.assertEqual(self.client.get('/portal/v2/capabilities').json()['snapshot'],1)
 
     def test_ios_enrollment_is_accepted(self):
         code = self.post('enrollment-codes', {}).json()['code']

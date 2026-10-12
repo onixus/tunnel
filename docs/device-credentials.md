@@ -116,3 +116,23 @@ candidate, затем заменить образ в согласованное 
 Живая установка этой реализацией не менялась. Отключение env запрещает новую
 выдачу, но не отменяет уже сохранённые отзывы. Откат образа не должен восстанавливать
 старую базу: это вернёт отозванные пароли. Клиент issue #35 остаётся отдельным.
+
+## Atomic snapshot and offline freshness
+
+The paired client requests an authenticated, transactionally frozen snapshot
+with explicit `include_secrets: true`. Capabilities advertise `snapshot: 1`
+and `offline_freshness: 1`; `freshness_version: 1` adds the finite receipt.
+The receipt age is limited by `RTRUST_OFFLINE_MAX_AGE_SECONDS` (default 86400,
+range 60–86400) and the token lifetime at the end of the transaction.
+Unnegotiated snapshots retain their original body shape. Invalid configuration
+or expired access refuses the whole snapshot. Clients anchor TTL before the
+request; Android additionally binds the encrypted receipt to boot count and
+elapsed realtime. No LAN, boot or diagnostic evidence is uploaded.
+
+This bounds cached managed admission, independently of endpoint revocation.
+It does not revoke independently owned exports or protect against a root owner.
+QR invitations require the same HTTPS browser origin and expire after three
+minutes. The additional paired-client `/token/renew` consent keeps its existing token
+and extends only a still-active portal
+token; it does not change endpoint credentials. Existing managed credential
+issuance, rotation, revocation and its single endpoint owner remain unchanged.

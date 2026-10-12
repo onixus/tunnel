@@ -1,4 +1,8 @@
 """Additive v2 profile exchange. Shared Rust codec; no endpoint mutation on import."""
+import base64
+import io
+import hmac
+from urllib.parse import urlsplit
 import hashlib
 import hmac
 import ipaddress
@@ -92,7 +96,7 @@ def install(application):
         response = await call_next(request)
         if request.url.path in ('/profiles', '/admin/agent-routes') or request.url.path.startswith(('/portal/v2/', '/admin/api/agent-routes', '/admin/api/device-credentials')):
             response.headers.update(HEADERS)
-            response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         return response
 
 
@@ -205,10 +209,10 @@ async def body(request, allowed):
     if not isinstance(value,dict) or set(value)-set(allowed):raise HTTPException(422,'Unknown request fields')
     return value
 
-def managed_document(cfg):
+def managed_document(cfg,settings=None):
     # Freeze settings once, then use the same Rust serializer for every format.
     from . import endpoint
-    settings=db.get_settings()
+    settings=db.get_settings() if settings is None else settings
     hostname=endpoint.effective_domain(settings)
     address=(settings.get('conn_address') or '').strip() or hostname or config.PUBLIC_ADDRESS
     port=int(settings.get('conn_port') or '8443')
@@ -221,7 +225,7 @@ def managed_document(cfg):
         except (OSError,UnicodeError):raise HTTPException(503,'Client trust certificate unavailable')
     return codec(json.dumps(raw))
 
-def accessible(c, owner, device, identifier):
+def accessible(c, owner, device, identifier,settings=None):
     if device is not None and not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,device)).fetchone():
         raise HTTPException(404,'Profile not found')
     if identifier.startswith('managed-'):
@@ -229,7 +233,7 @@ def accessible(c, owner, device, identifier):
         except ValueError:raise HTTPException(404,'Profile not found')
         row=c.execute('SELECT * FROM configs WHERE id=? AND user_id=? AND revoked_at IS NULL',(number,owner)).fetchone()
         if row is None or (device is not None and row['device_id'] is not None and row['device_id']!=device):raise HTTPException(404,'Profile not found')
-        result=managed_document(row)
+        result=managed_document(row,settings)
         revision=hashlib.sha256(result['content'].encode()).hexdigest()
         return {'id':identifier,'revision':revision,'summary':result['summary'],'origin':'portal_managed'},result['content']
     row=c.execute('SELECT * FROM rtrust_profiles WHERE id=? AND owner=? AND revoked=0',(identifier,owner)).fetchone()
@@ -237,7 +241,7 @@ def accessible(c, owner, device, identifier):
     return {'id':identifier,'revision':str(row['revision']),'summary':json.loads(row['summary']),'origin':'external_stored'},unseal(owner,row['payload'])
 
 @router.get('/portal/v2/capabilities')
-def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code'],'max_profile_bytes':LIMIT,'routing':1,'managed_credentials':credentials.capabilities()},headers=HEADERS)
+def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1,'offline_freshness':1,'managed_credentials':credentials.capabilities()},headers=HEADERS)
 
 @router.get('/profiles',response_class=HTMLResponse)
 def page(request:Request):
@@ -246,13 +250,37 @@ def page(request:Request):
     return templates.TemplateResponse(request,'rtrust_profiles.html',{'user':user,'brand':db.get_setting('brand_name'),'csrf':csrf(request)},headers=HEADERS)
 
 @router.post('/portal/v2/enrollment-codes')
-def enrollment_code(request:Request):
-    owner,identity,device=actor(request,True)
+async def enrollment_code(request:Request):
+    context=await run_in_threadpool(actor,request,True)
+    data=await body(request,["origin"])
+    return await run_in_threadpool(_enrollment_code,request,data,context)
+
+def _enrollment_code(request,data,context):
+    owner,identity,device=context
     if device is not None:raise HTTPException(403,'Browser login required')
     rate(identity)
+    origin=data.get('origin')
+    if origin is not None:
+        if not isinstance(origin,str) or len(origin)>512 or not origin.isascii() or origin!=request.headers.get('origin'):
+            raise HTTPException(422,'Same browser origin required for QR')
+        try:
+            parsed=urlsplit(origin); port=parsed.port
+        except ValueError:raise HTTPException(422,'Invalid HTTPS origin')
+        if parsed.scheme!='https' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or port==0 or any(ch.isspace() for ch in origin):
+            raise HTTPException(422,'HTTPS origin required for QR')
+    expires=int(time.time())+180
     raw=secrets.token_urlsafe(24)
     db.create_enroll_code(owner,security.hash_api_token(raw),180)
-    return JSONResponse({'code':raw,'expires_in':180},headers=HEADERS)
+    result={'code':raw,'expires_in':180,'expires_at':expires}
+    if origin is not None:
+        import qrcode
+        from qrcode.image.svg import SvgPathFillImage
+        invitation={'kind':'rtrust_enrollment','version':1,'origin':origin,'code':raw,'expires_at':expires}
+        buffer=io.BytesIO()
+        qrcode.make(json.dumps(invitation,separators=(',',':')),image_factory=SvgPathFillImage).save(buffer)
+        result.update(invitation=invitation,qr_svg=base64.b64encode(buffer.getvalue()).decode('ascii'))
+    return JSONResponse(result,headers=HEADERS)
+
 
 @router.post('/portal/v2/enroll')
 async def enroll(request:Request):
@@ -797,3 +825,82 @@ def admin_credential_revoke(identifier:int,request:Request):
             audit(c,identity,'revoke_device',str(identifier))
         credentials.apply_pending()
     return JSONResponse(credentials.snapshot(owner,identifier),headers=HEADERS)
+
+@router.post('/portal/v2/token/renew')
+async def renew_token(request:Request):
+    context=await run_in_threadpool(actor,request)
+    data=await body(request,["consent"])
+    return await run_in_threadpool(_renew_token,request,data,context)
+
+def _renew_token(request,data,context):
+    owner,identity,device=context
+    if device is None:raise HTTPException(403,'Device token required')
+    rate(identity)
+    if data.get('consent') is not True:raise HTTPException(422,'Explicit renewal consent required')
+    token=request.headers.get('authorization','')[7:]
+    hashed=security.hash_api_token(token)
+    with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        now=int(time.time())
+        current=c.execute("SELECT t.device FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.revoked_at IS NULL AND u.status='active' AND u.id=?",(hashed,device,now,owner)).fetchone()
+        if current is None:raise HTTPException(401,'Device access expired or revoked')
+        c.execute('UPDATE rtrust_tokens SET expires=? WHERE hash=?',(now+30*86400,hashed))
+        audit(c,identity,'token_renew',str(device))
+    return JSONResponse({'expires_in':30*86400,'scope':'portal_access_only'},headers=HEADERS)
+
+
+def policy_for(c, owner, device):
+    row=c.execute('SELECT g.* FROM rtrust_admin_route_members m JOIN rtrust_admin_route_groups g ON g.id=m.grp WHERE m.device=?',(device,)).fetchone()
+    prefix='admin:'
+    if row is None:
+        row=c.execute('SELECT g.* FROM rtrust_route_members m JOIN rtrust_route_groups g ON g.id=m.grp WHERE m.device=? AND g.owner=?',(device,owner)).fetchone()
+        prefix=''
+    return None if row is None else {'group':row['name'],'revision':f'{prefix}{row["id"]}:{row["revision"]}',**json.loads(row['policy'])}
+
+
+@router.post('/portal/v2/snapshot')
+async def snapshot(request:Request):
+    owner,identity,device=actor(request,True)
+    if device is None:raise HTTPException(403,'Device token required')
+    data=await body(request,['include_secrets','freshness_version'])
+    if data.get('include_secrets') is not True:raise HTTPException(422,'Explicit secret export consent required')
+    if 'freshness_version' in data and (type(data['freshness_version']) is not int or data['freshness_version']!=1):raise HTTPException(422,'Unsupported freshness contract')
+    rate(identity,10)
+    token=security.hash_api_token(request.headers['authorization'][7:])
+    return await run_in_threadpool(device_snapshot, owner, device, token, data.get('freshness_version')==1)
+
+
+def device_snapshot(owner, device, token, freshness=False):
+    with db.connect() as c:
+        # The token, grants, credentials, settings and policy share one SQLite
+        # snapshot. A double read outside this transaction cannot detect ABA.
+        c.execute('BEGIN')
+        if not c.execute("SELECT 1 FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.user_id=? AND d.revoked_at IS NULL AND u.status='active'",(token,device,int(time.time()),owner)).fetchone():
+            raise HTTPException(401,'Device expired or revoked')
+        settings=dict(c.execute('SELECT key,value FROM settings').fetchall())
+        ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile LIMIT 201',(device,))]
+        if len(ids)>200:raise HTTPException(413,'Snapshot profile limit exceeded')
+        result=[];total=0;deadline=time.monotonic()+20
+        for identifier in ids:
+            if time.monotonic()>deadline:raise HTTPException(503,'Snapshot time limit reached')
+            try:meta,document=accessible(c,owner,device,identifier,settings)
+            except HTTPException as error:
+                if error.status_code==404:continue
+                raise
+            total+=len(document.encode())
+            if total>4*LIMIT:raise HTTPException(413,'Snapshot size limit exceeded')
+            result.append({'metadata':meta,'content':document})
+        value={'version':1,'profiles':result,'routing':{'policy':policy_for(c,owner,device)}}
+        if freshness:
+            try: max_age=int(os.environ.get('RTRUST_OFFLINE_MAX_AGE_SECONDS','86400'))
+            except ValueError:raise HTTPException(503,'Invalid offline policy')
+            if not 60<=max_age<=86400:raise HTTPException(503,'Invalid offline policy')
+            current=c.execute('SELECT expires FROM rtrust_tokens WHERE hash=? AND device=?',(token,device)).fetchone()
+            remaining=current['expires']-int(time.time()) if current else 0
+            if remaining<=0:raise HTTPException(401,'Device expired or revoked')
+            value['freshness']={'version':1,'max_age_seconds':max_age,'token_remaining_seconds':remaining}
+        # Keyed revision avoids exposing a public password-derived fingerprint.
+        encoded=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+        value['revision']=hmac.new(config.SECRET_KEY.encode(),str(device).encode()+b'\0'+encoded,hashlib.sha256).hexdigest()
+    if len(json.dumps(value,ensure_ascii=False,separators=(',',':')).encode())>8*LIMIT:raise HTTPException(413,'Snapshot wire size limit exceeded')
+    return JSONResponse(value,headers=HEADERS)
