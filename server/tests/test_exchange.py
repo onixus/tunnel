@@ -288,54 +288,59 @@ class ExchangeTests(unittest.TestCase):
         self.assertEqual(limit,64)
         self.assertEqual(self.client.get('/portal/v2/capabilities').json()['max_client_profiles'],64)
         device,auth=self.enrolled('limit device')
-        self.seed_profiles(limit-2,device)
-        self.assertEqual(self.post('profile-imports/'+self.preview()+'/commit',{'action':'create','consent':True}).status_code,200)
+        self.seed_profiles(limit-1,device)
         # The device itself may import the 64th; it is granted to it atomically.
         preview=self.client.post('/portal/v2/profile-imports/preview',json={'content':self.content,'intent':'external_stored'},headers=auth).json()['preview_id']
         own=self.client.post('/portal/v2/profile-imports/'+preview+'/commit',json={'action':'create','consent':True},headers=auth)
         self.assertEqual(own.status_code,200,own.text)
         listed=self.client.get('/portal/v2/profiles',headers=auth)
-        self.assertEqual(listed.status_code,200,listed.text);self.assertEqual(len(listed.json()['profiles']),63)
-        self.assertEqual(len(self.client.get('/portal/v2/profiles').json()['profiles']),64)
-        preview=self.preview()
-        refused=self.post('profile-imports/'+preview+'/commit',{'action':'create','consent':True})
-        self.assertEqual(refused.status_code,409);self.assertIn('64',refused.text)
-        with db.connect() as c:
-            self.assertEqual(c.execute('SELECT count(*) FROM rtrust_profiles WHERE owner=? AND revoked=0',(self.owner,)).fetchone()[0],64)
-            ungranted=c.execute('SELECT id FROM rtrust_profiles p WHERE NOT EXISTS(SELECT 1 FROM rtrust_grants g WHERE g.profile=p.id)').fetchone()[0]
-        # Grant the 64th to the device: allowed; idempotent re-grant stays allowed.
-        for _ in range(2):self.assertEqual(self.post('profiles/'+ungranted+'/grants',{'device_id':device,'allow':True}).status_code,200)
-        self.assertEqual(len(self.client.get('/portal/v2/profiles',headers=auth).json()['profiles']),64)
+        self.assertEqual(listed.status_code,200,listed.text);self.assertEqual(len(listed.json()['profiles']),64)
         snapshot=self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth)
         self.assertEqual(snapshot.status_code,200,snapshot.text);self.assertEqual(len(snapshot.json()['profiles']),64)
-        # A 65th profile (historical owner row) cannot be granted to a full device.
-        extra=self.seed_profiles(1)[0]
+        # Owner imports are not bound by the device sync limit (previous cap 100).
+        committed=self.post('profile-imports/'+self.preview()+'/commit',{'action':'create','consent':True})
+        self.assertEqual(committed.status_code,200,committed.text)
+        extra=committed.json()['id']
+        # Re-granting an existing grant stays idempotent; a 65th grant is refused.
+        self.assertEqual(self.post('profiles/'+own.json()['id']+'/grants',{'device_id':device,'allow':True}).status_code,200)
         refused=self.post('profiles/'+extra+'/grants',{'device_id':device,'allow':True})
-        self.assertEqual(refused.status_code,409);self.assertNotIn(extra,refused.text);self.assertNotIn(str(device),refused.text)
+        self.assertEqual(refused.status_code,409);self.assertIn('64',refused.text)
+        self.assertNotIn(extra,refused.text);self.assertNotIn(str(device),refused.text)
         with db.connect() as c:self.assertIsNone(c.execute('SELECT 1 FROM rtrust_grants WHERE profile=?',(extra,)).fetchone())
         # A full device cannot import more either; nothing is created.
         preview=self.client.post('/portal/v2/profile-imports/preview',json={'content':self.content,'intent':'external_stored'},headers=auth).json()['preview_id']
         self.assertEqual(self.client.post('/portal/v2/profile-imports/'+preview+'/commit',json={'action':'create','consent':True},headers=auth).status_code,409)
         with db.connect() as c:self.assertEqual(c.execute('SELECT count(*) FROM rtrust_profiles WHERE revoked=0').fetchone()[0],65)
+        # Another device's limit is independent.
+        _,neighbor=self.enrolled('neighbor')
+        self.assertEqual(self.client.get('/portal/v2/profiles',headers=neighbor).json()['profiles'],[])
 
-    def test_historical_excess_fails_closed_instead_of_truncating(self):
+    def test_owner_import_cap_stays_100_without_counting_configs(self):
+        with db.connect() as c:
+            for i in range(5):c.execute('INSERT INTO configs(user_id,tt_username,tt_password,label) VALUES(?,?,?,?)',(self.owner,f'fixture-{i}',secrets.token_urlsafe(24),'Managed fixture'))
+        self.seed_profiles(99)
+        self.assertEqual(self.post('profile-imports/'+self.preview()+'/commit',{'action':'create','consent':True}).status_code,200)
+        self.assertEqual(self.post('profile-imports/'+self.preview()+'/commit',{'action':'create','consent':True}).status_code,409)
+
+    def test_historical_excess_fails_closed_for_device_only(self):
         device,auth=self.enrolled('historical device')
         ids=self.seed_profiles(exchange.MAX_CLIENT_PROFILES+1,device)
         for response in (self.client.get('/portal/v2/profiles',headers=auth),
                          self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth),
-                         self.client.post('/portal/v2/snapshot',json={'include_secrets':True,'freshness_version':1},headers=auth),
-                         self.client.get('/portal/v2/profiles')):
+                         self.client.post('/portal/v2/snapshot',json={'include_secrets':True,'freshness_version':1},headers=auth)):
             self.assertEqual(response.status_code,409,response.text)
             self.assertEqual(response.json(),{'detail':exchange.SYNC_LIMIT_ERROR})
             self.assertEqual(response.headers['cache-control'],'no-store')
+        # The owner browser view is not a client sync: >64 imports+configs stay listable.
+        db.set_settings({'panel_domain':'endpoint.example.invalid'})
+        with db.connect() as c:c.execute('INSERT INTO configs(user_id,tt_username,tt_password,label) VALUES(?,?,?,?)',(self.owner,'fixture-user',secrets.token_urlsafe(24),'Managed fixture'))
+        owner=self.client.get('/portal/v2/profiles')
+        self.assertEqual(owner.status_code,200,owner.text);self.assertEqual(len(owner.json()['profiles']),66)
         # Stale grants do not count: removing one live profile restores sync.
         with db.connect() as c:c.execute('UPDATE rtrust_profiles SET revoked=1,payload=NULL WHERE id=?',(ids[0],))
         listed=self.client.get('/portal/v2/profiles',headers=auth)
         self.assertEqual(listed.status_code,200,listed.text);self.assertEqual(len(listed.json()['profiles']),64)
         self.assertEqual(len(self.client.post('/portal/v2/snapshot',json={'include_secrets':True},headers=auth).json()['profiles']),64)
-        # Owner view counts managed configs too.
-        with db.connect() as c:c.execute('INSERT INTO configs(user_id,tt_username,tt_password,label) VALUES(?,?,?,?)',(self.owner,'fixture-user',secrets.token_urlsafe(24),'Managed fixture'))
-        self.assertEqual(self.client.get('/portal/v2/profiles').status_code,409)
 
     def enrolled(self, name='Route device'):
         code=self.post('enrollment-codes',{}).json()['code']

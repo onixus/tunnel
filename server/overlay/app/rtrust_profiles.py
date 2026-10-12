@@ -249,26 +249,24 @@ def live_row(c, owner, device, identifier):
     return c.execute('SELECT * FROM rtrust_profiles WHERE id=? AND owner=? AND revoked=0',(identifier,owner)).fetchone()
 
 def client_profile_ids(c, owner, device):
-    """Every live profile visible to this caller, in a stable order.
+    """Profiles visible to this caller, in a stable order.
 
-    Stale grants (revoked configs/profiles) do not count. A historical excess is
-    an explicit 409, never a silently truncated (and thus destructive) set."""
+    Only device tokens sync clients, so only the device set is bound by the
+    client limit: stale grants do not count, and a historical excess is an
+    explicit 409, never a silently truncated (and thus destructive) set. The
+    owner browser view is a management view and keeps its previous bounds."""
     if device is None:
-        ids=[r[0] for r in c.execute('SELECT id FROM rtrust_profiles WHERE owner=? AND revoked=0 ORDER BY id LIMIT ?',(owner,MAX_CLIENT_PROFILES+1))]
-        ids += ['managed-'+str(r[0]) for r in c.execute('SELECT id FROM configs WHERE user_id=? AND revoked_at IS NULL ORDER BY id LIMIT ?',(owner,MAX_CLIENT_PROFILES+1))]
-    else:
-        ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile',(device,)) if live_row(c,owner,device,r[0]) is not None]
+        ids=[r[0] for r in c.execute('SELECT id FROM rtrust_profiles WHERE owner=? AND revoked=0 ORDER BY id LIMIT 100',(owner,))]
+        ids += ['managed-'+str(r[0]) for r in c.execute('SELECT id FROM configs WHERE user_id=? AND revoked_at IS NULL ORDER BY id LIMIT 100',(owner,))]
+        return ids
+    ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile',(device,)) if live_row(c,owner,device,r[0]) is not None]
     if len(ids)>MAX_CLIENT_PROFILES:raise HTTPException(409,SYNC_LIMIT_ERROR)
     return ids
 
-def require_capacity(c, owner, device=None, adding=1):
-    """Refuse a mutation that would make a client-visible set exceed the limit."""
-    if device is not None:
-        current=sum(1 for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=?',(device,)).fetchall() if live_row(c,owner,device,r[0]) is not None)
-        if current+adding>MAX_CLIENT_PROFILES:raise HTTPException(409,f'Device profile limit reached ({MAX_CLIENT_PROFILES})')
-    else:
-        current=c.execute('SELECT (SELECT count(*) FROM rtrust_profiles WHERE owner=? AND revoked=0)+(SELECT count(*) FROM configs WHERE user_id=? AND revoked_at IS NULL)',(owner,owner)).fetchone()[0]
-        if current+adding>MAX_CLIENT_PROFILES:raise HTTPException(409,f'Profile limit reached ({MAX_CLIENT_PROFILES})')
+def require_device_capacity(c, owner, device, adding=1):
+    """Refuse a mutation that would grow a device's sync set beyond the limit."""
+    current=sum(1 for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=?',(device,)).fetchall() if live_row(c,owner,device,r[0]) is not None)
+    if current+adding>MAX_CLIENT_PROFILES:raise HTTPException(409,f'Device profile limit reached ({MAX_CLIENT_PROFILES})')
 
 def accessible(c, owner, device, identifier,settings=None):
     if device is not None and not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,device)).fetchone():
@@ -471,8 +469,8 @@ def _commit(identifier:str,request:Request, payload:dict, context:tuple):
             revision=int(meta['revision'])+1
             c.execute('UPDATE rtrust_profiles SET revision=?,payload=?,summary=? WHERE id=?',(revision,seal(owner,document),json.dumps(summary),target))
         else:
-            require_capacity(c,owner)
-            if device is not None:require_capacity(c,owner,device)
+            if c.execute('SELECT count(*) FROM rtrust_profiles WHERE owner=? AND revoked=0',(owner,)).fetchone()[0]>=100:raise HTTPException(409,'Profile limit reached')
+            if device is not None:require_device_capacity(c,owner,device)
             target=str(uuid.uuid4());revision=1
             c.execute('INSERT INTO rtrust_profiles VALUES(?,?,?,?,?,0)',(target,owner,revision,seal(owner,document),json.dumps(summary)))
             if device is not None:c.execute('INSERT INTO rtrust_grants VALUES(?,?)',(target,device))
@@ -507,7 +505,7 @@ def _grant(identifier:str,request:Request, payload:dict, context:tuple):
             if cfg and cfg['device_id'] is not None and cfg['device_id']!=data['device_id']:raise HTTPException(409,'Device credential cannot be shared')
         if data['allow']:
             if not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id'])).fetchone():
-                require_capacity(c,owner,data['device_id'])
+                require_device_capacity(c,owner,data['device_id'])
             c.execute('INSERT OR IGNORE INTO rtrust_grants VALUES(?,?)',(identifier,data['device_id']))
         else:c.execute('DELETE FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id']))
         audit(c,identity,'grant' if data['allow'] else 'ungrant',identifier)
