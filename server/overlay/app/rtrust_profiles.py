@@ -27,6 +27,15 @@ router = APIRouter()
 LIMIT = 1024 * 1024
 CODEC = os.environ.get('RTRUST_CODEC', '/usr/local/bin/rtrust-codec')
 HEADERS = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'}
+# Profile `origin` labels are a client contract (docs/device-credentials.md):
+# 1-80 printable ASCII bytes, compared byte-wise; Android/iOS reject the whole
+# managed batch on anything else. Add new labels here only within that alphabet.
+ORIGIN_MANAGED = 'portal_managed'
+ORIGIN_STORED = 'external_stored'
+ORIGIN_LABELS = (ORIGIN_MANAGED, ORIGIN_STORED)
+def valid_origin_label(value):
+    return isinstance(value, str) and 1 <= len(value) <= 80 and all(0x20 <= ord(ch) <= 0x7e for ch in value)
+assert all(valid_origin_label(label) for label in ORIGIN_LABELS)
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS rtrust_profiles(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,revision INTEGER NOT NULL,payload BLOB,summary TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rtrust_imports(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,actor TEXT NOT NULL,payload BLOB NOT NULL,expires INTEGER NOT NULL,result TEXT);
@@ -235,10 +244,10 @@ def accessible(c, owner, device, identifier,settings=None):
         if row is None or (device is not None and row['device_id'] is not None and row['device_id']!=device):raise HTTPException(404,'Profile not found')
         result=managed_document(row,settings)
         revision=hashlib.sha256(result['content'].encode()).hexdigest()
-        return {'id':identifier,'revision':revision,'summary':result['summary'],'origin':'portal_managed'},result['content']
+        return {'id':identifier,'revision':revision,'summary':result['summary'],'origin':ORIGIN_MANAGED},result['content']
     row=c.execute('SELECT * FROM rtrust_profiles WHERE id=? AND owner=? AND revoked=0',(identifier,owner)).fetchone()
     if row is None:raise HTTPException(404,'Profile not found')
-    return {'id':identifier,'revision':str(row['revision']),'summary':json.loads(row['summary']),'origin':'external_stored'},unseal(owner,row['payload'])
+    return {'id':identifier,'revision':str(row['revision']),'summary':json.loads(row['summary']),'origin':ORIGIN_STORED},unseal(owner,row['payload'])
 
 @router.get('/portal/v2/capabilities')
 def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1,'offline_freshness':1,'managed_credentials':credentials.capabilities()},headers=HEADERS)
@@ -394,7 +403,7 @@ def _preview(request:Request, payload:dict, context:tuple):
     with db.connect() as c:
         c.execute('DELETE FROM rtrust_imports WHERE expires<?',(int(time.time()),))
         c.execute('INSERT INTO rtrust_imports VALUES(?,?,?,?,?,NULL)',(identifier,owner,identity,seal(owner,result['content']),int(time.time())+600))
-    return JSONResponse({'preview_id':identifier,'summary':result['summary'],'expires_in':600,'origin':'external_stored','secrets_present':True},headers=HEADERS)
+    return JSONResponse({'preview_id':identifier,'summary':result['summary'],'expires_in':600,'origin':ORIGIN_STORED,'secrets_present':True},headers=HEADERS)
 
 
 @router.post('/portal/v2/profile-imports/{identifier}/commit')
