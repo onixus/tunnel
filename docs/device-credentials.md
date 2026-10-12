@@ -128,6 +128,38 @@ source. New labels must stay within this alphabet and are declared in
 `ORIGIN_LABELS` in `server/overlay/app/rtrust_profiles.py`, which
 `test_profile_origin_labels_follow_client_contract` checks.
 
+## Client profile limit
+
+Android and iOS reject a whole managed batch with more than 64 profiles. Clients
+sync only with a device token, so the server caps each device's sync set at
+`MAX_CLIENT_PROFILES = 64` (`server/overlay/app/rtrust_profiles.py`, advertised
+as `max_client_profiles` in `/portal/v2/capabilities`). The set is the device's
+live grants; grants to revoked profiles or configs do not count.
+
+- Growing a device set beyond 64 is refused with HTTP 409
+  `Device profile limit reached (64)` and no partial write: a new grant to a
+  full device, an import committed by a full device (it would be granted to
+  that device), and managed credential provisioning that would add a 65th grant
+  (the transaction, including migration of v1 device configs, rolls back).
+  Re-granting an existing grant stays idempotent.
+- A historical device set above the limit is never truncated:
+  `GET /portal/v2/profiles` and `POST /portal/v2/snapshot` with a device token
+  return HTTP 409 `{"detail":"Too many profiles for client sync"}`. A truncated
+  list would make clients delete the omitted managed profiles. Android, iOS and
+  the desktop client treat any non-200 as a failed sync and keep their last
+  applied set. Remediation: the owner revokes grants until the device has at
+  most 64.
+- The owner browser view (session login, no device token) is a management
+  view, not a client sync: it is unaffected by this limit and keeps its
+  previous bounds (up to 100 stored imports plus 100 account configs). Owner
+  imports keep the previous cap of 100 stored profiles; account configs are not
+  counted there.
+- Device checks scan at most `MAX_DEVICE_GRANT_SCAN = 1000` raw grant rows;
+  reaching that bound is the same explicit 409, never a truncated set.
+- Capacity check and grant insert share one `BEGIN IMMEDIATE` transaction, so
+  concurrent grants cannot push a device past the limit.
+- Error bodies carry no profile, device or credential identifiers.
+
 ## Atomic snapshot and offline freshness
 
 The paired client requests an authenticated, transactionally frozen snapshot

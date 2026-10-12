@@ -33,6 +33,13 @@ HEADERS = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content
 ORIGIN_MANAGED = 'portal_managed'
 ORIGIN_STORED = 'external_stored'
 ORIGIN_LABELS = (ORIGIN_MANAGED, ORIGIN_STORED)
+# Client sync contract (docs/device-credentials.md): Android/iOS reject a whole
+# managed batch above 64. The server never creates more and never truncates a
+# historical excess: list/snapshot fail closed so clients keep their last set.
+MAX_CLIENT_PROFILES = 64
+SYNC_LIMIT_ERROR = 'Too many profiles for client sync'
+# Upper bound on raw (possibly stale) grant rows scanned per device request.
+MAX_DEVICE_GRANT_SCAN = 1000
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS rtrust_profiles(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,revision INTEGER NOT NULL,payload BLOB,summary TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rtrust_imports(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,actor TEXT NOT NULL,payload BLOB NOT NULL,expires INTEGER NOT NULL,result TEXT);
@@ -231,14 +238,50 @@ def managed_document(cfg,settings=None):
         except (OSError,UnicodeError):raise HTTPException(503,'Client trust certificate unavailable')
     return codec(json.dumps(raw))
 
+def live_row(c, owner, device, identifier):
+    # Same visibility rules as accessible(), without building documents.
+    if device is not None and not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,device)).fetchone():
+        return None
+    if identifier.startswith('managed-'):
+        try: number=int(identifier[8:])
+        except ValueError:return None
+        row=c.execute('SELECT * FROM configs WHERE id=? AND user_id=? AND revoked_at IS NULL',(number,owner)).fetchone()
+        if row is None or (device is not None and row['device_id'] is not None and row['device_id']!=device):return None
+        return row
+    return c.execute('SELECT * FROM rtrust_profiles WHERE id=? AND owner=? AND revoked=0',(identifier,owner)).fetchone()
+
+def client_profile_ids(c, owner, device):
+    """Profiles visible to this caller, in a stable order.
+
+    Only device tokens sync clients, so only the device set is bound by the
+    client limit: stale grants do not count, and a historical excess is an
+    explicit 409, never a silently truncated (and thus destructive) set. The
+    owner browser view is a management view and keeps its previous bounds."""
+    if device is None:
+        ids=[r[0] for r in c.execute('SELECT id FROM rtrust_profiles WHERE owner=? AND revoked=0 ORDER BY id LIMIT 100',(owner,))]
+        ids += ['managed-'+str(r[0]) for r in c.execute('SELECT id FROM configs WHERE user_id=? AND revoked_at IS NULL ORDER BY id LIMIT 100',(owner,))]
+        return ids
+    ids=device_live_ids(c,owner,device,SYNC_LIMIT_ERROR)
+    if len(ids)>MAX_CLIENT_PROFILES:raise HTTPException(409,SYNC_LIMIT_ERROR)
+    return ids
+
+def device_live_ids(c, owner, device, error):
+    # Bounded scan; reaching the bound fails closed instead of truncating.
+    rows=c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile LIMIT ?',(device,MAX_DEVICE_GRANT_SCAN+1)).fetchall()
+    if len(rows)>MAX_DEVICE_GRANT_SCAN:raise HTTPException(409,error)
+    return [r[0] for r in rows if live_row(c,owner,device,r[0]) is not None]
+
+def require_device_capacity(c, owner, device, adding=1):
+    """Refuse a mutation that would grow a device's sync set beyond the limit."""
+    error=f'Device profile limit reached ({MAX_CLIENT_PROFILES})'
+    if len(device_live_ids(c,owner,device,error))+adding>MAX_CLIENT_PROFILES:raise HTTPException(409,error)
+
 def accessible(c, owner, device, identifier,settings=None):
     if device is not None and not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,device)).fetchone():
         raise HTTPException(404,'Profile not found')
     if identifier.startswith('managed-'):
-        try: number=int(identifier[8:])
-        except ValueError:raise HTTPException(404,'Profile not found')
-        row=c.execute('SELECT * FROM configs WHERE id=? AND user_id=? AND revoked_at IS NULL',(number,owner)).fetchone()
-        if row is None or (device is not None and row['device_id'] is not None and row['device_id']!=device):raise HTTPException(404,'Profile not found')
+        row=live_row(c,owner,device,identifier)
+        if row is None:raise HTTPException(404,'Profile not found')
         result=managed_document(row,settings)
         revision=hashlib.sha256(result['content'].encode()).hexdigest()
         return {'id':identifier,'revision':revision,'summary':result['summary'],'origin':ORIGIN_MANAGED},result['content']
@@ -247,7 +290,7 @@ def accessible(c, owner, device, identifier,settings=None):
     return {'id':identifier,'revision':str(row['revision']),'summary':json.loads(row['summary']),'origin':ORIGIN_STORED},unseal(owner,row['payload'])
 
 @router.get('/portal/v2/capabilities')
-def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'routing':1,'snapshot':1,'token_renewal':1,'offline_freshness':1,'managed_credentials':credentials.capabilities()},headers=HEADERS)
+def capabilities():return JSONResponse({'version':2,'formats':['profile_json','endpoint_toml','cli_toml','tt'],'enrollment':['one_time_code','one_time_qr'],'max_profile_bytes':LIMIT,'max_client_profiles':MAX_CLIENT_PROFILES,'routing':1,'snapshot':1,'token_renewal':1,'offline_freshness':1,'managed_credentials':credentials.capabilities()},headers=HEADERS)
 
 @router.get('/profiles',response_class=HTMLResponse)
 def page(request:Request):
@@ -346,10 +389,8 @@ def revoke_device(identifier:int,request:Request):
 def profiles(request:Request):
     owner,_,device=actor(request)
     with db.connect() as c:
-        if device is None:
-            ids=[r[0] for r in c.execute('SELECT id FROM rtrust_profiles WHERE owner=? AND revoked=0 ORDER BY id LIMIT 100',(owner,))]
-            ids += ['managed-'+str(r[0]) for r in c.execute('SELECT id FROM configs WHERE user_id=? AND revoked_at IS NULL ORDER BY id LIMIT 100',(owner,))]
-        else:ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile LIMIT 100',(device,))]
+        c.execute('BEGIN')
+        ids=client_profile_ids(c,owner,device)
         result=[]
         for identifier in ids:
             try:meta,_=accessible(c,owner,device,identifier);result.append(meta)
@@ -437,6 +478,7 @@ def _commit(identifier:str,request:Request, payload:dict, context:tuple):
             c.execute('UPDATE rtrust_profiles SET revision=?,payload=?,summary=? WHERE id=?',(revision,seal(owner,document),json.dumps(summary),target))
         else:
             if c.execute('SELECT count(*) FROM rtrust_profiles WHERE owner=? AND revoked=0',(owner,)).fetchone()[0]>=100:raise HTTPException(409,'Profile limit reached')
+            if device is not None:require_device_capacity(c,owner,device)
             target=str(uuid.uuid4());revision=1
             c.execute('INSERT INTO rtrust_profiles VALUES(?,?,?,?,?,0)',(target,owner,revision,seal(owner,document),json.dumps(summary)))
             if device is not None:c.execute('INSERT INTO rtrust_grants VALUES(?,?)',(target,device))
@@ -463,12 +505,16 @@ def _grant(identifier:str,request:Request, payload:dict, context:tuple):
     data=payload
     if type(data.get('device_id')) is not int or type(data.get('allow')) is not bool:raise HTTPException(422,'Invalid grant')
     with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')  # serializes the capacity check with the insert
         accessible(c,owner,None,identifier)
         if not c.execute('SELECT 1 FROM app_devices WHERE id=? AND user_id=? AND revoked_at IS NULL',(data['device_id'],owner)).fetchone():raise HTTPException(404,'Device not found')
         if identifier.startswith('managed-'):
             cfg=c.execute('SELECT device_id FROM configs WHERE id=?',(int(identifier[8:]),)).fetchone()
             if cfg and cfg['device_id'] is not None and cfg['device_id']!=data['device_id']:raise HTTPException(409,'Device credential cannot be shared')
-        if data['allow']:c.execute('INSERT OR IGNORE INTO rtrust_grants VALUES(?,?)',(identifier,data['device_id']))
+        if data['allow']:
+            if not c.execute('SELECT 1 FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id'])).fetchone():
+                require_device_capacity(c,owner,data['device_id'])
+            c.execute('INSERT OR IGNORE INTO rtrust_grants VALUES(?,?)',(identifier,data['device_id']))
         else:c.execute('DELETE FROM rtrust_grants WHERE profile=? AND device=?',(identifier,data['device_id']))
         audit(c,identity,'grant' if data['allow'] else 'ungrant',identifier)
     return JSONResponse({'updated':True},headers=HEADERS)
@@ -884,8 +930,7 @@ def device_snapshot(owner, device, token, freshness=False):
         if not c.execute("SELECT 1 FROM rtrust_tokens t JOIN app_devices d ON d.id=t.device JOIN users u ON u.id=d.user_id WHERE t.hash=? AND t.device=? AND t.expires>? AND d.user_id=? AND d.revoked_at IS NULL AND u.status='active'",(token,device,int(time.time()),owner)).fetchone():
             raise HTTPException(401,'Device expired or revoked')
         settings=dict(c.execute('SELECT key,value FROM settings').fetchall())
-        ids=[r[0] for r in c.execute('SELECT profile FROM rtrust_grants WHERE device=? ORDER BY profile LIMIT 201',(device,))]
-        if len(ids)>200:raise HTTPException(413,'Snapshot profile limit exceeded')
+        ids=client_profile_ids(c,owner,device)
         result=[];total=0;deadline=time.monotonic()+20
         for identifier in ids:
             if time.monotonic()>deadline:raise HTTPException(503,'Snapshot time limit reached')
