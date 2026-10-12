@@ -33,9 +33,6 @@ HEADERS = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content
 ORIGIN_MANAGED = 'portal_managed'
 ORIGIN_STORED = 'external_stored'
 ORIGIN_LABELS = (ORIGIN_MANAGED, ORIGIN_STORED)
-def valid_origin_label(value):
-    return isinstance(value, str) and 1 <= len(value) <= 80 and all(0x20 <= ord(ch) <= 0x7e for ch in value)
-assert all(valid_origin_label(label) for label in ORIGIN_LABELS)
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS rtrust_profiles(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,revision INTEGER NOT NULL,payload BLOB,summary TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rtrust_imports(id TEXT PRIMARY KEY,owner INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,actor TEXT NOT NULL,payload BLOB NOT NULL,expires INTEGER NOT NULL,result TEXT);
@@ -397,7 +394,7 @@ def _preview_prepare(request:Request):
 def _preview(request:Request, payload:dict, context:tuple):
     owner, identity, _=context
     data=payload
-    if data.get('intent')!='external_stored':raise HTTPException(422,'Only external storage import is supported; endpoint credentials are unchanged')
+    if data.get('intent')!=ORIGIN_STORED:raise HTTPException(422,'Only external storage import is supported; endpoint credentials are unchanged')
     result=codec(data.get('content'))
     identifier=str(uuid.uuid4())
     with db.connect() as c:
