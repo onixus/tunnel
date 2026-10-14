@@ -97,13 +97,17 @@ def module_switch():
     spec=importlib.util.spec_from_loader(loader.name,loader); mod=importlib.util.module_from_spec(spec); loader.exec_module(mod)
     return mod
 
+# Exception targets. `clean` is an optional exit for anti-bot sensitive sites (docs/antibot.md);
+# it is never offered as the catch-all.
+RULE_TARGETS = ('local','primary','reserve','clean','reject')
+
 def validate_rules(items):
     if not isinstance(items,list) or len(items)>128: raise Rejected('Не более 128 правил')
     rules=[]
     for item in items:
         if set(item) != {'target','kind','value'}: raise Rejected('Некорректное правило')
         target,kind,value=item['target'],item['kind'],item['value']
-        if target not in ('local','primary','reserve','reject'): raise Rejected('Неизвестный выход')
+        if target not in RULE_TARGETS: raise Rejected('Неизвестный выход')
         if not isinstance(value,str): raise Rejected('Некорректное значение')
         if kind=='suffix':
             value=value.encode('idna').decode('ascii').lower()
@@ -130,6 +134,8 @@ def apply_routes(data):
         m=module_switch(); profiles=json.loads(EXITS.read_text())
         for p in profiles.values():
             if p.get('expected_host'): p['expected_ip']=socket.gethostbyname(p['expected_host'])
+        missing={t for t,_ in rules if t not in ('local','reject') and t not in profiles}
+        if missing: raise Rejected('Выход не настроен: '+', '.join(sorted(missing)))
         used={target}|{t for t,_ in rules if t in profiles}
         for t in used: m.check_exit(profiles[t])
         old=m.get_config(); c=yaml.safe_load(old)

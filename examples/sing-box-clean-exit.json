@@ -1,0 +1,40 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "clean-in",
+      "listen": "10.254.78.2",
+      "listen_port": 1081,
+      "users": [
+        {
+          "username": "hysteria",
+          "password": "REPLACE_LOCALLY_CLEAN_SOCKS_PASSWORD"
+        }
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "isp-proxy",
+      "version": "5",
+      "server": "REPLACE_LOCALLY_ISP_PROXY_IP",
+      "server_port": 1080,
+      "username": "REPLACE_LOCALLY_ISP_PROXY_USER",
+      "password": "REPLACE_LOCALLY_ISP_PROXY_PASSWORD"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "ip_is_private": true,
+        "action": "reject"
+      }
+    ],
+    "final": "isp-proxy"
+  }
+}
