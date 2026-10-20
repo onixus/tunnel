@@ -42,7 +42,7 @@ R-TrustTunnel, черновики e-mail/Telegram-рассылок, очеред
 - [Настройка Linux, Windows, macOS, Android и iOS](docs/clients.md)
 - [Единая консоль: функции, приёмка и ограничения](docs/unified-console.md)
 - [Группы маршрутов устройств R-TrustTunnel](docs/device-routing.md)
-- [Протоколы: AmneziaWG 3.1, установка и обновление из консоли, мониторинг контейнеров](docs/protocols.md)
+- [Протоколы: AmneziaWG 3.1, VLESS через CDN, установка и обновление из консоли, мониторинг контейнеров](docs/protocols.md)
 - [Доступ к панелям и управление пользователями](docs/panels.md)
 - [Проверки и диагностика](docs/troubleshooting.md)
 - [Обновления, резервные копии, восстановление и откат](docs/operations.md)

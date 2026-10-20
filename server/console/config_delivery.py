@@ -15,6 +15,7 @@ TG_TEXT_LIMIT = 3500
 INSTRUCTIONS = {
     'hysteria': 'Импортируйте ссылку hysteria2:// в клиент (Hiddify, v2rayN, NekoBox, Streisand) или отсканируйте QR-код.',
     'amnezia': 'Импортируйте файл .conf в AmneziaVPN или AmneziaWG (версия с поддержкой AmneziaWG 3.1) либо отсканируйте QR-код.',
+    'cdn': 'Импортируйте ссылку vless:// в клиент с поддержкой Xray (v2rayN, v2rayNG, Hiddify, NekoBox, Streisand) или отсканируйте QR-код.',
     'trusttunnel': 'Импортируйте ссылку в приложение TrustTunnel / R-TrustTunnel, отсканируйте QR-код или используйте TOML в консольном клиенте.',
 }
 WARNING = 'Конфигурация содержит данные доступа. Не пересылайте её другим людям.'
@@ -68,6 +69,15 @@ def amnezia_bundle(user, export):
     name = user['username']
     files = [(f'amneziawg-{name}.conf', conf.encode(), 'text/plain')]
     return {'title': 'AmneziaWG — ' + name, 'kind': 'amnezia', 'items': [{'name': name, 'link': conf, 'files': files}]}
+
+
+def cdn_bundle(user, export):
+    if user.get('deleted'):
+        raise DeliveryError('Пользователь CDN заблокирован; конфигурация не отправлена')
+    link = export({'id': user['id']})['content']
+    name = user['username']
+    files = [(f'vless-cdn-{name}.txt', (link + '\n').encode(), 'text/plain')]
+    return {'title': 'VLESS через CDN — ' + name, 'kind': 'cdn', 'items': [{'name': name, 'link': link, 'files': files}]}
 
 
 def trusttunnel_bundle(user):

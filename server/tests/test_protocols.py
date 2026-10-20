@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'server/console'))
 import amnezia
+import cdn
 import protocols
 from routing_policy import PolicyError
 
@@ -35,6 +36,8 @@ def host(tmp_path, monkeypatch):
     home = tmp_path / 'amneziawg'
     monkeypatch.setattr(amnezia, 'STATE', home / 'state.json')
     monkeypatch.setattr(amnezia, 'RUNTIME', home / 'runtime')
+    monkeypatch.setattr(cdn, 'STATE', tmp_path / 'xray-cdn/state.json')
+    monkeypatch.setattr(cdn, 'RUNTIME', tmp_path / 'xray-cdn/runtime')
     for name in ('CACHE', 'ROLLBACK', 'BUILD', 'ASSETS'):
         monkeypatch.setattr(protocols, name, tmp_path / name.lower())
     (tmp_path / 'assets/amnezia').mkdir(parents=True)
@@ -254,7 +257,7 @@ def test_status_reports_versions_containers_and_no_secrets(host, monkeypatch):
     monkeypatch.setattr(protocols, 'quiet', lambda args, timeout=8: (0, 'a' * 64 + '\n' + 'b' * 64) if args[:2] == ['docker', 'ps'] else (1, ''))
     monkeypatch.setattr(protocols, 'run', lambda args, timeout=30: json.dumps(inspect))
     value = protocols.status()
-    assert [i['id'] for i in value['items']] == ['hysteria', 'trusttunnel', 'amnezia']
+    assert [i['id'] for i in value['items']] == ['hysteria', 'trusttunnel', 'amnezia', 'cdn']
     assert value['items'][2] == dict(value['items'][2], installed=False, latest='3.1.20260828', update=False, repo='https://github.com/amnezia-vpn/amneziawg-go')
     first, second = value['containers']
     assert first == {'name': 'trusttunnel-web', 'role': 'TrustTunnel и портал', 'state': 'running', 'image': 'sha256:aaaaaaaaaaaa', 'health': 'healthy',
@@ -555,3 +558,94 @@ def test_slow_manual_and_background_discovery_leave_mutation_lock_free(host, mon
     assert not errors, errors
     assert all(not worker.is_alive() for worker in workers)
     assert isinstance(protocols.cached()['components'], dict)
+
+
+def cdn_state(**settings):
+    state = cdn.new_state('origin.example.invalid')
+    state['settings'].update(settings)
+    cdn.save(state)
+    return state
+
+
+def test_cdn_settings_are_validated_against_fixed_sets(host):
+    current = cdn_state()['settings']
+    good = cdn.validate({'domain': 'CDN.Example.com.', 'address': '104.16.0.1', 'origin_tls': False, 'origin_port': 8880,
+                         'transport': 'xhttp', 'client_port': 2053}, current)
+    assert good == dict(current, domain='cdn.example.com', address='104.16.0.1', origin_tls=False, origin_port=8880,
+                        transport='xhttp', client_port=2053)
+    assert cdn.validate({'regenerate_path': True}, current)['path'] != current['path']
+    for bad in ({'domain': 'evil.com/x'}, {'domain': 'a b.com'}, {'origin_port': 443}, {'origin_port': 8880},
+                {'origin_tls': False}, {'client_port': 80}, {'transport': 'grpc'}, {'path': '/../etc'},
+                {'path': '/short'}, {'origin_port': '2053'}, {'image': 'evil'}, {'regenerate_path': 'yes'}):
+        with pytest.raises(PolicyError):
+            cdn.validate(bad, current)
+
+
+def test_cdn_users_links_and_server_config(host):
+    cdn_state()
+    cdn.dispatch('cdn.create', {'username': 'alice'}, )
+    cdn.dispatch('cdn.create', {'username': 'bob'})
+    with pytest.raises(PolicyError, match='домен CDN'):
+        cdn.dispatch('cdn.export', {'id': 1})
+    state = cdn.load()
+    state['settings'].update(domain='cdn.example.com', address='104.16.0.1')
+    cdn.save(state)
+    link = cdn.dispatch('cdn.export', {'id': 1})['content']
+    alice, bob = state['users']
+    assert link.startswith(f'vless://{alice["uuid"]}@104.16.0.1:443?')
+    assert 'sni=cdn.example.com' in link and 'host=cdn.example.com' in link and 'type=ws' in link and '#CDN-alice' in link
+    cdn.dispatch('cdn.block', {'id': 2})
+    server = json.loads((cdn.RUNTIME / 'config.json').read_text())
+    inbound = server['inbounds'][0]
+    assert [c['id'] for c in inbound['settings']['clients']] == [alice['uuid']]
+    assert inbound['port'] == 2053 and inbound['streamSettings']['security'] == 'tls'
+    assert '/etc/letsencrypt/live/origin.example.invalid/' in inbound['streamSettings']['tlsSettings']['certificates'][0]['keyFile']
+    assert '10.0.0.0/8' in server['routing']['rules'][0]['ip']
+    with pytest.raises(PolicyError, match='заблокирован'):
+        cdn.dispatch('cdn.export', {'id': 2})
+    cdn.dispatch('cdn.rotate', {'id': 1})
+    assert cdn.load()['users'][0]['uuid'] != alice['uuid']
+    assert [u['username'] for u in cdn.users()] == ['alice', 'bob'] and 'uuid' not in json.dumps(cdn.users())
+    for op, data in (('cdn.create', {'username': 'alice'}), ('cdn.create', {'username': 'x'}), ('cdn.block', {'id': '1'}),
+                     ('cdn.delete', {'id': 1})):
+        with pytest.raises(PolicyError):
+            cdn.dispatch(op, data)
+
+
+XRAY = {'version': '25.10.15', 'tag': 'v25.10.15', 'sha256': '2' * 64}
+
+
+def test_cdn_install_then_configure_recreates_container(host, monkeypatch):
+    import zipfile
+    (protocols.ASSETS / 'xray').mkdir(parents=True)
+    (protocols.ASSETS / 'xray/Dockerfile').write_text('fixture')
+    monkeypatch.setattr(protocols, 'require_x86', lambda: None)
+
+    def download(url, dest, sha256):
+        assert url == 'https://github.com/XTLS/Xray-core/releases/download/v25.10.15/Xray-linux-64.zip' and sha256 == '2' * 64
+        with zipfile.ZipFile(dest, 'w') as z:
+            z.writestr('xray', b'binary')
+    monkeypatch.setattr(protocols, 'download', download)
+    monkeypatch.setattr(cdn, 'running', lambda: cdn.CONTAINER in host['containers'])
+    monkeypatch.setattr(cdn, 'verify', lambda port: None)
+    cache(cdn=[XRAY])
+    agent = types.SimpleNamespace(ORIGIN='https://origin.example.invalid')
+    result = protocols.dispatch('protocols.install', {'component': 'cdn'}, agent)
+    assert 'TCP 2053' in result['message']
+    start = next(c for c in host['calls'] if c[:2] == ['docker', 'run'])
+    assert '2053:2053/tcp' in start and start[start.index('--cap-drop') + 1] == 'ALL' and start[-1] == 'vpn-xray:25.10.15'
+    assert 'type=bind,src=/etc/letsencrypt,dst=/etc/letsencrypt,readonly' in start
+    info = protocols.installed('cdn')
+    assert info['installed'] and info['version'] == '25.10.15' and info['settings']['domain'] == ''
+
+    host['calls'].clear()
+    cdn.dispatch('cdn.configure', {'domain': 'cdn.example.com', 'origin_tls': False, 'origin_port': 2095})
+    start = next(c for c in host['calls'] if c[:2] == ['docker', 'run'])
+    assert '2095:2095/tcp' in start and not any('letsencrypt' in a for a in start)
+    assert ['docker', 'rename', 'xray-cdn', 'xray-cdn-previous'] in host['calls']
+    assert cdn.load()['settings']['domain'] == 'cdn.example.com'
+
+    monkeypatch.setattr(cdn, 'verify', lambda port: (_ for _ in ()).throw(PolicyError('down')))
+    with pytest.raises(PolicyError, match='восстановлены'):
+        cdn.dispatch('cdn.configure', {'domain': 'other.example.com'})
+    assert cdn.load()['settings']['domain'] == 'cdn.example.com'

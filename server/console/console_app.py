@@ -127,8 +127,8 @@ def source_user(source,id):
             for u in users:
                 if u['id']==id: return u
         raise HTTPException(404,'Пользователь не найден')
-    if source=='amnezia':
-        users=agent('snapshot').get('amnezia_users',[])
+    if source in ('amnezia','cdn'):
+        users=agent('snapshot').get(source+'_users',[])
         if isinstance(users,list):
             for u in users:
                 if u['id']==id: return u
@@ -136,7 +136,7 @@ def source_user(source,id):
     raise HTTPException(422,'Неизвестный источник')
 
 def perform(action,data,admin):
-    if action.startswith(('routes.','updates.','hysteria.','adblock.','amnezia.','protocols.')): return agent(action,data)
+    if action.startswith(('routes.','updates.','hysteria.','adblock.','amnezia.','cdn.','protocols.')): return agent(action,data)
     if action=='trusttunnel.create':
         # Password is generated at execution, never stored in the job or audit.
         return legacy(admin,'users/create',{'email':data['email'],'password':secrets.token_urlsafe(24)})
@@ -187,6 +187,7 @@ def send_config(data):
     try:
         bundle=(config_delivery.hysteria_bundle(user,lambda d:agent('hysteria.export',d)) if source=='hysteria'
                 else config_delivery.amnezia_bundle(user,lambda d:agent('amnezia.export',d)) if source=='amnezia'
+                else config_delivery.cdn_bundle(user,lambda d:agent('cdn.export',d)) if source=='cdn'
                 else config_delivery.trusttunnel_bundle(user))
     except config_delivery.DeliveryError: raise
     except Exception: raise RuntimeError('Не удалось подготовить конфигурацию')
@@ -269,8 +270,10 @@ def state(request:Request):
 
 ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
          'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send',
-         'amnezia.create','amnezia.block','amnezia.unblock','amnezia.rotate','protocols.check','protocols.install','protocols.update'}
-PROTOCOLS=('hysteria','trusttunnel','amnezia')
+         'amnezia.create','amnezia.block','amnezia.unblock','amnezia.rotate','protocols.check','protocols.install','protocols.update',
+         'cdn.create','cdn.block','cdn.unblock','cdn.rotate','cdn.configure'}
+PROTOCOLS=('hysteria','trusttunnel','amnezia','cdn')
+CDN_SETTINGS={'domain','address','client_port','origin_port','origin_tls','transport','path','regenerate_path'}
 
 def validate_action(action,data,*,check_state=True):
     if action not in ACTIONS: raise HTTPException(422,'Неизвестная операция')
@@ -299,6 +302,15 @@ def validate_action(action,data,*,check_state=True):
     if action=='amnezia.create':
         if not re.fullmatch('[A-Za-z0-9_-]{3,32}',str(data.get('username',''))): raise HTTPException(422,'Имя AmneziaWG: 3–32 латинских символа')
         return {'username':data['username']}
+    if action=='cdn.create':
+        if not re.fullmatch('[A-Za-z0-9_-]{3,32}',str(data.get('username',''))): raise HTTPException(422,'Имя CDN: 3–32 латинских символа')
+        return {'username':data['username']}
+    if action=='cdn.configure':
+        # Types only; the agent checks domains, ports and paths at the privilege boundary.
+        types={'domain':str,'address':str,'client_port':int,'origin_port':int,'origin_tls':bool,'transport':str,'path':str,'regenerate_path':bool}
+        if not data or not set(data)<=CDN_SETTINGS or any(type(v) is not types[k] for k,v in data.items()): raise HTTPException(422,'Некорректные параметры CDN')
+        if any(isinstance(v,str) and len(v)>253 for v in data.values()): raise HTTPException(422,'Слишком длинное значение')
+        return data
     if action in ('protocols.install','protocols.update'):
         # Only a registry name and a version string; the agent resolves both against the developers' repositories.
         component=data.get('component'); clean={'component':component}
@@ -362,8 +374,8 @@ async def export(request:Request):
     if q.get('consent') is not True or type(q.get('id')) is not int or q['id'] <= 0: raise HTTPException(422,'Подтвердите раскрытие ключа')
     if type(q.get('qr', False)) is not bool: raise HTTPException(422,'Некорректный параметр QR')
     if q.get('source')=='hysteria': result=agent('hysteria.export',{'id':q['id']})
-    elif q.get('source')=='amnezia':
-        try: result=agent('amnezia.export',{'id':q['id']})
+    elif q.get('source') in ('amnezia','cdn'):
+        try: result=agent(q['source']+'.export',{'id':q['id']})
         except RuntimeError as exc: raise HTTPException(409,str(exc)) from None
     elif q.get('source')=='trusttunnel':
         cfg=db.get_config(q['id'])

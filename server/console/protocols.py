@@ -22,10 +22,12 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 
 import yaml
 
 import amnezia
+import cdn
 from routing_policy import PolicyError
 import service_routes
 
@@ -54,11 +56,13 @@ SOURCES = {
                     'asset': 'trusttunnel-{tag}-linux-x86_64.tar.gz', 'runtime': 'docker · ' + TT_CONTAINER},
     'amnezia': {'title': 'AmneziaWG 3.1', 'repo': 'amnezia-vpn/amneziawg-go', 'tools': 'amnezia-vpn/amneziawg-tools',
                 'tag': r'v(3\.1\.\d{8})', 'runtime': 'docker · ' + amnezia.CONTAINER},
+    'cdn': {'title': 'VLESS через CDN', 'repo': 'XTLS/Xray-core', 'tag': r'v(\d+\.\d+\.\d+)',
+            'asset': 'Xray-linux-64.zip', 'runtime': 'docker · ' + cdn.CONTAINER},
 }
 # The console drives H UI through its 0.0.25 API and database layout; see docs/versions.md.
 HUI = {'repo': 'jonssonyan/h-ui', 'tag': 'v0.0.25', 'asset': 'h-ui-linux-amd64',
        'sha256': '900ed683b3a3af3a79e5bdcc691b9f3db82f1758545f0f603f8bdecd9d1cd7ee'}
-ROLES = {TT_CONTAINER: 'TrustTunnel и портал', amnezia.CONTAINER: 'AmneziaWG', 'vpn-console': 'Консоль',
+ROLES = {TT_CONTAINER: 'TrustTunnel и портал', amnezia.CONTAINER: 'AmneziaWG', cdn.CONTAINER: 'VLESS через CDN', 'vpn-console': 'Консоль',
          'vpn-adblock': 'Фильтр рекламы', 'rtrust-portal-https': 'HTTPS-вход'}
 UNITS = (('h-ui', 'Hysteria 2 / H UI'), ('vpn-console-agent', 'Агент консоли'), ('vpn-telegram', 'Telegram-бот'),
          ('vpn-adblock-dns', 'Перехват DNS'), ('docker', 'Docker Engine'))
@@ -260,6 +264,14 @@ def installed(name):
         code, out = quiet(['docker', 'exec', TT_CONTAINER, TT_ENDPOINT, '--version'])
         match = re.search(r'(\d+\.\d+\.\d+)', out)
         return {'installed': code == 0, 'version': match[1] if match and code == 0 else None, 'state': state}
+    if name == 'cdn':
+        code, state = quiet(['docker', 'inspect', cdn.CONTAINER, '--format', '{{.State.Status}}'])
+        try:
+            saved = cdn.load()
+        except PolicyError:
+            saved = None
+        return {'installed': code == 0 and saved is not None, 'version': (saved or {}).get('version'),
+                'state': state if code == 0 else 'absent', 'settings': cdn.public_settings(saved) if saved else None}
     code, state = quiet(['docker', 'inspect', amnezia.CONTAINER, '--format', '{{.State.Status}}'])
     try:
         saved = amnezia.load()
@@ -533,7 +545,41 @@ def install_hysteria(op, data, release, work, agent):
     return f'Hysteria {release["version"]} установлена и проверена реальным трафиком'
 
 
-HANDLERS = {'hysteria': install_hysteria, 'trusttunnel': install_trusttunnel, 'amnezia': install_amnezia}
+def install_cdn(op, data, release, work, agent):
+    require_x86()
+    archive = work / 'xray.zip'
+    download(asset_url(SOURCES['cdn']['repo'], release['tag'], SOURCES['cdn']['asset']), archive, release['sha256'])
+    with zipfile.ZipFile(archive) as bundle:
+        member = next((m for m in bundle.infolist() if m.filename == 'xray'), None)
+        if member is None or member.file_size > LIMIT:
+            raise PolicyError('В архиве разработчика нет xray')
+        with bundle.open(member) as source, open(work / 'xray', 'wb') as target:
+            shutil.copyfileobj(source, target)
+    archive.unlink()
+    shutil.copy2(asset('xray', 'Dockerfile'), work / 'Dockerfile')
+    image = 'vpn-xray:' + release['version']
+    build(['--pull', '-t', image, str(work)], 300)
+    fresh = not cdn.STATE.exists()
+    state = cdn.new_state(urllib.parse.urlsplit(agent.ORIGIN).hostname) if fresh else cdn.load()
+    before = None if fresh else json.dumps(state, sort_keys=True)
+    state.update(version=release['version'], tag=release['tag'], image=image)
+    cdn.save(state)
+    try:
+        swap_container(cdn.CONTAINER, cdn.container_args(state, image), lambda: cdn.verify(state['settings']['origin_port']))
+    except BaseException:
+        if before is None:
+            cdn.STATE.unlink(missing_ok=True)
+            (cdn.RUNTIME / 'config.json').unlink(missing_ok=True)
+        else:
+            cdn.save(json.loads(before))
+        raise PolicyError('Xray не прошёл проверку запуска. Предыдущее состояние восстановлено.') from None
+    port = state['settings']['origin_port']
+    return (f'Xray {release["version"]} работает на TCP {port}. '
+            + ('Откройте порт для адресов CDN, затем укажите домен CDN кнопкой «Настроить CDN».' if fresh
+               else 'Пользователи и настройки CDN сохранены.'))
+
+
+HANDLERS = {'hysteria': install_hysteria, 'trusttunnel': install_trusttunnel, 'amnezia': install_amnezia, 'cdn': install_cdn}
 
 
 def install(op, data, agent):

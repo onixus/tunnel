@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import agent
 import amnezia
+import cdn
 import protocols
 from routing_policy import PolicyError, make_plan
 import service_routes
@@ -22,7 +23,7 @@ def dispatch(op, data):
             result['routing'] = runtime.snapshot()
         except Exception:
             result['routing'] = {'error': 'Состояние маршрутов недоступно; изменения запрещены'}
-        for key, read in (('protocols', protocols.status), ('amnezia_users', amnezia.users)):
+        for key, read in (('protocols', protocols.status), ('amnezia_users', amnezia.users), ('cdn_users', cdn.users)):
             try:
                 result[key] = read()
             except PolicyError as exc:
@@ -32,6 +33,8 @@ def dispatch(op, data):
         return result
     if op.startswith('protocols.'):
         return protocols.dispatch(op, data, agent)
+    if op.startswith('cdn.'):
+        return cdn.dispatch(op, data)
     if op.startswith('amnezia.'):
         # Clients connect to the same public hostname as the other protocols.
         return amnezia.dispatch(op, data, urlsplit(agent.ORIGIN).hostname)

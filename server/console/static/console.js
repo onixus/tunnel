@@ -159,6 +159,7 @@ function overview() {
   const h = Array.isArray(state.hysteria_users) ? state.hysteria_users : [],
     u = state.users || [],
     awg = Array.isArray(state.amnezia_users) ? state.amnezia_users : [],
+    cdn = Array.isArray(state.cdn_users) ? state.cdn_users : [],
     r = state.routing || {},
     services = state.services || {};
   return (
@@ -167,10 +168,11 @@ function overview() {
       "Пользователи, доступ и выходные узлы вашей VPN-инфраструктуры.",
       pill("active", "ONIXUS-RF"),
     ) +
-    `<div class="stats"><div class="stat"><label>УЧЁТНЫЕ ЗАПИСИ</label><strong>${u.length + h.length + awg.length}</strong><small>${u.length} TrustTunnel · ${h.length} Hysteria · ${awg.length} AmneziaWG</small></div><div class="stat"><label>КЛЮЧИ TRUSTTUNNEL</label><strong>${(state.keys || []).filter((k) => !k.revoked_at).length}</strong><small>Действующие учётные данные</small></div><div class="stat"><label>ВЫХОДЫ HYSTERIA</label><strong>${r.exits?.length ?? "—"}</strong><small>Выбран: ${esc(r.selected || "неизвестно")}</small></div><div class="stat"><label>УСТРОЙСТВА ПОРТАЛА</label><strong>${(state.devices || []).filter((d) => !d.revoked_at).length}</strong><small>Регистрации клиентов</small></div></div><div class="grid"><div class="card"><h2>Карта выходных узлов</h2><p class="subtitle">Текущая политика Hysteria 2</p><div class="topology"><div class="node current"><strong>onixus-rf</strong><small>Входящий VPN</small>${pill("active", "INGRESS")}</div><div class="flow">→</div><div class="exit-stack">${(r.exits || []).map((e) => `<div class="node ${e.id === r.selected ? "current" : ""}"><strong>${esc(e.host)}</strong><small>${esc(e.via)}</small>${pill(e.id === r.selected ? "active" : "queued", e.id === r.selected ? "ВЫБРАН" : "ДОСТУПЕН ДЛЯ ВЫБОРА")}</div>`).join("") || '<p class="error">Нет данных агента</p>'}</div></div><div class="note">TrustTunnel и сам сервер выходят напрямую. Исключения Hysteria обрабатываются раньше общего маршрута. Доступность выходов проверяется отдельно.</div>${btn("Управлять маршрутами →", "navigate", 'data-target="routing"', "subtle")}</div><div class="stack"><div class="card"><h2>Сервисы</h2>${[
+    `<div class="stats"><div class="stat"><label>УЧЁТНЫЕ ЗАПИСИ</label><strong>${u.length + h.length + awg.length + cdn.length}</strong><small>${u.length} TrustTunnel · ${h.length} Hysteria · ${awg.length} AmneziaWG · ${cdn.length} CDN</small></div><div class="stat"><label>КЛЮЧИ TRUSTTUNNEL</label><strong>${(state.keys || []).filter((k) => !k.revoked_at).length}</strong><small>Действующие учётные данные</small></div><div class="stat"><label>ВЫХОДЫ HYSTERIA</label><strong>${r.exits?.length ?? "—"}</strong><small>Выбран: ${esc(r.selected || "неизвестно")}</small></div><div class="stat"><label>УСТРОЙСТВА ПОРТАЛА</label><strong>${(state.devices || []).filter((d) => !d.revoked_at).length}</strong><small>Регистрации клиентов</small></div></div><div class="grid"><div class="card"><h2>Карта выходных узлов</h2><p class="subtitle">Текущая политика Hysteria 2</p><div class="topology"><div class="node current"><strong>onixus-rf</strong><small>Входящий VPN</small>${pill("active", "INGRESS")}</div><div class="flow">→</div><div class="exit-stack">${(r.exits || []).map((e) => `<div class="node ${e.id === r.selected ? "current" : ""}"><strong>${esc(e.host)}</strong><small>${esc(e.via)}</small>${pill(e.id === r.selected ? "active" : "queued", e.id === r.selected ? "ВЫБРАН" : "ДОСТУПЕН ДЛЯ ВЫБОРА")}</div>`).join("") || '<p class="error">Нет данных агента</p>'}</div></div><div class="note">TrustTunnel и сам сервер выходят напрямую. Исключения Hysteria обрабатываются раньше общего маршрута. Доступность выходов проверяется отдельно.</div>${btn("Управлять маршрутами →", "navigate", 'data-target="routing"', "subtle")}</div><div class="stack"><div class="card"><h2>Сервисы</h2>${[
       ["Hysteria 2", "hysteria", "QUIC / UDP · 443"],
       ["TrustTunnel", "trusttunnel", "HTTP/2 + QUIC · 8443"],
       ["AmneziaWG 3.1", "amnezia", "WireGuard с маскировкой · UDP"],
+      ["VLESS через CDN", "cdn", "Xray · WebSocket/XHTTP · TCP"],
     ]
       .map(
         ([n, k, d]) =>
@@ -183,14 +185,15 @@ function overview() {
 }
 function users() {
   const h = Array.isArray(state.hysteria_users) ? state.hysteria_users : [],
-    awg = Array.isArray(state.amnezia_users) ? state.amnezia_users : [];
+    awg = Array.isArray(state.amnezia_users) ? state.amnezia_users : [],
+    cdn = Array.isArray(state.cdn_users) ? state.cdn_users : [];
   return (
     heading(
       "Пользователи",
       "Учётные записи всех VPN. Идентичности разных протоколов показаны отдельно.",
       btn("+ Добавить", "new-user", "", "primary"),
     ) +
-    `<div class="toolbar"><input id="user-search" placeholder="Поиск по имени или e-mail" aria-label="Поиск пользователей"><select id="user-filter" aria-label="Протокол"><option value="">Все протоколы</option><option>TrustTunnel</option><option>Hysteria</option><option>AmneziaWG</option></select></div>` +
+    `<div class="toolbar"><input id="user-search" placeholder="Поиск по имени или e-mail" aria-label="Поиск пользователей"><select id="user-filter" aria-label="Протокол"><option value="">Все протоколы</option><option>TrustTunnel</option><option>Hysteria</option><option>AmneziaWG</option><option>CDN</option></select></div>` +
     table(
       ["Пользователь", "Протокол", "Доступ", "Использование", "Управление"],
       [
@@ -205,6 +208,10 @@ function users() {
         ...awg.map(
           (u) =>
             `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="AmneziaWG"><td>${esc(u.username)}<small>#${u.id} · ${esc(u.address)}</small></td><td>${pill("running", "AmneziaWG")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>${bytes(u.download + u.upload)}<small>${u.handshake ? "Связь " + new Date(u.handshake * 1000).toLocaleString("ru") : "Ещё не подключался"}</small></td><td>${btn("Конфиг", "export", `data-source="amnezia" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="amnezia" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="amnezia" data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="amnezia" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="amnezia" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="amnezia" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
+        ),
+        ...cdn.map(
+          (u) =>
+            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="CDN"><td>${esc(u.username)}<small>#${u.id} · с ${esc(u.created)}</small></td><td>${pill("running", "VLESS · CDN")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>—</td><td>${btn("Ссылка", "export", `data-source="cdn" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="cdn" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="cdn" data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="cdn" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="cdn" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="cdn" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
         ),
       ],
     ) +
@@ -421,14 +428,14 @@ async function handle(b) {
   if (a === "new-user") {
     modal(
       "Добавить пользователя",
-      `<form id="user-form"><label class="field">Протокол<select name="source"><option value="trusttunnel">TrustTunnel / R-TrustTunnel</option><option value="hysteria">Hysteria</option><option value="amnezia">AmneziaWG 3.1</option></select></label><label class="field">E-mail для TrustTunnel / логин для Hysteria и AmneziaWG<input name="name" required maxlength="200"></label><div class="note">TrustTunnel: после создания задайте пароль и выпустите ключ. Hysteria: автоматически создаётся ключ на 365 дней, до 3 устройств. AmneziaWG: создаются ключи и адрес в туннеле; протокол должен быть установлен в разделе «Протоколы».</div><button type="submit" class="primary">Создать</button></form>`,
+      `<form id="user-form"><label class="field">Протокол<select name="source"><option value="trusttunnel">TrustTunnel / R-TrustTunnel</option><option value="hysteria">Hysteria</option><option value="amnezia">AmneziaWG 3.1</option><option value="cdn">VLESS через CDN</option></select></label><label class="field">E-mail для TrustTunnel / логин для Hysteria, AmneziaWG и CDN<input name="name" required maxlength="200"></label><div class="note">TrustTunnel: после создания задайте пароль и выпустите ключ. Hysteria: автоматически создаётся ключ на 365 дней, до 3 устройств. AmneziaWG: создаются ключи и адрес в туннеле; протокол должен быть установлен в разделе «Протоколы». CDN: создаётся UUID VLESS; ссылка выдаётся после указания домена CDN в «Протоколах».</div><button type="submit" class="primary">Создать</button></form>`,
     );
     formSubmit("user-form", (f) =>
       job(
         f.get("source") + ".create",
         f.get("source") === "hysteria"
           ? { username: f.get("name"), days: 365, devices: 3 }
-          : f.get("source") === "amnezia"
+          : ["amnezia", "cdn"].includes(f.get("source"))
             ? { username: f.get("name") }
             : { email: f.get("name") },
       ),
@@ -508,14 +515,14 @@ async function handle(b) {
       user =
         source === "trusttunnel"
           ? (state.users || []).find((u) => u.id === id)
-          : ((v) => (Array.isArray(v) ? v : []))(source === "amnezia" ? state.amnezia_users : state.hysteria_users).find((u) => u.id === id),
+          : ((v) => (Array.isArray(v) ? v : []))(source === "amnezia" ? state.amnezia_users : source === "cdn" ? state.cdn_users : state.hysteria_users).find((u) => u.id === id),
       email = c.email || (source === "trusttunnel" ? user?.email : ""),
       chat = c.chat_id,
       option = (value, label, address, extra = "") =>
         `<label><input type="checkbox" name="channel" value="${value}" ${address ? "checked" : "disabled"}> ${label}: ${address ? esc(address) : "не задан"}${extra}</label>`;
     modal(
       "Отправить конфигурацию",
-      `<form id="send-config-form"><p>${esc({ hysteria: "Hysteria", amnezia: "AmneziaWG" }[source] || "TrustTunnel")} · ${esc(user?.email || user?.username || "#" + id)}</p>${option("email", "E-mail", email, state.smtp ? "" : " <small>(SMTP не настроен)</small>")}${option("telegram", "Telegram", chat)}<div class="note">Будут отправлены ссылка, QR-код и файл конфигурации со всеми данными доступа${source === "trusttunnel" ? " для каждого действующего ключа" : ""}. Получатель Telegram должен заранее открыть бота и нажать Start (бот сообщит его ID). Адреса меняются кнопкой «Контакт».</div><div class="actions"><button type="submit" class="primary">Отправить</button></div></form>`,
+      `<form id="send-config-form"><p>${esc({ hysteria: "Hysteria", amnezia: "AmneziaWG", cdn: "VLESS через CDN" }[source] || "TrustTunnel")} · ${esc(user?.email || user?.username || "#" + id)}</p>${option("email", "E-mail", email, state.smtp ? "" : " <small>(SMTP не настроен)</small>")}${option("telegram", "Telegram", chat)}<div class="note">Будут отправлены ссылка, QR-код и файл конфигурации со всеми данными доступа${source === "trusttunnel" ? " для каждого действующего ключа" : ""}. Получатель Telegram должен заранее открыть бота и нажать Start (бот сообщит его ID). Адреса меняются кнопкой «Контакт».</div><div class="actions"><button type="submit" class="primary">Отправить</button></div></form>`,
     );
     formSubmit("send-config-form", async (f) => {
       const channels = f.getAll("channel");
