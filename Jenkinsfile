@@ -50,7 +50,11 @@ pipeline {
                         -v tunnel-server-ci-target:/ci-target \
                         -e CARGO_TARGET_DIR=/ci-target \
                         -e "TMPDIR=$WORKSPACE/.ci-tmp" \
-                        "tunnel-ci:$BUILD_NUMBER" bash ci/test-server.sh container
+                        -e "CI_HOST_UID=$(id -u)" -e "CI_HOST_GID=$(id -g)" \
+                        "tunnel-ci:$BUILD_NUMBER" bash -c '
+                            trap '\''chown -R "$CI_HOST_UID:$CI_HOST_GID" "$PWD"'\'' EXIT
+                            bash ci/test-server.sh container
+                        '
                     # Run Docker fixture orchestration on the agent; the test
                     # container does not need access to the host Docker socket.
                     python3 -m venv .acceptance-venv
