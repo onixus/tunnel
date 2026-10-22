@@ -45,7 +45,7 @@ pipeline {
                     docker build -f ci/Dockerfile -t "tunnel-ci:$BUILD_NUMBER" .
                     docker image inspect --format '{{.Id}}' "tunnel-ci:$BUILD_NUMBER" > reports/test-image.txt
                     mkdir -p .ci-tmp
-                    docker run --rm --network host \
+                    docker run --rm --network host --shm-size=1g \
                         -v "$WORKSPACE:$WORKSPACE:z" -w "$WORKSPACE" \
                         -v tunnel-server-ci-target:/ci-target \
                         -e CARGO_TARGET_DIR=/ci-target \
