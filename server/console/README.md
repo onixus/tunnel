@@ -27,6 +27,29 @@ legacy settings and client/profile APIs remain available.
   a device also revokes its associated managed keys. Previously downloaded external
   profiles cannot be remotely erased; rotate their source credentials separately.
 
+## Users
+
+The «Пользователи» page manages people, not protocol rows. A person is a nick plus
+contacts (`people`, `person_accounts` in `console.db`) and owns at most one account per
+protocol. Creating a person (`person.create` job) derives every login from the nick:
+TrustTunnel uses the person's e-mail, or `nick@CONSOLE_USER_DOMAIN` (default: host of
+`CONSOLE_ORIGIN`) and gets a first key; Hysteria uses the nick, padded to `nick-vpn`
+below 6 characters (365 days, 3 devices); AmneziaWG and CDN use the nick. Logins taken
+in any selected protocol are refused before the job is queued. A partial failure keeps
+what was created; missing protocols are added from the person card (`person.add`).
+
+The card holds contacts (applied to every linked account, so delivery and campaigns
+keep reading per-account contacts), each account's actions, TrustTunnel keys and
+R-TrustTunnel devices. «Привязать устройство» issues the same one-time, 180-second
+enrollment code as the client portal (`/e#code` link, QR and `ttsuperlink://`); only
+the code hash is stored.
+
+Accounts, keys, devices and whole people can be deleted, not only revoked. Deleting a
+TrustTunnel account revokes its active devices through the portal first; a device key
+is deleted only with its device; a device is revoked before its rows are removed.
+Older accounts without a person are listed separately and linked explicitly; nothing
+is merged by matching names.
+
 ## Routing
 
 The existing deployment has **Hysteria application-level egress** through primary

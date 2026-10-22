@@ -256,7 +256,7 @@ def dispatch(op, data):
         state['next_id'] += 1
         save(state)
         restart()
-        return {'message': 'Пользователь CDN создан'}
+        return {'message': 'Пользователь CDN создан', 'id': state['next_id'] - 1}
     id = data.get('id')
     if type(id) is not int:
         raise PolicyError('Некорректный ID')
@@ -269,6 +269,8 @@ def dispatch(op, data):
         user['enabled'] = op == 'cdn.unblock'
     elif op == 'cdn.rotate':
         user['uuid'] = str(uuid.uuid4())
+    elif op == 'cdn.delete':
+        state['users'].remove(user)
     else:
         raise PolicyError('Операция запрещена')
     save(state)

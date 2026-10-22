@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from urllib.parse import urlsplit, parse_qs, urlencode
+from urllib.parse import urlsplit, parse_qs, urlencode, quote
 import http.client
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -46,6 +46,8 @@ def init():
         CREATE TABLE IF NOT EXISTS contacts(source TEXT, user_id INTEGER, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,user_id));
         CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, actor INTEGER, channel TEXT, subject TEXT, body TEXT, state TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS deliveries(campaign TEXT, recipient TEXT, state TEXT, error TEXT, PRIMARY KEY(campaign,recipient));
+        CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS person_accounts(person INTEGER NOT NULL, source TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(source,user_id));
         ''')
         c.execute("UPDATE jobs SET state='unknown',result=? WHERE state='running'",(json.dumps({'message':'Сервис перезапущен. Проверьте состояние перед повтором.'}),))
         c.execute("UPDATE deliveries SET state='unknown',error='Прервано; автоматический повтор отключён' WHERE state='sending'")
@@ -135,7 +137,98 @@ def source_user(source,id):
         raise HTTPException(404,'Пользователь не найден')
     raise HTTPException(422,'Неизвестный источник')
 
+# One person (nick + contacts) owns at most one account per protocol. Accounts are
+# linked explicitly, never merged by matching names; logins are derived from the nick.
+NICK=re.compile(r'[a-z0-9][a-z0-9_-]{2,31}')
+NAMES={'trusttunnel':'TrustTunnel','hysteria':'Hysteria','amnezia':'AmneziaWG','cdn':'CDN'}
+
+def user_domain():
+    return os.environ.get('CONSOLE_USER_DOMAIN') or urlsplit(os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).hostname
+
+def logins(nick,email=''):
+    # Hysteria requires 6+ characters; TrustTunnel requires an e-mail-shaped login.
+    return {'trusttunnel':email or f'{nick}@{user_domain()}','hysteria':nick if len(nick)>=6 else nick+'-vpn','amnezia':nick,'cdn':nick}
+
+def person(id):
+    with connect() as c:
+        row=c.execute('SELECT * FROM people WHERE id=?',(id,)).fetchone()
+        if not row: raise RuntimeError('Пользователь не найден')
+        return dict(row,accounts={r['source']:r['user_id'] for r in c.execute('SELECT source,user_id FROM person_accounts WHERE person=?',(id,))})
+
+def link(pid,source,uid):
+    with connect() as c:
+        p=c.execute('SELECT * FROM people WHERE id=?',(pid,)).fetchone()
+        c.execute('INSERT INTO person_accounts VALUES(?,?,?)',(pid,source,uid))
+        # Delivery and campaigns keep reading per-account contacts.
+        c.execute('INSERT OR REPLACE INTO contacts VALUES(?,?,?,?,?)',(source,uid,p['email'] or '',p['chat_id'],p['consent']))
+
+def unlink(source,uid):
+    with connect() as c:
+        c.execute('DELETE FROM person_accounts WHERE source=? AND user_id=?',(source,uid))
+        c.execute('DELETE FROM contacts WHERE source=? AND user_id=?',(source,uid))
+
+def create_account(source,p,admin):
+    login=logins(p['nick'],p['email'] or '')[source]
+    if source=='trusttunnel':
+        legacy(admin,'users/create',{'email':login,'password':secrets.token_urlsafe(24)})
+        uid=db.get_user_by_email(login)['id']
+        legacy(admin,f'users/{uid}/configs',{'label':'Основной'})
+        return uid
+    uid=agent(source+'.create',{'username':login,'days':365,'devices':3} if source=='hysteria' else {'username':login}).get('id')
+    if uid is None: raise RuntimeError(NAMES[source]+': учётка создана, но не найдена. Привяжите её вручную.')
+    return uid
+
+def delete_account(source,uid,admin):
+    if source=='trusttunnel':
+        if not db.get_user(uid): return unlink(source,uid)
+        with db.connect() as c:
+            devices=[r['id'] for r in c.execute('SELECT id FROM app_devices WHERE user_id=? AND revoked_at IS NULL',(uid,))]
+            integrated=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rtrust_credential_operations'").fetchone()
+        # Device credentials are revoked through their owner before the account disappears.
+        for d in devices: managed_device_revoke(admin,d) if integrated else db.revoke_device(d)
+        legacy(admin,f'users/{uid}/delete',{})
+    else: agent(source+'.delete',{'id':uid})
+    unlink(source,uid)
+
+def each_account(p,fn):
+    done,failed=[],[]
+    for source,uid in sorted(p['accounts'].items()):
+        try: fn(source,uid); done.append(NAMES[source])
+        except Exception as exc: failed.append(NAMES[source]+': '+(str(exc) if isinstance(exc,RuntimeError) else 'ошибка'))
+    return done,failed
+
+def person_perform(action,data,admin):
+    if action=='person.create':
+        with connect() as c:
+            pid=c.execute('INSERT INTO people(nick,email,chat_id,consent) VALUES(?,?,?,?)',(data['nick'],data['email'],data['chat_id'],int(data['consent']))).lastrowid
+        p=person(pid); done,failed=[],[]
+        for source in data['protocols']:
+            try: link(pid,source,create_account(source,p,admin)); done.append(NAMES[source])
+            except Exception as exc: failed.append(NAMES[source]+': '+(str(exc) if isinstance(exc,RuntimeError) else 'ошибка'))
+        if failed: raise RuntimeError(f"Пользователь {data['nick']} создан частично. Готово: {', '.join(done) or 'ничего'}. Ошибки: {'; '.join(failed)}. Недостающие протоколы добавьте в карточке пользователя.")
+        return {'message':f"Пользователь {data['nick']} создан: {', '.join(done)}",'id':pid}
+    p=person(data['id'])
+    if action=='person.add':
+        if data['source'] in p['accounts']: raise RuntimeError('У пользователя уже есть учётка '+NAMES[data['source']])
+        link(p['id'],data['source'],create_account(data['source'],p,admin))
+        return {'message':NAMES[data['source']]+': учётка создана'}
+    if action in ('person.block','person.unblock'):
+        done,failed=each_account(p,lambda source,uid:perform(source+action[6:],{'id':uid},admin))
+    elif action=='person.delete':
+        done,failed=each_account(p,lambda source,uid:delete_account(source,uid,admin))
+        if not failed:
+            with connect() as c: c.execute('DELETE FROM people WHERE id=?',(p['id'],))
+            return {'message':f"Пользователь {p['nick']} удалён вместе с учётками: {', '.join(done) or 'нет'}"}
+    else: raise RuntimeError('Операция не поддерживается')
+    if failed: raise RuntimeError('Выполнено не полностью. Готово: '+(', '.join(done) or 'ничего')+'. Ошибки: '+'; '.join(failed))
+    return {'message':'Изменение применено: '+(', '.join(done) or 'нет учёток')}
+
 def perform(action,data,admin):
+    if action.startswith('person.'): return person_perform(action,data,admin)
+    if action in ('hysteria.delete','amnezia.delete','cdn.delete','trusttunnel.delete'):
+        source=action.split('.')[0]
+        delete_account(source,data['id'],admin)
+        return {'message':NAMES[source]+': учётка удалена'}
     if action.startswith(('routes.','updates.','hysteria.','adblock.','amnezia.','cdn.','protocols.')): return agent(action,data)
     if action=='trusttunnel.create':
         # Password is generated at execution, never stored in the job or audit.
@@ -155,6 +248,21 @@ def perform(action,data,admin):
         if integrated:return managed_device_revoke(admin,device['id'])
         db.revoke_device(device['id']); user=db.get_user(device['user_id'])
         return legacy(admin,f"users/{user['id']}/status",{'status':user['status']})
+    if action in ('trusttunnel.key-delete','trusttunnel.device-delete'):
+        if action=='trusttunnel.key-delete':
+            cfg=db.get_config(data['id'])
+            if not cfg: raise RuntimeError('Ключ не найден')
+            if cfg['device_id'] is not None: raise RuntimeError('Ключ принадлежит устройству: удалите устройство.')
+            legacy(admin,f"configs/{cfg['id']}/delete",{})
+            return {'message':'Ключ удалён'}
+        device=db.get_device(data['id'])
+        if not device: raise RuntimeError('Устройство не найдено')
+        # Revocation reaches the endpoint first; only revoked rows are removed.
+        if not device['revoked_at']: perform('trusttunnel.device-revoke',{'id':device['id']},admin)
+        with db.connect() as c:
+            c.execute('DELETE FROM configs WHERE device_id=? AND revoked_at IS NOT NULL',(device['id'],))
+            c.execute('DELETE FROM app_devices WHERE id=? AND revoked_at IS NOT NULL',(device['id'],))
+        return {'message':'Устройство удалено'}
     if action=='trusttunnel.key':
         source_user('trusttunnel',data['id'])
         return legacy(admin,f"users/{data['id']}/configs",{'label':'Unified console'})
@@ -258,22 +366,42 @@ def state(request:Request):
     except Exception: snapshot={'error':'Агент недоступен. Операции с узлами недоступны.'}
     with db.connect() as c:
         users=[dict(r) for r in c.execute('SELECT id,email,status,created_at FROM users ORDER BY id')]
-        keys=[dict(r) for r in c.execute('SELECT c.id,c.user_id,c.tt_username,c.label,c.created_at,c.revoked_at,u.email FROM configs c JOIN users u ON u.id=c.user_id ORDER BY c.id')]
+        keys=[dict(r) for r in c.execute('SELECT c.id,c.user_id,c.device_id,c.tt_username,c.label,c.created_at,c.revoked_at,u.email FROM configs c JOIN users u ON u.id=c.user_id ORDER BY c.id')]
         devices=[dict(r) for r in c.execute('SELECT id,user_id,name,platform,last_seen_at,revoked_at FROM app_devices ORDER BY id')]
     with connect() as c:
         snapshot.update(users=users,keys=keys,devices=devices,contacts=[dict(r) for r in c.execute('SELECT * FROM contacts')],
             jobs=[dict(r) for r in c.execute('SELECT id,action,state,result,created,updated FROM jobs ORDER BY created DESC,rowid DESC LIMIT 40')],
             campaigns=[dict(r) for r in c.execute('SELECT id,channel,subject,state,created FROM campaigns ORDER BY created DESC')],
-            audit=[dict(r) for r in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 60')],smtp=mailer.is_configured())
+            audit=[dict(r) for r in c.execute('SELECT * FROM audit ORDER BY id DESC LIMIT 60')],smtp=mailer.is_configured(),
+            people=[dict(r,accounts={a['source']:a['user_id'] for a in c.execute('SELECT source,user_id FROM person_accounts WHERE person=?',(r['id'],))}) for r in c.execute('SELECT * FROM people ORDER BY nick')],
+            user_domain=user_domain())
     snapshot['observed_at']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     return snapshot
 
 ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
          'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send',
          'amnezia.create','amnezia.block','amnezia.unblock','amnezia.rotate','protocols.check','protocols.install','protocols.update',
-         'cdn.create','cdn.block','cdn.unblock','cdn.rotate','cdn.configure'}
+         'cdn.create','cdn.block','cdn.unblock','cdn.rotate','cdn.configure',
+         'hysteria.delete','trusttunnel.delete','amnezia.delete','cdn.delete','trusttunnel.key-delete','trusttunnel.device-delete',
+         'person.create','person.add','person.block','person.unblock','person.delete'}
 PROTOCOLS=('hysteria','trusttunnel','amnezia','cdn')
 CDN_SETTINGS={'domain','address','client_port','origin_port','origin_tls','transport','path','regenerate_path'}
+
+def check_logins(nick,email,protocols,check_nick=True):
+    if check_nick:
+        with connect() as c:
+            if c.execute('SELECT 1 FROM people WHERE nick=?',(nick,)).fetchone(): raise HTTPException(409,f'Пользователь «{nick}» уже существует')
+    names=logins(nick,email); busy=[]
+    if 'trusttunnel' in protocols and db.get_user_by_email(names['trusttunnel']): busy.append('TrustTunnel ('+names['trusttunnel']+')')
+    remote=[s for s in protocols if s!='trusttunnel']
+    if remote:
+        try: snapshot=agent('snapshot')
+        except Exception: raise HTTPException(503,'Агент недоступен: нельзя проверить логины Hysteria/AmneziaWG/CDN') from None
+        for source in remote:
+            users=snapshot.get(source+'_users')
+            if not isinstance(users,list): raise HTTPException(409,NAMES[source]+' сейчас недоступен. Снимите этот протокол или установите его в разделе «Протоколы».')
+            if any(u.get('username','').lower()==names[source].lower() for u in users): busy.append(NAMES[source]+' ('+names[source]+')')
+    if busy: raise HTTPException(409,'Логин уже занят: '+', '.join(busy)+'. Выберите другой ник или привяжите существующую учётку.')
 
 def validate_action(action,data,*,check_state=True):
     if action not in ACTIONS: raise HTTPException(422,'Неизвестная операция')
@@ -288,7 +416,24 @@ def validate_action(action,data,*,check_state=True):
             if not recipients[ch]: raise HTTPException(422,('E-mail' if ch=='email' else 'Telegram ID')+' получателя не задан. Заполните контакт пользователя.')
         if 'email' in clean['channels'] and not mailer.is_configured(): raise HTTPException(409,'SMTP не настроен')
         return clean
-    if action.endswith(('.block','.unblock','.rotate','.key','.revoke','.device-revoke')):
+    if action=='person.create':
+        nick=str(data.get('nick','')).strip().lower(); email=str(data.get('email') or '').strip().lower(); chat=data.get('chat_id'); protocols=data.get('protocols')
+        if not NICK.fullmatch(nick): raise HTTPException(422,'Ник: 3–32 символа — латиница в нижнем регистре, цифры, «-» и «_»')
+        if email and not re.fullmatch(r'[^\s@<>\r\n]{1,100}@[^\s@<>\r\n]{1,150}\.[^\s@<>\r\n]{2,30}',email): raise HTTPException(422,'Некорректный e-mail')
+        if chat is not None and (type(chat) is not int or not 0<chat<2**53): raise HTTPException(422,'Нужен положительный Telegram user ID')
+        if not isinstance(protocols,list) or not protocols or len(set(protocols))!=len(protocols) or not set(protocols)<=set(PROTOCOLS): raise HTTPException(422,'Выберите хотя бы один протокол')
+        clean={'nick':nick,'email':email,'chat_id':chat,'consent':data.get('consent') is True,'protocols':sorted(protocols)}
+        if check_state: check_logins(nick,email,clean['protocols'])
+        return clean
+    if action=='person.add':
+        if type(data.get('id')) is not int or data.get('source') not in PROTOCOLS or set(data)!={'id','source'}: raise HTTPException(422,'Некорректные параметры')
+        if check_state:
+            try: p=person(data['id'])
+            except RuntimeError: raise HTTPException(404,'Пользователь не найден') from None
+            if data['source'] in p['accounts']: raise HTTPException(409,'У пользователя уже есть учётка '+NAMES[data['source']])
+            check_logins(p['nick'],p['email'] or '',[data['source']],check_nick=False)
+        return {'id':data['id'],'source':data['source']}
+    if action.endswith(('.block','.unblock','.rotate','.key','.revoke','.device-revoke','.delete','-delete')):
         if type(data.get('id')) is not int or data['id']<=0: raise HTTPException(422,'Некорректный ID')
         return {'id':data['id']}
     if action=='trusttunnel.create':
@@ -386,6 +531,70 @@ async def export(request:Request):
     else: raise HTTPException(422,'Неизвестный источник')
     audit(admin,'key.export',q['source']+':'+str(q['id']))
     return await run_in_threadpool(with_qr, result) if q.get('qr') else result
+
+ENROLL_TTL=180
+
+@app.post('/console/api/enroll')
+async def enroll(request:Request):
+    admin=actor(request,True); q=await body(request)
+    if type(q.get('id')) is not int: raise HTTPException(422,'Некорректный ID')
+    user=source_user('trusttunnel',q['id'])
+    if user['status']!='active': raise HTTPException(409,'Пользователь заблокирован: сначала включите доступ')
+    raw=security.new_token(24)
+    db.create_enroll_code(user['id'],security.hash_api_token(raw),ENROLL_TTL)
+    base=(db.get_setting('portal_url') or os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).rstrip('/')
+    # Same invitation as the client portal: the code stays in the fragment, out of logs.
+    link=f'{base}/e#{raw}'
+    audit(admin,'device.enroll-code',str(user['id']))
+    result=await run_in_threadpool(with_qr,{'content':link})
+    return dict(result,app_link=f"ttsuperlink://enroll?server={quote(base,safe='')}#{raw}",expires_in=ENROLL_TTL)
+
+@app.post('/console/api/people/contact')
+async def person_contact(request:Request):
+    admin=actor(request,True); q=await body(request)
+    if type(q.get('id')) is not int: raise HTTPException(422,'Некорректный ID')
+    try: p=person(q['id'])
+    except RuntimeError: raise HTTPException(404,'Пользователь не найден') from None
+    email=str(q.get('email') or '').strip(); chat=q.get('chat_id')
+    if email and not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+',email): raise HTTPException(422,'Некорректный e-mail')
+    if chat is not None and (type(chat) is not int or not 0<chat<2**53): raise HTTPException(422,'Нужен положительный Telegram user ID')
+    consent=1 if q.get('consent') is True else 0
+    with connect() as c:
+        c.execute('UPDATE people SET email=?,chat_id=?,consent=? WHERE id=?',(email,chat,consent,p['id']))
+        for source,uid in p['accounts'].items(): c.execute('INSERT OR REPLACE INTO contacts VALUES(?,?,?,?,?)',(source,uid,email,chat,consent))
+    audit(admin,'person.contact',str(p['id'])); return {'message':'Контакт сохранён'}
+
+@app.post('/console/api/people/link')
+async def person_link(request:Request):
+    # Attaches an existing protocol account; no VPN state changes, so it is synchronous.
+    admin=actor(request,True); q=await body(request); source=q.get('source'); uid=q.get('user_id')
+    if source not in PROTOCOLS or type(uid) is not int: raise HTTPException(422,'Некорректная учётка')
+    user=source_user(source,uid)
+    with connect() as c:
+        if c.execute('SELECT 1 FROM person_accounts WHERE source=? AND user_id=?',(source,uid)).fetchone(): raise HTTPException(409,'Учётка уже привязана')
+    if type(q.get('person')) is int:
+        try: p=person(q['person'])
+        except RuntimeError: raise HTTPException(404,'Пользователь не найден') from None
+        if source in p['accounts']: raise HTTPException(409,'У пользователя уже есть учётка '+NAMES[source])
+        pid=p['id']
+    else:
+        nick=str(q.get('nick','')).strip().lower()
+        if not NICK.fullmatch(nick): raise HTTPException(422,'Ник: 3–32 символа — латиница в нижнем регистре, цифры, «-» и «_»')
+        with connect() as c:
+            if c.execute('SELECT 1 FROM people WHERE nick=?',(nick,)).fetchone(): raise HTTPException(409,f'Пользователь «{nick}» уже существует')
+            # The account's existing contact becomes the person's contact.
+            old=c.execute('SELECT * FROM contacts WHERE source=? AND user_id=?',(source,uid)).fetchone()
+            email=(old['email'] if old else '') or (user.get('email','') if source=='trusttunnel' else '')
+            pid=c.execute('INSERT INTO people(nick,email,chat_id,consent) VALUES(?,?,?,?)',(nick,email,old['chat_id'] if old else None,old['consent'] if old else 0)).lastrowid
+    link(pid,source,uid)
+    audit(admin,'person.link',f'{pid}:{source}:{uid}'); return {'message':'Учётка привязана','id':pid}
+
+@app.post('/console/api/people/unlink')
+async def person_unlink(request:Request):
+    admin=actor(request,True); q=await body(request)
+    if q.get('source') not in PROTOCOLS or type(q.get('user_id')) is not int: raise HTTPException(422,'Некорректная учётка')
+    with connect() as c: c.execute('DELETE FROM person_accounts WHERE source=? AND user_id=?',(q['source'],q['user_id']))
+    audit(admin,'person.unlink',f"{q['source']}:{q['user_id']}"); return {'message':'Учётка отвязана; доступ не изменён'}
 
 @app.post('/console/api/password')
 async def password(request:Request):

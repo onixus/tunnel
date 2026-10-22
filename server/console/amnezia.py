@@ -205,7 +205,7 @@ def dispatch(op, data, host):
                                'created': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())})
         state['next_id'] += 1
         save(state)
-        return {'message': 'Пользователь AmneziaWG создан'}
+        return {'message': 'Пользователь AmneziaWG создан', 'id': state['next_id'] - 1}
     id = data.get('id')
     if type(id) is not int:
         raise PolicyError('Некорректный ID')
@@ -220,6 +220,10 @@ def dispatch(op, data, host):
         peer['private_key'] = genkey()
         peer['public_key'] = pubkey(peer['private_key'])
         peer['psk'] = genkey()
+    elif op == 'amnezia.delete':
+        state['peers'].remove(peer)
+        save(state)
+        return {'message': 'Пользователь AmneziaWG удалён'}
     else:
         raise PolicyError('Операция запрещена')
     save(state)

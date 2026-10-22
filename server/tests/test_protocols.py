@@ -123,9 +123,15 @@ def test_peer_lifecycle_and_secret_boundaries(host):
     rotated = amnezia.load()['peers'][0]
     server = (amnezia.RUNTIME / 'awg0.conf').read_text()
     assert rotated['public_key'] != alice['public_key'] and alice['public_key'] not in server and rotated['public_key'] in server
-    for op, data in (('amnezia.block', {'id': 99}), ('amnezia.block', {'id': '1'}), ('amnezia.delete', {'id': 1})):
+    for op, data in (('amnezia.block', {'id': 99}), ('amnezia.block', {'id': '1'}), ('amnezia.delete', {'id': 99}),
+                     ('amnezia.purge', {'id': 1})):
         with pytest.raises(PolicyError):
             amnezia.dispatch(op, data, 'h')
+    assert amnezia.dispatch('amnezia.delete', {'id': 1}, 'h')['message']
+    assert [p['id'] for p in amnezia.load()['peers']] == [2]
+    assert rotated['public_key'] not in (amnezia.RUNTIME / 'awg0.conf').read_text()
+    # Freed IDs are never reused: a stale link must not point at a new person.
+    assert amnezia.dispatch('amnezia.create', {'username': 'carol'}, 'h')['id'] == 3
 
 
 def test_live_reload_uses_one_fixed_command(host):
@@ -607,9 +613,14 @@ def test_cdn_users_links_and_server_config(host):
     assert cdn.load()['users'][0]['uuid'] != alice['uuid']
     assert [u['username'] for u in cdn.users()] == ['alice', 'bob'] and 'uuid' not in json.dumps(cdn.users())
     for op, data in (('cdn.create', {'username': 'alice'}), ('cdn.create', {'username': 'x'}), ('cdn.block', {'id': '1'}),
-                     ('cdn.delete', {'id': 1})):
+                     ('cdn.delete', {'id': 99}), ('cdn.purge', {'id': 1})):
         with pytest.raises(PolicyError):
             cdn.dispatch(op, data)
+    uuid = cdn.load()['users'][0]['uuid']
+    cdn.dispatch('cdn.delete', {'id': 1})
+    assert [u['username'] for u in cdn.users()] == ['bob']
+    assert uuid not in (cdn.RUNTIME / 'config.json').read_text()
+    assert cdn.dispatch('cdn.create', {'username': 'carol'})['id'] == 3
 
 
 XRAY = {'version': '25.10.15', 'tag': 'v25.10.15', 'sha256': '2' * 64}
