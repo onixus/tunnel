@@ -12,7 +12,7 @@
 .unit-list { margin-bottom:18px; }
 .container-table table { table-layout:fixed; min-width:900px; white-space:normal; }
 .container-table th, .container-table td { padding:12px 8px; overflow-wrap:anywhere; }
-.container-table th { font-size:12px; }
+.container-table th { font-size:12px; letter-spacing:0; }
 .container-table th:nth-child(1) { width:18%; }
 .container-table th:nth-child(2) { width:22%; }
 .container-table th:nth-child(3), .container-table th:nth-child(4) { width:13%; }

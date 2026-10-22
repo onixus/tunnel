@@ -230,6 +230,7 @@ def test_console_uses_available_desktop_width(page, mode, width):
     region = page.get_by_role('region', name='Контейнеры', exact=True)
     assert region.evaluate('(e) => e.scrollWidth <= e.clientWidth')
     assert region.locator('table').evaluate('(e) => e.scrollWidth <= e.clientWidth')
+    assert region.locator('th').nth(4).evaluate('(e) => {const range=document.createRange();range.selectNodeContents(e);return range.getClientRects().length}') == 1
     assert page.locator('tbody tr').count() == 6
     assert_contrast(page)
     screenshot(page, f'protocols-wide-{width}-{mode}')
