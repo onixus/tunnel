@@ -12,5 +12,12 @@
       "name": "reserve", "type": "socks5",
       "socks5": {"addr": "10.254.78.2:1080", "username": "hysteria", "password": "REPLACE_LOCALLY_RESERVE_SOCKS_PASSWORD"}
     }
+  },
+  "clean": {
+    "expected_ip": "REPLACE_LOCALLY_ISP_PROXY_EGRESS_IP",
+    "outbound": {
+      "name": "clean", "type": "socks5",
+      "socks5": {"addr": "10.254.78.2:1081", "username": "hysteria", "password": "REPLACE_LOCALLY_CLEAN_SOCKS_PASSWORD"}
+    }
   }
 }

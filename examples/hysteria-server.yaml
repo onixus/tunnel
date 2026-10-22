@@ -5,6 +5,11 @@ acl:
   - local(10.254.77.1, tcp/18082, 127.0.0.1)
   - local(10.254.77.1, tcp/8081, 127.0.0.1)
   - reject(geoip:private)
+  # Optional "clean" exit for anti-bot sensitive sites, see docs/antibot.md. Keep above .ru/CIS.
+  - clean(suffix:arena.net)
+  - clean(suffix:arenanet.com)
+  - clean(suffix:arenanetworks.com)
+  - clean(suffix:guildwars2.com)
   - local(suffix:ru)
   - local(suffix:xn--p1ai)
   - local(geoip:ru)
@@ -33,6 +38,12 @@ outbounds:
   socks5:
     addr: 10.254.77.2:1080
     password: REPLACE_LOCALLY_SOCKS_PASSWORD
+    username: hysteria
+  type: socks5
+- name: clean
+  socks5:
+    addr: 10.254.78.2:1081
+    password: REPLACE_LOCALLY_CLEAN_SOCKS_PASSWORD
     username: hysteria
   type: socks5
 - direct:

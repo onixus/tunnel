@@ -413,6 +413,7 @@ class AgentTests(unittest.TestCase):
         with self.assertRaises(agent.Rejected):agent.dispatch('system.shell',{'command':'id'})
     def test_rules_preserve_grammar(self):
         self.assertEqual(agent.validate_rules([{'target':'reserve','kind':'suffix','value':'hostkey.ru'}]),[('reserve','suffix:hostkey.ru')])
+        self.assertEqual(agent.validate_rules([{'target':'clean','kind':'suffix','value':'arena.net'}]),[('clean','suffix:arena.net')])
         for rule in [{'target':'root','kind':'suffix','value':'x.ru'},{'target':'local','kind':'suffix','value':'ru)\nlocal(all)'},{'target':'reserve','kind':'cidr','value':'10.0.0.1/8'},{'target':'local','kind':'geoip','value':'private'}]:
             with self.assertRaises(agent.Rejected):agent.validate_rules([rule])
     def test_feed_signature_hash_and_downgrade(self):
@@ -451,6 +452,15 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(m.restore.call_args.args[0].read_text(),old)
             self.assertTrue(any(c.args[0][0]=='systemd-run' for c in run.call_args_list))
             self.assertTrue(any(c.args[0][-1].endswith('.timer') for c in run.call_args_list))
+
+    def test_clean_rule_without_profile_never_stops_service(self):
+        from unittest.mock import MagicMock, mock_open
+        temp=Path(TMP.name)/secrets.token_hex(8);temp.mkdir();exits=temp/'exits.json'
+        exits.write_text(json.dumps({'primary':{'outbound':{'name':'primary'},'expected_ip':'192.0.2.1'}}))
+        rules=[{'target':'clean','kind':'suffix','value':'arena.net'}]
+        with patch('builtins.open',mock_open()),patch.object(agent.fcntl,'flock'),patch.object(agent,'route_snapshot',return_value={'revision':'known'}),patch.object(agent,'module_switch',return_value=MagicMock()),patch.object(agent,'EXITS',exits),patch.object(agent,'run') as run:
+            with self.assertRaises(agent.Rejected):agent.apply_routes({'exit':'primary','rules':rules,'revision':'known'})
+            run.assert_not_called()
 
     def test_route_revision_conflict_never_stops_service(self):
         from unittest.mock import mock_open
