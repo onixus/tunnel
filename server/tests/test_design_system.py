@@ -69,7 +69,31 @@ def render_portal(name, templates=None):
 
 
 @pytest.fixture
-def page(tmp_path):
+def console_state():
+    from test_routing_browser import fixture_state
+    data = fixture_state()
+    data['protocols'] = {
+        'checked': '2026-10-23T00:00:00Z',
+        'units': [{'id': 'h-ui', 'title': 'Hysteria 2', 'state': 'active'},
+                  {'id': 'vpn-console-agent', 'title': 'Агент консоли', 'state': 'active'}],
+        'items': [dict(id=name, title=title, runtime=runtime, installed=installed, state='running' if installed else 'absent',
+                       version='1.0.0' if installed else '', latest='2.0.0', update=update,
+                       repo='https://github.com/example/' + name, releases=[{'version': '2.0.0', 'published': '2026-10-23'}])
+                  for name, title, runtime, installed, update in [
+                      ('hysteria', 'Hysteria 2', 'systemd · h-ui', True, True),
+                      ('trusttunnel', 'TrustTunnel', 'docker · trusttunnel-web', True, False),
+                      ('amnezia', 'AmneziaWG 3.1', 'docker · amnezia-awg', False, False),
+                      ('cdn', 'VLESS через CDN', 'docker · xray-cdn', False, False)]],
+        'containers': [dict(name='vpn-console-backup-production-20261023-001122-' + str(i), role='Консоль',
+                            image='registry.example.invalid/onixus/vpn-console@sha256:' + 'a' * 64,
+                            state='running' if i == 0 else 'exited', health='healthy' if i == 0 else 'unhealthy',
+                            restarts=i, since='2026-10-23T00:11:22Z', exit_code=0,
+                            ports=['127.0.0.1:18090->8000/tcp', '[::]:8443->8443/udp']) for i in range(6)]}
+    return data
+
+
+@pytest.fixture
+def page(tmp_path, console_state):
     installed = tmp_path / 'portal'
     shutil.copytree(ROOT / 'server/upstream/app', installed, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     load_apply().apply(ROOT / 'server/upstream/app', installed)
@@ -90,8 +114,7 @@ def page(tmp_path):
                 external.append(req.request.url)
                 return req.abort()
             if path == '/console/api/state':
-                from test_routing_browser import fixture_state
-                return req.fulfill(json=fixture_state())
+                return req.fulfill(json=console_state)
             if path == '/console/':
                 return req.fulfill(body=source(ROOT / 'server/console/templates/index.html').replace(b'{{ csrf }}', b'synthetic'), content_type='text/html', headers={'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:"})
             if path.startswith('/portal/v2/') or path == '/admin/api/agent-routes':
@@ -190,6 +213,78 @@ def test_installed_portal_mobile_navigation(page, mode, width):
     screenshot(page, f'installed-portal-mobile-{width}-{mode}')
 
 
+@pytest.mark.parametrize('mode', ['dark', 'light'])
+@pytest.mark.parametrize('width', [1280, 1920, 2560])
+def test_console_uses_available_desktop_width(page, mode, width):
+    page.set_viewport_size({'width': width, 'height': 1100})
+    page.goto('https://design.example.invalid/console/')
+    theme(page, mode)
+    aside = page.locator('aside').bounding_box()
+    main = page.locator('main').bounding_box()
+    assert main['x'] == aside['width']
+    assert main['width'] == width - aside['width']
+    assert page.locator('.heading').bounding_box()['x'] <= aside['width'] + 40
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    screenshot(page, f'overview-wide-{width}-{mode}')
+    page.locator('nav [data-page=protocols]').click()
+    region = page.get_by_role('region', name='Контейнеры', exact=True)
+    assert region.evaluate('(e) => e.scrollWidth <= e.clientWidth')
+    assert region.locator('table').evaluate('(e) => e.scrollWidth <= e.clientWidth')
+    assert page.locator('tbody tr').count() == 6
+    assert_contrast(page)
+    screenshot(page, f'protocols-wide-{width}-{mode}')
+
+
+@pytest.mark.parametrize('mode', ['dark', 'light'])
+def test_protocol_actions_have_consistent_priority_and_colors(page, console_state, mode):
+    page.goto('https://design.example.invalid/console/')
+    theme(page, mode)
+    page.locator('nav [data-page=protocols]').click()
+    check = page.locator('[data-action=protocol-check]')
+    expect(check).to_have_class('primary')
+    actions = page.locator('[data-action=protocol-install], [data-action=protocol-update]')
+    assert actions.count() == 3
+    colors = actions.evaluate_all('(buttons) => buttons.map(b => {const s=getComputedStyle(b);return [s.color,s.backgroundColor,s.borderColor]})')
+    assert all(color == colors[0] for color in colors)
+    assert page.locator('#content .primary').count() == 1
+    for action in actions.all():
+        expect(action).to_be_enabled()
+        assert_control_boundary(action)
+        action.hover()
+        assert_contrast(page)
+        assert_control_boundary(action)
+        action.focus()
+        page.keyboard.press('Tab')
+        page.keyboard.press('Shift+Tab')
+        assert action.evaluate('(e) => getComputedStyle(e).outlineWidth') == '2px'
+    for name, title in [('amnezia', 'Установить AmneziaWG 3.1'), ('hysteria', 'Обновить Hysteria 2')]:
+        page.locator(f'.protocol-card [data-id={name}]').click()
+        expect(page.locator('#modal-title')).to_have_text(title)
+        expect(page.locator('#protocol-form select[name=version]')).to_have_value('2.0.0')
+        page.locator('#modal').get_by_role('button', name='Закрыть', exact=True).click()
+    # Reordering cards must not change the priority or color of their actions.
+    console_state['protocols']['items'].reverse()
+    page.mouse.move(0, 0)
+    page.locator('#refresh').click()
+    assert actions.evaluate_all('(buttons) => buttons.map(b => {const s=getComputedStyle(b);return [s.color,s.backgroundColor,s.borderColor]})') == colors
+    console_state['jobs'] = [{'action': 'protocols.install', 'state': 'running'}]
+    page.locator('#refresh').click()
+    expect(check).to_be_disabled()
+    for action in actions.all():
+        expect(action).to_be_disabled()
+
+
+def test_protocol_table_remains_keyboard_scrollable_on_mobile(page):
+    page.set_viewport_size({'width': 390, 'height': 844})
+    page.goto('https://design.example.invalid/console/')
+    page.locator('nav [data-page=protocols]').click()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    region = page.get_by_role('region', name='Контейнеры', exact=True)
+    region.focus()
+    region.press('ArrowRight')
+    expect(region).not_to_have_js_property('scrollLeft', 0)
+
+
 def test_legacy_theme_preference_is_migrated(page):
     # Runs after the fixture's default, once: a returning user of the old portal toggle.
     page.context.add_init_script("""if (!sessionStorage.getItem('seeded')) {
@@ -283,6 +378,20 @@ def test_additive_image_ui_refuses_other_portal_version(tmp_path):
     with pytest.raises(RuntimeError, match='routes_client.py'):
         module.apply(ROOT / 'server/upstream/app', tmp_path)
     assert (tmp_path / 'templates/dashboard.html').read_text() == 'kept'
+
+
+def assert_control_boundary(control):
+    ratio = control.evaluate('''e => {
+      const ctx=document.createElement('canvas').getContext('2d'), style=getComputedStyle(e);
+      function lum(color) {
+        ctx.fillStyle=color;ctx.fillRect(0,0,1,1);
+        const c=Array.from(ctx.getImageData(0,0,1,1).data).slice(0,3).map(x=>x/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4);
+        return .2126*c[0]+.7152*c[1]+.0722*c[2];
+      }
+      const a=lum(style.borderTopColor),b=lum(style.backgroundColor);
+      return (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+    }''')
+    assert ratio >= 3
 
 
 def assert_contrast(page):

@@ -23,9 +23,9 @@
   function card(p) {
     const off = busy() ? "disabled" : "";
     const action = !p.installed
-      ? `<button class="primary" data-action="protocol-install" data-id="${esc(p.id)}" ${off}>Установить${p.latest ? " " + esc(p.latest) : ""}</button>`
+      ? `<button data-action="protocol-install" data-id="${esc(p.id)}" ${off}>Установить${p.latest ? " " + esc(p.latest) : ""}</button>`
       : p.update
-        ? `<button class="primary" data-action="protocol-update" data-id="${esc(p.id)}" ${off}>Обновить до ${esc(p.latest)}</button>`
+        ? `<button data-action="protocol-update" data-id="${esc(p.id)}" ${off}>Обновить до ${esc(p.latest)}</button>`
         : `<span class="muted">${p.latest ? "Установлена актуальная версия" : "Версии ещё не проверялись"}</span>`;
     const c = p.id === "cdn" && p.installed && p.settings;
     const cdnRows = c
@@ -39,7 +39,7 @@
 
   window.protocolsPage = function () {
     const p = state.protocols;
-    const top = heading("Протоколы", "Установка, обновление из репозиториев разработчиков и состояние контейнеров.", `<button data-action="protocol-check" ${busy() ? "disabled" : ""}>Проверить обновления</button>`);
+    const top = heading("Протоколы", "Установка, обновление из репозиториев разработчиков и состояние контейнеров.", `<button class="primary" data-action="protocol-check" ${busy() ? "disabled" : ""}>Проверить обновления</button>`);
     if (!p || p.error) return top + `<div class="empty">${esc(p?.error || "Агент недоступен. Состояние протоколов неизвестно.")}</div>`;
     return (
       top +
@@ -49,12 +49,14 @@
       <h2>Контейнеры</h2>` +
       (p.containers_error ? `<p class="error">${esc(p.containers_error)}</p>` : "") +
       table(
-        ["Контейнер", "Образ", "Состояние", "Проверка", "Перезапуски", "С момента (UTC)", "Порты"],
+        ["Контейнер", "Образ", "Состояние", "Проверка", "Рестарты", "С момента (UTC)", "Порты"],
         p.containers.map(
           (c) =>
             `<tr><td>${esc(c.name)}<small>${esc(c.role || "Прочее")}</small></td><td><code>${esc(c.image)}</code></td><td>${status(c.state)}${c.state === "exited" && c.exit_code ? `<small>код ${esc(c.exit_code)}</small>` : ""}</td><td>${c.health ? status(c.health) : "—"}</td><td>${c.restarts ? pill("queued", String(c.restarts)) : "0"}</td><td>${esc(c.since.replace("T", " "))}</td><td class="wrap">${c.ports.map(esc).join("<br>") || "—"}</td></tr>`,
         ),
+        { className: "container-table", label: "Контейнеры" },
       ) +
+      '<p class="table-scroll-hint">Прокрутите таблицу по горизонтали, чтобы увидеть все столбцы.</p>' +
       `<h2>Службы хоста</h2><div class="card unit-list">${p.units.map((u) => `<div class="service"><div><strong>${esc(u.title)}</strong><small>${esc(u.id)}.service</small></div>${status(u.state)}</div>`).join("")}</div>
       <div class="note">Состояние обновляется автоматически каждые 15 секунд, пока раздел открыт. Установка и обновление выполняются по одной операции и записываются в журнал.</div>`
     );

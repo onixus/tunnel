@@ -49,3 +49,12 @@ color while meeting text contrast on the actual status backgrounds.
 Existing routing, protocol, QR/browser and image-publication tests also run.
 Preparing or installing an image and live browser acceptance are separate gates;
 no live container is changed by these tests.
+
+The network console uses the full workspace width on desktop. Protocol cards use
+four columns on wide screens, two on smaller desktops and one on phones. Container
+names, image digests and ports wrap within all seven visible desktop columns;
+on narrow screens the labelled table region supports keyboard scrolling. Table
+and protocol metadata text use the 14px body scale. Install/update actions share
+the secondary style; checking releases is the page's explicit primary action.
+Browser regressions cover 1280/1920/2560px widths, both palettes, button text and
+boundary contrast, hover/focus, reordered cards, confirmation dialogs and busy states.
