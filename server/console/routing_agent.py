@@ -24,7 +24,7 @@ def dispatch(op, data):
         except Exception:
             result['routing'] = {'error': 'Состояние маршрутов недоступно; изменения запрещены'}
         if isinstance(result.get('updates'), dict) and 'error' not in result['updates']:
-            result['updates']['upstream'] = protocols.client_releases()
+            result['updates']['upstream'] = protocols.client_releases(agent)
         for key, read in (('protocols', protocols.status), ('amnezia_users', amnezia.users), ('cdn_users', cdn.users)):
             try:
                 result[key] = read()
@@ -33,6 +33,8 @@ def dispatch(op, data):
             except Exception:
                 result[key] = {'error': 'Источник временно недоступен'}
         return result
+    if op == 'updates.fetch':
+        return protocols.publish_client(data, agent)
     if op.startswith('protocols.'):
         return protocols.dispatch(op, data, agent)
     if op.startswith('cdn.'):

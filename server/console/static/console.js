@@ -401,7 +401,9 @@ function updates() {
     activeLeft = u.active_expires ? daysLeft(u.active_expires) : null;
   let alerts = "";
   if (latest && (!published || newerVersion(latest.version, published)))
-    alerts += `<div class="note warn">На GitHub вышел R-TrustTunnel <b>${esc(latest.version)}</b> (${esc(latest.published)}), а на сервере самый новый — ${esc(published || "нет")}. Консоль не выкладывает клиент сама: подпишите манифест офлайн-ключом и опубликуйте его скриптом <code>scripts/publish-signed-release.py</code> из репозитория клиента, затем нажмите «Опубликовать». <a href="${esc(latest.url)}" target="_blank" rel="noopener noreferrer">Релиз ${esc(latest.tag)} ↗</a></div>`;
+    alerts += `<div class="note warn">На GitHub вышел R-TrustTunnel <b>${esc(latest.version)}</b> (${esc(latest.published)}), а на сервере самый новый — ${esc(published || "нет")}. Нажмите «Выложить» в таблице релизов GitHub ниже, затем «Опубликовать» в канале Windows. <a href="${esc(latest.url)}" target="_blank" rel="noopener noreferrer">Релиз ${esc(latest.tag)} ↗</a></div>`;
+  if (up.signing)
+    alerts += `<div class="note warn">Выкладка недоступна: ${esc(up.signing)}. Положите PKCS#8-ключ подписи обновлений на сервер в этот файл (владелец root, права 0600).</div>`;
   if (activeLeft !== null && activeLeft < 7)
     alerts += `<div class="note error">${activeLeft < 0 ? "Манифест активного канала Windows истёк" : `Манифест активного канала Windows истекает через ${activeLeft} дн.`} (${new Date(u.active_expires * 1000).toLocaleDateString("ru")}). Клиенты не примут обновление из истёкшего канала: опубликуйте новый подписанный релиз.</div>`;
   if (up.error) alerts += `<p class="error">${esc(up.error)}</p>`;
@@ -420,13 +422,23 @@ function updates() {
         return `<tr><td>${esc(r.version || r.id)}<small>sequence ${esc(r.sequence || r.id)}</small></td><td>${esc(r.target || "windows-x86_64")}</td><td>${pill(r.valid ? "active" : "unknown", r.valid ? "Подпись и срок ОК" : r.reason || "Недействителен")}</td><td>${r.expires ? esc(new Date(r.expires * 1000).toLocaleDateString("ru")) + `<small>${left < 0 ? "истёк" : "осталось " + left + " дн."}</small>` : "—"}</td><td>${r.active ? pill("active", "Текущий") : "Архив / кандидат"}</td><td>${r.valid && !r.active && r.sequence >= (u.active_sequence || 0) ? btn("Опубликовать", "promote", `data-sequence="${r.sequence}"`) : "—"}</td></tr>`;
       }),
     ) +
-    `<h2>Релизы на GitHub</h2><p class="subtitle">${up.checked ? "Проверено " + esc(new Date(up.checked).toLocaleString("ru")) + ". " : "Ещё не проверялось. "}Стабильные релизы с установщиком Windows из <a href="${esc(up.repo || "https://github.com/onixus/Rust-trustvpn")}" target="_blank" rel="noopener noreferrer">onixus/Rust-trustvpn ↗</a>. Проверка идёт автоматически раз в 6 часов.</p>` +
+    `<h2>Релизы на GitHub</h2><p class="subtitle">${up.checked ? "Проверено " + esc(new Date(up.checked).toLocaleString("ru")) + ". " : "Ещё не проверялось. "}Стабильные релизы с установщиком Windows и опубликованным SHA-256 из <a href="${esc(up.repo || "https://github.com/onixus/Rust-trustvpn")}" target="_blank" rel="noopener noreferrer">onixus/Rust-trustvpn ↗</a>. Проверка идёт автоматически раз в 6 часов.</p>` +
     table(
-      ["Версия", "Опубликован", "На сервере"],
-      (up.releases || []).map(
-        (r) =>
-          `<tr><td><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.version)} ↗</a></td><td>${esc(r.published)}</td><td>${(u.releases || []).some((x) => x.version === r.version) ? pill("active", "Выложен") : pill("queued", "Не выложен")}</td></tr>`,
-      ),
+      ["Версия", "Опубликован", "Сборка", "На сервере", "Действие"],
+      (up.releases || []).map((r) => {
+        const staged = (u.releases || []).some((x) => x.sequence === r.sequence || x.version === r.version),
+          fetching = (state.jobs || []).some((j) => j.action === "updates.fetch" && ["queued", "running"].includes(j.state)),
+          build = r.build_error
+            ? `<span class="error">${esc(r.build_error)}</span>`
+            : r.root_ok === false
+              ? '<span class="error">Другой корень обновлений</span>'
+              : `sequence ${esc(r.sequence)}<small>IPC ${esc(r.ipc)} · ${esc((r.size / 1048576).toFixed(1))} MB</small>`,
+          action =
+            staged || r.build_error || r.root_ok === false
+              ? "—"
+              : btn("Выложить", "client-fetch", `data-version="${esc(r.version)}" data-sequence="${esc(r.sequence)}" ${up.signing || fetching ? "disabled" : ""}`, "primary");
+        return `<tr><td><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.version)} ↗</a></td><td>${esc(r.published)}</td><td>${build}</td><td>${staged ? pill("active", "Выложен") : pill("queued", "Не выложен")}</td><td>${action}</td></tr>`;
+      }),
     ) +
     `<div class="note">Полный хеш установщика проверяется перед публикацией. Истёкшие манифесты не публикуются повторно.</div><h2>Серверные пакеты</h2>` +
     table(
@@ -798,6 +810,13 @@ async function handle(b) {
   if (a === "refresh-adblock") confirmJob("Обновить локальные списки", "Загрузить списки из настроенных источников? При ошибке останется последняя рабочая версия.", "adblock.refresh", {});
   if (a === "check-routes") await job("routes.check", {});
   if (a === "check-client-releases") await job("protocols.check", {});
+  if (a === "client-fetch")
+    confirmJob(
+      "Выложить R-TrustTunnel " + b.dataset.version,
+      `Сервер скачает установщик с GitHub, сверит SHA-256, подпишет манифест (sequence ${b.dataset.sequence}, действует 30 дней) и положит его в канал. Клиенты получат обновление только после «Опубликовать».`,
+      "updates.fetch",
+      { version: b.dataset.version },
+    );
   if (a === "preview-routes") {
     if ($("#route-rules .error"))
       throw Error("Есть неподдерживаемые правила. Применение запрещено.");

@@ -408,6 +408,14 @@ class ConsoleTests(unittest.TestCase):
         self.assertIsNotNone(db.get_user(replacement));self.assertEqual(ui.person(new)['accounts'],{'trusttunnel':replacement})
         self.assertEqual(self.post('people/contact',{'id':old,'email':'stale@example.invalid'}).status_code,404)
 
+    def test_client_publish_accepts_only_a_version_and_runs_one_at_a_time(self):
+        for bad in ({},{'version':'0.6'},{'version':'0.6.2','url':'https://evil.invalid/x'},{'version':'../1.2.3'}):
+            self.assertEqual(self.job('updates.fetch',bad).status_code,422)
+        self.assertEqual(self.job('updates.fetch',{'version':'0.6.2'}).status_code,200)
+        self.assertEqual(self.job('updates.fetch',{'version':'0.6.1'}).status_code,409)
+        with patch.object(ui,'agent',return_value={'message':'staged'}) as call:ui.work_once()
+        call.assert_called_once_with('updates.fetch',{'version':'0.6.2'})
+
 class AgentTests(unittest.TestCase):
     def test_fixed_allowlist(self):
         with self.assertRaises(agent.Rejected):agent.dispatch('system.shell',{'command':'id'})
