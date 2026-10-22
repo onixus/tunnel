@@ -27,6 +27,8 @@ router = APIRouter()
 LIMIT = 1024 * 1024
 CODEC = os.environ.get('RTRUST_CODEC', '/usr/local/bin/rtrust-codec')
 HEADERS = {'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'}
+# font-src serves the locally vendored APEX typefaces (static/apex/fonts).
+CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 # Profile `origin` labels are a client contract (docs/device-credentials.md):
 # 1-80 printable ASCII bytes, compared byte-wise; Android/iOS reject the whole
 # managed batch on anything else. Add new labels here only within that alphabet.
@@ -111,7 +113,7 @@ def install(application):
         response = await call_next(request)
         if request.url.path in ('/profiles', '/admin/agent-routes') or request.url.path.startswith(('/portal/v2/', '/admin/api/agent-routes', '/admin/api/device-credentials')):
             response.headers.update(HEADERS)
-            response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            response.headers['Content-Security-Policy'] = CSP
         return response
 
 

@@ -56,7 +56,7 @@
     {% endif %}
     <form method="post" action="/admin/users/{{ user['id'] }}/delete" style="margin-top:12px;"
           onsubmit="return confirm('Удалить пользователя и все его конфиги?')">
-      <button type="submit" class="danger" style="width:100%;">{{ icon('trash', 15) }} Удалить пользователя</button>
+      <button type="submit" class="danger" style="width:100%;">{{ icon('trash', 16) }} Удалить пользователя</button>
     </form>
   </div>
 </div>
@@ -66,14 +66,14 @@
     <h2 style="margin:0;">{{ icon('key') }} Конфиги ({{ configs|length }})</h2>
     <form method="post" action="/admin/users/{{ user['id'] }}/configs" class="row" style="align-items:end;">
       <div class="field"><label>Метка</label><input name="label" placeholder="необязательно"></div>
-      <button type="submit" class="sm">{{ icon('plus', 15) }} Добавить</button>
+      <button type="submit" class="sm">{{ icon('plus', 16) }} Добавить</button>
     </form>
   </div>
   <p class="mut">Отправка на <b>{{ user['email'] }}</b>: TOML-файлы и ссылки импорта TrustTunnel.</p>
   {% if configs and mail_ready and user['status'] == 'active' %}
   <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:14px;" onsubmit="this.querySelector('button').disabled=true">
     <input type="hidden" name="mail_token" value="{{ mail_token }}">
-    <button type="submit">{{ icon('mail', 15) }} Отправить все конфиги на email</button>
+    <button class="primary" type="submit">{{ icon('mail', 16) }} Отправить все конфиги на email</button>
   </form>
   {% elif not mail_ready %}<p class="mut">Для отправки настройте SMTP в настройках панели.</p>{% endif %}
   {% if not configs %}<p class="mut" style="margin:0;">Конфигов нет.</p>{% endif %}
@@ -82,21 +82,21 @@
     <div class="cfg-head" style="margin-bottom:10px;">
       <b>{{ c.label }}</b>
       <form method="post" action="/admin/configs/{{ c.id }}/delete" onsubmit="return confirm('Удалить конфиг?')">
-        <button class="danger sm" type="submit">{{ icon('trash', 14) }}</button>
+        <button class="danger sm" type="submit">{{ icon('trash', 16) }}</button>
       </form>
     </div>
     {% if mail_ready and user['status'] == 'active' %}
     <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:10px;" onsubmit="this.querySelector('button').disabled=true">
       <input type="hidden" name="mail_token" value="{{ mail_token }}">
       <input type="hidden" name="config_id" value="{{ c.id }}">
-      <button class="sm" type="submit">{{ icon('mail', 14) }} Отправить на email</button>
+      <button class="sm" type="submit">{{ icon('mail', 16) }} Отправить на email</button>
     </form>
     {% endif %}
     <div class="kv-list">
       <div class="kv"><span class="kv-name">Username</span><code>{{ c.username }}</code>
-        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.username }}', this)">{{ icon('copy', 13) }}</button></div>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.username }}', this)">{{ icon('copy', 16) }}</button></div>
       <div class="kv"><span class="kv-name">Password</span><code>{{ c.password }}</code>
-        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.password }}', this)">{{ icon('copy', 13) }}</button></div>
+        <button type="button" class="ghost kv-copy" onclick="copyText('{{ c.password }}', this)">{{ icon('copy', 16) }}</button></div>
     </div>
   </div>
   {% endfor %}

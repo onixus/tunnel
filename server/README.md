@@ -4,6 +4,7 @@
 TrustTunnel portal and R-TrustTunnel clients on onixus-rf. It reuses portal admin
 identity, existing VPN accounts and the private Telegram bot.
 
+- [APEX design system and visual review](../docs/design-system/README.md)
 - [Architecture, trust boundaries and tests](console/README.md)
 - [Deployment entry point](../deploy/README.md)
 - [Live acceptance, scope and rollback](../docs/unified-console.md)

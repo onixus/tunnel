@@ -1,0 +1,48 @@
+/* Shared APEX accessibility, type and ThemeSwitch. Load after product styles. */
+body { font-family: var(--font-sans); font-size: 14px; line-height: 1.55; }
+h1, .topbar h1 { font-size: 24px; }
+h2, .card h2, .network-title h2, .modal-head h2 { font-size: 18px; }
+code, pre, output, .mono, .eyebrow, .nav-label, .node-kicker { font-family: var(--font-mono); }
+.eyebrow, .nav-label, .node-kicker { font-size: 11px; text-transform: uppercase; }
+input, select, textarea { font-family: inherit; border-color: var(--border-control); }
+input::placeholder, textarea::placeholder { color: var(--text-muted); opacity: 1; }
+:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+nav svg, .ic { width: 20px; height: 20px; opacity: 1; }
+.theme-switch { display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+.theme-switch select { width: auto; min-width: 0; padding: 6px 8px !important; border: 1px solid var(--border-control); border-radius: 8px; background: var(--surface-2); color: var(--text-primary); font: inherit; appearance: auto; }
+.auth-theme-header { height: var(--header-height); display: flex; justify-content: flex-end; padding: 0 24px; align-items: center; background: var(--surface-1); border-bottom: 1px solid var(--border-subtle); }
+.auth-theme-header + .auth-wrap { min-height: calc(100vh - var(--header-height)); }
+.pill::before { content: ''; width: 16px; height: 16px; flex: none; background: currentColor; border-radius: 0; mask: var(--icon-check) center / contain no-repeat; }
+.pill.warn::before, .pill.amber::before { mask-image: var(--icon-warning); }
+.pill.red::before { mask-image: var(--icon-error); }
+.pill.gray::before, .pill.blue::before, .pill.acc::before { mask-image: var(--icon-info); }
+.pill .dot { display: none; }
+@media (max-width: 720px) {
+  .theme-switch { gap: 4px; }
+  .theme-switch > span { display: none; }
+  .header-right { gap: 8px; }
+  .workspace > header { flex-wrap: wrap; gap: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+@media print {
+  html { color-scheme: light !important; }
+  body { background: var(--bg-canvas); color: var(--text-primary); }
+  aside, .theme-switch, .burger, .overlay, .sidebar-bottom { display: none !important; }
+  .workspace { margin-left: 0; }
+  header, .topbar, header.topbar-client { position: static; }
+  .card, .stat, dialog, .modal-box { box-shadow: none; }
+}
+
+/* Default portal actions are secondary; one explicit .primary per page. */
+body:not(:has(.workspace)) button:not(.primary):not(.danger):not(.burger):not(.modal-x),
+body:not(:has(.workspace)) a.btn:not(.primary):not(.danger) { background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border-control); box-shadow: none; }
+body:not(:has(.workspace)) button.primary, body:not(:has(.workspace)) .btn.primary { background: var(--accent); color: var(--on-accent); }
+button.danger:hover, .btn.danger:hover { background: var(--danger-subtle); color: var(--danger); }
+.sev-critical, .sev-high, .sev-medium, .sev-low, .sev-info { border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+.sev-critical { color: var(--sev-critical); background: var(--danger-subtle); }
+.sev-high { color: var(--sev-high); background: var(--sev-high-subtle); }
+.sev-medium { color: var(--sev-medium); background: var(--warning-subtle); }
+.sev-low { color: var(--sev-low); background: var(--accent-subtle); }
+.sev-info { color: var(--sev-info); background: var(--surface-2); }

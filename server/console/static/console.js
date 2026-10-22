@@ -529,6 +529,9 @@ function render() {
   // A deleted user's card falls back to the list.
   if (page === "person" && !(state.people || []).some((p) => p.id === personId)) page = "users";
   $("#content").innerHTML = map[page]();
+  document.querySelectorAll("#content .primary").forEach((button, index) => {
+    if (index > 0) button.classList.remove("primary");
+  });
   $("#breadcrumb").textContent = titles[page];
   document
     .querySelectorAll("nav button")

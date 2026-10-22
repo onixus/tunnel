@@ -64,7 +64,7 @@ def spawn():
     endpoint.manager._proc=subprocess.Popen(['docker','run','--rm','--name',name,'--read-only',
         *(['--add-host','host.docker.internal:host-gateway'] if sys.platform=='linux' else []),
         '-p',f'127.0.0.1:{port}:{port}/tcp','-p',f'127.0.0.1:{port}:{port}/udp',
-        '-v',f'{work}:{work}:ro','-v',f'{binary}:/fixture/endpoint:ro',
+        '-v',f'{work}:{work}:ro,z','-v',f'{binary}:/fixture/endpoint:ro,z',
         '-w',str(runtime),'debian:12-slim','/fixture/endpoint','vpn.toml','hosts.toml','--jobs','2'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 

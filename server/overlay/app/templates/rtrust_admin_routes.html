@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="csrf-token" content="{{ csrf }}"><title>Маршруты устройств — {{ brand }}</title>
-<link rel="stylesheet" href="/static/rtrust-profiles.css"><script defer src="/static/rtrust-admin-routes.js"></script></head>
-<body><header><a href="/console/">← Консоль</a><h1>Маршруты устройств</h1><button id="refresh">Обновить</button></header>
+<script src="/static/apex/theme.js"></script><link rel="stylesheet" href="/static/apex/tokens.css"><link rel="stylesheet" href="/static/rtrust-profiles.css"><link rel="stylesheet" href="/static/apex/components.css"><script defer src="/static/rtrust-admin-routes.js"></script></head>
+<body><header><a href="/console/">← Консоль</a><h1>Маршруты устройств</h1><button id="refresh">Обновить</button><label class="theme-switch"><span>Тема</span><select data-theme-switch aria-label="Тема"><option value="dark">Тёмная</option><option value="light">Светлая</option><option value="system">Как в системе</option></select></label></header>
 <main><p id="status" role="status" aria-live="polite"></p>
 <p>Администратор назначает группе настольные устройства. Политика администратора имеет приоритет над пользовательской; снятие назначения возвращает пользовательскую политику. Получение политики клиентом не подтверждает её применение.</p>
 <section><h2>Группы</h2><div id="groups"></div></section>
@@ -11,6 +11,6 @@
 <label for="include">Сети через VPN, до 16 CIDR IPv4</label><textarea id="include" rows="2" required placeholder="0.0.0.0/0"></textarea>
 <label for="exclude">Исключения, до 64 CIDR IPv4</label><textarea id="exclude" rows="2"></textarea>
 <label class="check"><input id="exclude-lan" type="checkbox" checked>Исключить локальные сети</label>
-<button type="submit">Сохранить</button><button id="cancel" type="button">Сбросить</button></form></section>
+<button type="submit" class="primary">Сохранить</button><button id="cancel" type="button">Сбросить</button></form></section>
 <section><h2>Привязать устройство</h2><label for="user">Пользователь</label><select id="user"></select><button id="enroll">Создать одноразовый код</button><output id="code"></output></section>
 <section><h2>Устройства</h2><div id="devices"></div></section></main></body></html>

@@ -1,12 +1,12 @@
 .config-export [hidden] { display: none !important; }
 .config-export .export-tabs { display: flex; gap: 8px; margin: 18px 0; }
 .config-export .export-tabs [aria-pressed="true"] {
-  border-color: #96c5ff66; color: var(--text); background: #96c5ff1a;
+  border-color: var(--accent-subtle); color: var(--text); background: var(--accent-subtle);
 }
 .config-export #export-qr { text-align: center; }
 .config-export .config-qr-image {
   display: block; width: min(100%, 420px); height: auto; aspect-ratio: 1;
-  margin: 0 auto 18px; background: #fff; border: 0; border-radius: 12px; padding: 10px;
+  margin: 0 auto 18px; background: var(--qr-paper); border: 0; border-radius: 12px; padding: 10px;
 }
 .config-export .qr-error:not(:empty) {
   padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-sm);

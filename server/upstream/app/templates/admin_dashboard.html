@@ -6,9 +6,9 @@
 {% if err %}<div class="alert warn">{{ icon('zap') }} {{ err }}</div>{% endif %}
 
 <div class="stats">
-  <div class="stat"><div class="l">{{ icon('users', 14) }} Пользователей</div><div class="n">{{ counts.users }}</div></div>
-  <div class="stat"><div class="l">{{ icon('key', 14) }} Активных конфигов</div><div class="n">{{ counts.configs }}</div></div>
-  <div class="stat"><div class="l">{{ icon('shield', 14) }} Заблокировано</div><div class="n">{{ counts.blocked }}</div></div>
+  <div class="stat"><div class="l">{{ icon('users', 16) }} Пользователей</div><div class="n">{{ counts.users }}</div></div>
+  <div class="stat"><div class="l">{{ icon('key', 16) }} Активных конфигов</div><div class="n">{{ counts.configs }}</div></div>
+  <div class="stat"><div class="l">{{ icon('shield', 16) }} Заблокировано</div><div class="n">{{ counts.blocked }}</div></div>
 </div>
 
 <div class="card">
@@ -32,10 +32,10 @@
     <button type="submit" class="ghost" style="height:42px;">{{ icon('check') }} Сохранить</button>
   </form>
 
-  <h3 style="font-size:15px; margin-top:20px; border-top:1px dashed var(--line); padding-top:16px; display:flex; align-items:center; gap:8px;">{{ icon('lock', 14) }} Смена пароля</h3>
+  <h3 style="font-size:15px; margin-top:20px; border-top:1px dashed var(--line); padding-top:16px; display:flex; align-items:center; gap:8px;">{{ icon('lock', 16) }} Смена пароля</h3>
   <form method="post" action="/admin/account/password" class="row">
     <div class="field grow"><label>Новый пароль (мин. 8)</label><input type="password" name="password" minlength="8" required placeholder="••••••••"></div>
-    <button type="submit">{{ icon('check') }} Обновить пароль</button>
+    <button class="primary" type="submit">{{ icon('check') }} Обновить пароль</button>
   </form>
 </div>
 {% endblock %}

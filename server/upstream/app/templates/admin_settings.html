@@ -40,7 +40,7 @@
       </p>
       <div style="display:flex;flex-wrap:wrap;gap:8px;">
         {% for d in cert_domains %}
-        <button type="button" class="btn ghost sm" onclick="document.getElementById('conn_domain').value='{{ d }}'">{{ icon('lock', 13) }} {{ d }}</button>
+        <button type="button" class="btn ghost sm" onclick="document.getElementById('conn_domain').value='{{ d }}'">{{ icon('lock', 16) }} {{ d }}</button>
         {% endfor %}
       </div>
     </div>
@@ -95,7 +95,7 @@
     </div>
   </div>
 
-  <button type="submit">{{ icon('check') }} Сохранить и применить</button>
+  <button class="primary" type="submit">{{ icon('check') }} Сохранить и применить</button>
   <p class="mut" style="margin:10px 0 0;font-size:13px;">Сохранение перегенерирует конфиги endpoint'а и перезапустит его (смена порта/домена) либо мягко перечитает сертификат.</p>
 </form>
 

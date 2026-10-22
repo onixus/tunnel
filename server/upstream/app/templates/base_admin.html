@@ -5,18 +5,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Админка{% endblock %} — {{ brand }}</title>
-  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="%234f6ef7"/><path d="M12 19s6-2.6 6-7V7.2L12 4.8 6 7.2V12c0 4.4 6 7 6 7z" fill="white"/></svg>'>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="icon" href="/static/apex/favicon.svg" type="image/svg+xml">
+  <script src="/static/apex/theme.js"></script>
+  <link rel="stylesheet" href="/static/apex/tokens.css">
   <link rel="stylesheet" href="/static/style.css">
-  <script>
-    (function(){
-      var t = localStorage.getItem('theme');
-      if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      document.documentElement.dataset.theme = t;
-    })();
-  </script>
+  <link rel="stylesheet" href="/static/apex/components.css">
 </head>
 <body>
 {% set authed = request.cookies.get('admin_token') %}
@@ -25,7 +18,7 @@
 <div class="shell">
   <aside id="sb">
     <div class="brand">
-      <span class="logo">{{ icon('shield', 19) }}</span>
+      <span class="logo">{{ icon('shield', 20) }}</span>
       <span><b>{{ brand }}</b><small>панель управления</small></span>
     </div>
     <nav>
@@ -36,7 +29,6 @@
       <a href="/admin/settings" class="nav-item {{ 'active' if path.startswith('/admin/settings') }}">{{ icon('sliders') }} <span>Настройки</span></a>
     </nav>
     <div class="sb-foot">
-      <button type="button" onclick="tglTheme()">{{ icon('moon') }}{{ icon('sun') }} <span>Тема</span></button>
       <a href="/admin/logout" class="nav-item logout">{{ icon('logout') }} <span>Выйти</span></a>
     </div>
   </aside>
@@ -45,20 +37,17 @@
     <header class="topbar">
       <button type="button" class="burger" onclick="document.body.classList.add('sb-open')" aria-label="Меню">{{ icon('menu', 20) }}</button>
       <h1>{{ self.title() }}</h1>
+      <label class="theme-switch"><span>Тема</span><select data-theme-switch aria-label="Тема"><option value="dark">Тёмная</option><option value="light">Светлая</option><option value="system">Как в системе</option></select></label>
     </header>
     <main>{% block body %}{% endblock %}</main>
   </div>
 </div>
 {% block modal %}{% endblock %}
 {% else %}
+<header class="auth-theme-header"><label class="theme-switch"><span>Тема</span><select data-theme-switch aria-label="Тема"><option value="dark">Тёмная</option><option value="light">Светлая</option><option value="system">Как в системе</option></select></label></header>
 <div class="auth-wrap"><div class="auth-card">{% block auth %}{% endblock %}</div></div>
 {% endif %}
 <script>
-  function tglTheme() {
-    var h = document.documentElement;
-    var n = h.dataset.theme === 'dark' ? 'light' : 'dark';
-    h.dataset.theme = n; localStorage.setItem('theme', n);
-  }
   function copyText(t, btn) {
     navigator.clipboard.writeText(t).then(function(){
       btn.classList.add('ok');
