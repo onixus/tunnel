@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import io
 import json
+import os
 from pathlib import Path
 import random
 import sys
@@ -165,15 +166,54 @@ def test_discovery_keeps_only_stable_verifiable_releases(monkeypatch):
     assert awg[0]['published'] == '2026-08-28'
 
 
-def test_client_releases_are_reported_with_local_links(host, monkeypatch):
-    setup = 'R-TrustTunnel-Windows-x64-Setup.exe'
-    replies = {'onixus/Rust-trustvpn/releases?per_page=30': [
-        release('v0.6.2', setup, html_url='https://evil.invalid/'), release('v0.6.2-beta.1', setup, prerelease=True),
-        release('v0.6.1', 'R-TrustTunnel-Android.apk'), release('v0.6.0', setup), release('v0.7.0', setup, draft=True)]}
-    monkeypatch.setattr(protocols, 'api', lambda path: replies[path])
-    assert protocols.discover('client') == [
-        {'version': '0.6.2', 'tag': 'v0.6.2', 'published': '2026-09-01', 'url': 'https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2'},
-        {'version': '0.6.0', 'tag': 'v0.6.0', 'published': '2026-09-01', 'url': 'https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0'}]
+SETUP = 'R-TrustTunnel-Windows-x64-Setup.exe'
+
+
+def git_sha(data):
+    return hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest()
+
+
+def client_api(releases, sources):
+    blobs = {}
+
+    def api(path):
+        if path == 'onixus/Rust-trustvpn/releases?per_page=30':
+            return releases
+        if '/git/blobs/' in path:
+            return {'encoding': 'base64', 'content': base64.b64encode(blobs[path.rsplit('/', 1)[1]]).decode()}
+        name, ref = path.split('?ref=')
+        lib, root = sources[ref]
+        data = lib if name.endswith('lib.rs') else root
+        blobs[git_sha(data)] = data
+        # Like GitHub, the contents API may mangle binary bytes; only the blob is trusted.
+        return {'sha': git_sha(data), 'size': len(data), 'encoding': 'base64', 'content': base64.b64encode(b'mangled').decode()}
+    return api
+
+
+def lib(sequence):
+    return f'pub const CURRENT_SEQUENCE: u64 = {sequence};\npub const CURRENT_IPC: u32 = 1;\n'.encode()
+
+
+def test_client_releases_are_reported_with_build_identity(host, monkeypatch):
+    root = bytes(range(32))
+    releases = [release('v0.6.2', SETUP, html_url='https://evil.invalid/'), release('v0.6.2-beta.1', SETUP, prerelease=True),
+                release('v0.6.1', 'R-TrustTunnel-Android.apk'), release('v0.6.0', SETUP), release('v0.7.0', SETUP, draft=True),
+                {'tag_name': 'v0.5.9', 'assets': [{'name': SETUP, 'size': 1000}]}]  # no published digest
+    monkeypatch.setattr(protocols, 'api', client_api(releases, {'v0.6.2': (lib(12), root), 'v0.6.0': (b'no constants', root)}))
+    found = protocols.discover('client')
+    assert [r['version'] for r in found] == ['0.6.2', '0.6.0']
+    assert found[0] == {'version': '0.6.2', 'tag': 'v0.6.2', 'published': '2026-09-01', 'sha256': '1' * 64, 'size': 1000,
+                        'url': 'https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2', 'sequence': 12, 'ipc': 1, 'root': root.hex()}
+    assert 'sequence' not in found[1] and found[1]['build_error']
+    # A blob that does not hash to the advertised Git object is rejected.
+    tampered = client_api(releases, {'v0.6.2': (lib(12), root)})
+    def lying(path):
+        reply = tampered(path)
+        return dict(reply, content=base64.b64encode(lib(99)).decode()) if '/git/blobs/' in path else reply
+    monkeypatch.setattr(protocols, 'api', lying)
+    with pytest.raises(PolicyError, match='хешем'):
+        protocols.source_file('onixus/Rust-trustvpn', 'crates/update/src/lib.rs', 'v0.6.2')
+
     monkeypatch.setattr(protocols, 'discover', lambda name: [{'version': '0.6.2'}] if name == 'client' else [])
     protocols.check()
     assert protocols.client_releases()['releases'] == [{'version': '0.6.2'}]
@@ -185,6 +225,75 @@ def test_client_releases_are_reported_with_local_links(host, monkeypatch):
         protocols.check()
     kept = protocols.client_releases()
     assert kept['releases'] == [{'version': '0.6.2'}] and 'недоступен' in kept['error']
+
+
+def test_client_release_is_signed_staged_and_immutable(host, tmp_path, monkeypatch):
+    import agent as console_agent
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+    key = Ed25519PrivateKey.generate()
+    root = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    pub = tmp_path / 'root.pub'
+    pub.write_bytes(root)
+    feed = tmp_path / 'feed'
+    monkeypatch.setattr(console_agent, 'ROOT_KEY', pub)
+    monkeypatch.setattr(console_agent, 'FEED', feed)
+    monkeypatch.setattr(protocols, 'CLIENT_KEY', tmp_path / 'update-signing.pk8')
+    monkeypatch.setattr(protocols, 'KEY_OWNER', os.getuid())
+    installer = b'signed installer bytes'
+    entry = {'version': '0.6.2', 'tag': 'v0.6.2', 'published': '2026-10-20', 'sha256': hashlib.sha256(installer).hexdigest(),
+             'size': len(installer), 'url': 'https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2',
+             'sequence': 12, 'ipc': 1, 'root': root.hex()}
+    protocols.amnezia.write(protocols.CACHE, json.dumps({'checked': '2026-10-22T00:00:00Z', 'components': {}, 'client': {'releases': [entry]}}))
+    fetched = []
+    monkeypatch.setattr(protocols, 'open_url', lambda url: fetched.append(url) or io.BytesIO(installer))
+
+    with pytest.raises(PolicyError, match='не установлен'):
+        protocols.publish_client({'version': '0.6.2'}, console_agent)
+    assert protocols.client_releases(console_agent)['signing']
+    other = Ed25519PrivateKey.generate().private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+    protocols.CLIENT_KEY.write_bytes(other)
+    protocols.CLIENT_KEY.chmod(0o644)
+    with pytest.raises(PolicyError, match='0600'):
+        protocols.publish_client({'version': '0.6.2'}, console_agent)
+    protocols.CLIENT_KEY.chmod(0o600)
+    with pytest.raises(PolicyError, match='не совпадает'):
+        protocols.publish_client({'version': '0.6.2'}, console_agent)
+    protocols.CLIENT_KEY.write_bytes(key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption()))
+    view = protocols.client_releases(console_agent)
+    assert view['signing'] is None and view['releases'][0]['root_ok'] and 'root' not in view['releases'][0]
+    for bad in ({'version': '0.6.1'}, {'version': '0.6.2', 'sequence': 1}, {}):
+        with pytest.raises(PolicyError):
+            protocols.publish_client(bad, console_agent)
+    assert not feed.exists() and not fetched
+
+    result = protocols.publish_client({'version': '0.6.2'}, console_agent)
+    assert 'sequence 12' in result['message']
+    assert fetched == ['https://github.com/onixus/Rust-trustvpn/releases/download/v0.6.2/' + SETUP]
+    folder = feed / '12' / 'windows-x86_64'
+    assert (folder / 'setup.exe').read_bytes() == installer
+    assert sorted(p.name for p in folder.iterdir()) == ['manifest.json', 'setup.exe']
+    assert (folder / 'manifest.json').stat().st_mode & 0o777 == 0o644
+    assert folder.stat().st_mode & 0o777 == folder.parent.stat().st_mode & 0o777 == 0o755
+    manifest, _ = console_agent.verify_manifest(folder / 'manifest.json', artifact=True)
+    assert (manifest['sequence'], manifest['version'], manifest['min_ipc'], manifest['max_ipc']) == (12, '0.6.2', 1, 1)
+    assert manifest['expires'] - manifest['published'] == 30 * 86400
+    assert manifest['url'] == 'https://onixus-rf.duckdns.org/rtrust/releases/12/windows-x86_64/setup.exe'
+    with pytest.raises(PolicyError, match='неизменяемы'):
+        protocols.publish_client({'version': '0.6.2'}, console_agent)
+
+    # A tampered download never leaves a partial release behind.
+    entry.update(version='0.6.3', tag='v0.6.3', sequence=13)
+    protocols.amnezia.write(protocols.CACHE, json.dumps({'checked': '2026-10-22T00:00:00Z', 'components': {}, 'client': {'releases': [entry]}}))
+    monkeypatch.setattr(protocols, 'open_url', lambda url: io.BytesIO(b'tampered'))
+    with pytest.raises(PolicyError, match='Хеш'):
+        protocols.publish_client({'version': '0.6.3'}, console_agent)
+    assert not (feed / '13').exists()
+    # A release built against another root is refused before any download.
+    entry.update(root='00' * 32)
+    protocols.amnezia.write(protocols.CACHE, json.dumps({'checked': '2026-10-22T00:00:00Z', 'components': {}, 'client': {'releases': [entry]}}))
+    with pytest.raises(PolicyError, match='другим корнем'):
+        protocols.publish_client({'version': '0.6.3'}, console_agent)
 
 
 def test_redirects_cannot_leave_github():

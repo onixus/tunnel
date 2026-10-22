@@ -5,6 +5,7 @@ only name a component and a version already discovered there; it never supplies 
 image or command. Binaries are checked against the SHA-256 GitHub publishes for the release
 asset; source builds are pinned to the commit GitHub reported for the tag.
 """
+import base64
 import calendar
 import hashlib
 import hmac
@@ -18,6 +19,7 @@ import shutil
 import sqlite3
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -59,10 +61,14 @@ SOURCES = {
     'cdn': {'title': 'VLESS через CDN', 'repo': 'XTLS/Xray-core', 'tag': r'v(\d+\.\d+\.\d+)',
             'asset': 'Xray-linux-64.zip', 'runtime': 'docker · ' + cdn.CONTAINER},
 }
-# The desktop client is only reported, never installed: its update channel accepts
-# operator-signed manifests (see the client's scripts/publish-signed-release.py).
+# The desktop client is published like a protocol: the installer is downloaded against
+# the digest GitHub publishes, and the agent signs a manifest with the pinned update root.
+# Sequence and IPC version come from the tagged source the installer was built from.
 CLIENT = {'title': 'R-TrustTunnel', 'repo': 'onixus/Rust-trustvpn', 'tag': r'v(\d+\.\d+\.\d+)',
           'asset': 'R-TrustTunnel-Windows-x64-Setup.exe'}
+CLIENT_KEY = BASE / 'update-signing.pk8'
+KEY_OWNER = 0
+CLIENT_LIFETIME = 30 * 86400
 # The console drives H UI through its 0.0.25 API and database layout; see docs/versions.md.
 HUI = {'repo': 'jonssonyan/h-ui', 'tag': 'v0.0.25', 'asset': 'h-ui-linux-amd64',
        'sha256': '900ed683b3a3af3a79e5bdcc691b9f3db82f1758545f0f603f8bdecd9d1cd7ee'}
@@ -140,6 +146,31 @@ def asset_url(repo, tag, asset):
     return f'https://github.com/{repo}/releases/download/{tag}/{asset}'
 
 
+def source_file(repo, path, tag):
+    # The contents API re-encodes some binary files as text; the blob is the exact bytes.
+    entry = api(f'{repo}/contents/{path}?ref={urllib.parse.quote(tag)}')
+    if not SHA.fullmatch(str(entry.get('sha', ''))) or not 0 < entry.get('size', 0) <= 1024 * 1024:
+        raise PolicyError('Неожиданный ответ GitHub для исходника релиза')
+    blob = api(f"{repo}/git/blobs/{entry['sha']}")
+    if blob.get('encoding') != 'base64':
+        raise PolicyError('Неожиданный ответ GitHub для исходника релиза')
+    data = base64.b64decode(blob['content'])
+    if len(data) != entry['size'] or hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest() != entry['sha']:
+        raise PolicyError('Исходник релиза не совпадает со своим хешем в Git')
+    return data
+
+
+def client_build(tag):
+    # The manifest must carry the sequence and IPC version compiled into this installer.
+    text = source_file(CLIENT['repo'], 'crates/update/src/lib.rs', tag).decode()
+    sequence = re.search(r'pub const CURRENT_SEQUENCE: u64 = (\d{1,9});', text)
+    ipc = re.search(r'pub const CURRENT_IPC: u32 = (\d{1,4});', text)
+    if not sequence or not ipc:
+        raise PolicyError('В исходнике релиза нет номера sequence или версии IPC')
+    root = source_file(CLIENT['repo'], 'crates/update/src/root.pub', tag)
+    return {'sequence': int(sequence[1]), 'ipc': int(ipc[1]), 'root': root.hex()}
+
+
 def discover(name):
     if name == 'client':
         found = []
@@ -147,12 +178,22 @@ def discover(name):
             match = re.fullmatch(CLIENT['tag'], str(release.get('tag_name', '')))
             if not match or release.get('draft') or release.get('prerelease'):
                 continue
-            if not any(a.get('name') == CLIENT['asset'] for a in release.get('assets', [])):
+            asset = next((a for a in release.get('assets', []) if a.get('name') == CLIENT['asset']), None)
+            digest = str((asset or {}).get('digest') or '')
+            if not asset or not re.fullmatch('sha256:[0-9a-f]{64}', digest) or not 0 < asset.get('size', 0) <= LIMIT:
                 continue
             # The link is built locally; nothing from the API reaches the page as a URL.
             found.append({'version': match[1], 'tag': release['tag_name'], 'published': str(release.get('published_at', ''))[:10],
+                          'sha256': digest[7:], 'size': asset['size'],
                           'url': f"https://github.com/{CLIENT['repo']}/releases/tag/{release['tag_name']}"})
-        return sorted(found, key=lambda r: key(r['version']), reverse=True)[:5]
+        found = sorted(found, key=lambda r: key(r['version']), reverse=True)[:5]
+        for release in found:
+            try:
+                release.update(client_build(release['tag']))
+            except (PolicyError, ValueError, UnicodeError):
+                # Shown without a publish action; other releases stay usable.
+                release['build_error'] = 'Не удалось прочитать sequence и IPC из исходника релиза'
+        return found
     src = SOURCES[name]
     found = []
     if name == 'amnezia':
@@ -229,11 +270,91 @@ def _check(data=None):
     return {'message': 'Версии в репозиториях разработчиков проверены'}
 
 
-def client_releases():
+def signing_key(agent):
+    """The root-only update key, accepted only if it is the root pinned in clients."""
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_private_key
+    try:
+        info = CLIENT_KEY.stat()
+    except FileNotFoundError:
+        raise PolicyError(f'Ключ подписи обновлений не установлен: {CLIENT_KEY}') from None
+    if info.st_uid != KEY_OWNER or info.st_mode & 0o077:
+        raise PolicyError('Ключ подписи обновлений должен принадлежать root с правами 0600')
+    try:
+        key = load_der_private_key(CLIENT_KEY.read_bytes(), None)
+        public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    except (ValueError, TypeError, AttributeError):
+        raise PolicyError('Ключ подписи обновлений повреждён или не Ed25519') from None
+    if not hmac.compare_digest(public, agent.ROOT_KEY.read_bytes()):
+        raise PolicyError('Ключ подписи не совпадает с корнем, закреплённым в клиентах')
+    return key
+
+
+def client_releases(agent=None):
     value = cached()
     client = value.get('client') if isinstance(value.get('client'), dict) else {}
-    return {'releases': client.get('releases', []), 'error': client.get('error'), 'checked': value.get('checked'),
-            'repo': 'https://github.com/' + CLIENT['repo']}
+    result = {'releases': client.get('releases', []), 'error': client.get('error'), 'checked': value.get('checked'),
+              'repo': 'https://github.com/' + CLIENT['repo']}
+    if agent is not None:
+        root = agent.ROOT_KEY.read_bytes().hex()
+        result['releases'] = [dict({k: v for k, v in r.items() if k != 'root'}, root_ok=r.get('root') == root)
+                              for r in result['releases']]
+        try:
+            signing_key(agent)
+            result['signing'] = None
+        except PolicyError as exc:
+            result['signing'] = str(exc)
+    return result
+
+
+def publish_client(data, agent):
+    """Stage a discovered client release in the update feed; promotion stays a separate step."""
+    if set(data) != {'version'} or not isinstance(data['version'], str):
+        raise PolicyError('Некорректные параметры')
+    release = next((r for r in cached().get('client', {}).get('releases', []) if r.get('version') == data['version']), None)
+    if release is None or type(release.get('sequence')) is not int or not 0 < release['sequence'] < 10 ** 9:
+        raise PolicyError('Версия не найдена среди проверенных релизов. Проверьте GitHub заново.')
+    if release.get('root') != agent.ROOT_KEY.read_bytes().hex():
+        raise PolicyError('Релиз собран с другим корнем обновлений; клиенты его не примут')
+    key = signing_key(agent)
+    target = 'windows-x86_64'
+    folder = agent.FEED / str(release['sequence']) / target
+    if folder.exists():
+        raise PolicyError(f"Sequence {release['sequence']} уже выложен; выложенные релизы неизменяемы")
+    BUILD.mkdir(mode=0o700, parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix='client-', dir=BUILD))
+    try:
+        installer = work / 'setup.exe'
+        download(asset_url(CLIENT['repo'], release['tag'], CLIENT['asset']), installer, release['sha256'])
+        if installer.stat().st_size != release['size']:
+            raise PolicyError('Размер установщика не совпадает с опубликованным на GitHub')
+        now = int(time.time())
+        payload = json.dumps({'schema': 1, 'sequence': release['sequence'], 'version': release['version'], 'target': target,
+                              'min_ipc': release['ipc'], 'max_ipc': release['ipc'], 'published': now,
+                              'expires': now + CLIENT_LIFETIME, 'size': release['size'], 'sha256': release['sha256'],
+                              'url': f"https://onixus-rf.duckdns.org/rtrust/releases/{release['sequence']}/{target}/setup.exe"},
+                             separators=(',', ':')).encode()
+        envelope = json.dumps({'payload': base64.b64encode(payload).decode(),
+                               'signature': base64.b64encode(key.sign(payload)).decode()}).encode()
+        # The agent runs with umask 077; the update host needs world-readable releases.
+        created = not folder.parent.exists()
+        folder.mkdir(parents=True)
+        for path in (folder, folder.parent) if created else (folder,):
+            path.chmod(0o755)
+        try:
+            # Public files for the update host; the manifest appears last.
+            for name, source in (('setup.exe', installer), ('manifest.json', None)):
+                part = folder / (name + '.part')
+                shutil.copyfile(source, part) if source else part.write_bytes(envelope)
+                part.chmod(0o644)
+                part.replace(folder / name)
+            agent.verify_manifest(folder / 'manifest.json', artifact=True)
+        except BaseException:
+            shutil.rmtree(folder.parent if created else folder, ignore_errors=True)
+            raise
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return {'message': f"R-TrustTunnel {release['version']} выложен (sequence {release['sequence']}). "
+                       'Проверьте его и нажмите «Опубликовать», чтобы клиенты получили обновление.'}
 
 
 def stale(max_age=AUTO_CHECK):

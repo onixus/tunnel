@@ -89,13 +89,26 @@ never persisted in jobs, results or audit. See
 
 ## Updates
 
-The release check that runs every 6 hours (`protocols.check`, also «Проверить GitHub»)
-also lists stable onixus/Rust-trustvpn releases that ship a Windows installer. The
-page warns when GitHub has a newer version than any signed manifest on the server.
-The console never fetches or signs the client: the operator still signs offline and
-runs the client's `scripts/publish-signed-release.py`. Each manifest shows its expiry
-(at most 31 days after publication). Expired ones stay listed as invalid, and the
-active channel gets a warning in its last 7 days.
+R-TrustTunnel releases are discovered and published the same way protocols are. The
+release check that runs every 6 hours (`protocols.check`, also «Проверить GitHub») lists
+stable onixus/Rust-trustvpn releases whose Windows installer has a SHA-256 published by
+GitHub. For each tag it reads `CURRENT_SEQUENCE`, `CURRENT_IPC` and the pinned
+`root.pub` from the exact Git blobs. The contents API is not used for these files
+because it re-encodes binary bytes.
+
+«Выложить» (`updates.fetch`, only a discovered version string) makes the agent:
+1. Download the installer, checking the digest and size.
+2. Sign a 30-day manifest with `/opt/vpn-console/update-signing.pk8`.
+3. Write `/opt/rtrust-updates/<sequence>/windows-x86_64/` and verify it like any feed
+   entry. Published sequences are immutable.
+
+«Опубликовать» stays a separate step. The key must be root-owned `0600` PKCS#8 Ed25519
+and match `update-root.pub`; it never enters the console container. Keeping it on the
+server is the operator's choice: anyone who controls the agent host can sign updates
+that every client accepts.
+
+Each manifest shows its expiry. Expired ones stay listed as invalid, and the active
+channel gets a warning in its last 7 days.
 
 Client release entries come from existing signed manifests. Promotion verifies the
 Ed25519 root in `server/console/update-root.pub`, target/schema/IPC/date/URL bounds and

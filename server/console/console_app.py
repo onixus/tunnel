@@ -396,7 +396,7 @@ def state(request:Request):
     snapshot['observed_at']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     return snapshot
 
-ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
+ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','updates.fetch','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
          'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send',
          'amnezia.create','amnezia.block','amnezia.unblock','amnezia.rotate','protocols.check','protocols.install','protocols.update',
          'cdn.create','cdn.block','cdn.unblock','cdn.rotate','cdn.configure',
@@ -487,6 +487,10 @@ def validate_action(action,data,*,check_state=True):
             clean['port']=data['port']
         elif 'port' in data: raise HTTPException(422,'Некорректные параметры')
         return clean
+    if action=='updates.fetch':
+        # Only a version string; the agent resolves it against releases it discovered itself.
+        if set(data)!={'version'} or not isinstance(data['version'],str) or not re.fullmatch(r'\d+\.\d+\.\d+',data['version']): raise HTTPException(422,'Некорректная версия')
+        return {'version':data['version']}
     if action=='hysteria.update':
         if set(data)!={'id','days','devices','quota_gb'} or any(type(data[k]) is not int for k in data): raise HTTPException(422,'Проверьте параметры')
         if data['id']<=0 or not 1<=data['days']<=3650 or not 1<=data['devices']<=100 or not -1<=data['quota_gb']<=100000: raise HTTPException(422,'Недопустимые лимиты')
@@ -525,6 +529,8 @@ async def enqueue(request:Request):
                 if recent: raise HTTPException(429,'Конфигурация этому пользователю уже отправлялась меньше минуты назад')
             if action.startswith('protocols.') and c.execute("SELECT 1 FROM jobs WHERE action LIKE 'protocols.%' AND state IN ('queued','running')").fetchone():
                 raise HTTPException(409,'Уже выполняется операция с протоколами')
+            if action=='updates.fetch' and c.execute("SELECT 1 FROM jobs WHERE action='updates.fetch' AND state IN ('queued','running')").fetchone():
+                raise HTTPException(409,'Релиз клиента уже выкладывается')
             if action=='campaign.send':
                 if c.execute("SELECT 1 FROM jobs WHERE action='campaign.send' AND json_extract(payload,'$.id')=?",(clean['id'],)).fetchone(): raise HTTPException(409,'Рассылка уже поставлена в очередь')
             c.execute('INSERT INTO jobs(id,actor,action,payload,state) VALUES(?,?,?,?,?)',(key,admin,action,json.dumps(clean,sort_keys=True),'queued'))
