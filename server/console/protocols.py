@@ -22,10 +22,12 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 
 import yaml
 
 import amnezia
+import cdn
 from routing_policy import PolicyError
 import service_routes
 
@@ -54,11 +56,13 @@ SOURCES = {
                     'asset': 'trusttunnel-{tag}-linux-x86_64.tar.gz', 'runtime': 'docker · ' + TT_CONTAINER},
     'amnezia': {'title': 'AmneziaWG 3.1', 'repo': 'amnezia-vpn/amneziawg-go', 'tools': 'amnezia-vpn/amneziawg-tools',
                 'tag': r'v(3\.1\.\d{8})', 'runtime': 'docker · ' + amnezia.CONTAINER},
+    'cdn': {'title': 'VLESS через CDN', 'repo': 'XTLS/Xray-core', 'tag': r'v(\d+\.\d+\.\d+)',
+            'asset': 'Xray-linux-64.zip', 'runtime': 'docker · ' + cdn.CONTAINER},
 }
 # The console drives H UI through its 0.0.25 API and database layout; see docs/versions.md.
 HUI = {'repo': 'jonssonyan/h-ui', 'tag': 'v0.0.25', 'asset': 'h-ui-linux-amd64',
        'sha256': '900ed683b3a3af3a79e5bdcc691b9f3db82f1758545f0f603f8bdecd9d1cd7ee'}
-ROLES = {TT_CONTAINER: 'TrustTunnel и портал', amnezia.CONTAINER: 'AmneziaWG', 'vpn-console': 'Консоль',
+ROLES = {TT_CONTAINER: 'TrustTunnel и портал', amnezia.CONTAINER: 'AmneziaWG', cdn.CONTAINER: 'VLESS через CDN', 'vpn-console': 'Консоль',
          'vpn-adblock': 'Фильтр рекламы', 'rtrust-portal-https': 'HTTPS-вход'}
 UNITS = (('h-ui', 'Hysteria 2 / H UI'), ('vpn-console-agent', 'Агент консоли'), ('vpn-telegram', 'Telegram-бот'),
          ('vpn-adblock-dns', 'Перехват DNS'), ('docker', 'Docker Engine'))
@@ -260,6 +264,14 @@ def installed(name):
         code, out = quiet(['docker', 'exec', TT_CONTAINER, TT_ENDPOINT, '--version'])
         match = re.search(r'(\d+\.\d+\.\d+)', out)
         return {'installed': code == 0, 'version': match[1] if match and code == 0 else None, 'state': state}
+    if name == 'cdn':
+        code, state = quiet(['docker', 'inspect', cdn.CONTAINER, '--format', '{{.State.Status}}'])
+        try:
+            saved = cdn.load()
+        except PolicyError:
+            saved = None
+        return {'installed': code == 0 and saved is not None, 'version': (saved or {}).get('version'),
+                'state': state if code == 0 else 'absent', 'settings': cdn.public_settings(saved) if saved else None}
     code, state = quiet(['docker', 'inspect', amnezia.CONTAINER, '--format', '{{.State.Status}}'])
     try:
         saved = amnezia.load()
@@ -333,7 +345,7 @@ def require_x86():
         raise PolicyError('Готовые сборки разработчика поддерживаются только для linux x86_64')
 
 
-def swap_container(name, args, verify):
+def swap_container(name, args, verify, restore=None):
     """Replace a container, keeping the previous one until the new one passes its check."""
     backup = name + '-previous'
     exists = quiet(['docker', 'inspect', name])[0] == 0
@@ -352,6 +364,9 @@ def swap_container(name, args, verify):
             quiet(['docker', 'rm', '-f', name], 30)
         if renamed:
             quiet(['docker', 'rename', backup, name])
+        # Mounted files belong to both containers. Restore them before the old process reads them.
+        if restore is not None:
+            restore()
         if exists:
             quiet(['docker', 'start', name], 30)
         raise
@@ -385,21 +400,21 @@ def install_amnezia(op, data, release, work, agent):
                 return
             time.sleep(1)
         raise PolicyError('AmneziaWG не запустился в новом контейнере')
+    def restore():
+        if before is None:
+            amnezia.STATE.unlink(missing_ok=True)
+            (amnezia.RUNTIME / (amnezia.INTERFACE + '.conf')).unlink(missing_ok=True)
+        else:
+            amnezia.save(json.loads(before), sync=False)
     try:
         swap_container(amnezia.CONTAINER, [
             '--restart', 'unless-stopped', '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--cap-add', 'NET_RAW',
             '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--security-opt', 'no-new-privileges',
             '-p', f'{port}:{port}/udp', '--mount', f'type=bind,src={amnezia.RUNTIME},dst=/etc/amnezia/amneziawg,readonly',
             '--label', 'vpn.console.version=' + release['version'], '--log-opt', 'max-size=5m', '--log-opt', 'max-file=2',
-            image], verify)
+            image], verify, restore=restore)
     except BaseException:
-        if before is None:
-            # Nothing was issued yet: a failed first install leaves no half-installed protocol.
-            amnezia.STATE.unlink(missing_ok=True)
-            (amnezia.RUNTIME / (amnezia.INTERFACE + '.conf')).unlink(missing_ok=True)
-        else:
-            amnezia.save(json.loads(before), sync=False)
-        raise PolicyError('AmneziaWG не прошёл проверку запуска. Предыдущее состояние восстановлено.') from None
+        raise PolicyError('AmneziaWG не прошёл проверку запуска. Проверьте состояние предыдущего контейнера.') from None
     return (f'AmneziaWG {release["version"]} работает на UDP {port}. '
             + ('Откройте этот порт в firewall и создайте пользователей.' if fresh else 'Ключи пользователей сохранены.'))
 
@@ -533,7 +548,43 @@ def install_hysteria(op, data, release, work, agent):
     return f'Hysteria {release["version"]} установлена и проверена реальным трафиком'
 
 
-HANDLERS = {'hysteria': install_hysteria, 'trusttunnel': install_trusttunnel, 'amnezia': install_amnezia}
+def install_cdn(op, data, release, work, agent):
+    require_x86()
+    archive = work / 'xray.zip'
+    download(asset_url(SOURCES['cdn']['repo'], release['tag'], SOURCES['cdn']['asset']), archive, release['sha256'])
+    with zipfile.ZipFile(archive) as bundle:
+        member = next((m for m in bundle.infolist() if m.filename == 'xray'), None)
+        if member is None or member.file_size > LIMIT:
+            raise PolicyError('В архиве разработчика нет xray')
+        with bundle.open(member) as source, open(work / 'xray', 'wb') as target:
+            shutil.copyfileobj(source, target)
+    archive.unlink()
+    shutil.copy2(asset('xray', 'Dockerfile'), work / 'Dockerfile')
+    image = 'vpn-xray:' + release['version']
+    build(['--pull', '-t', image, str(work)], 300)
+    fresh = not cdn.STATE.exists()
+    state = cdn.new_state(urllib.parse.urlsplit(agent.ORIGIN).hostname) if fresh else cdn.load()
+    before = None if fresh else json.dumps(state, sort_keys=True)
+    state.update(version=release['version'], tag=release['tag'], image=image)
+    cdn.save(state)
+    def restore():
+        if before is None:
+            cdn.STATE.unlink(missing_ok=True)
+            (cdn.RUNTIME / 'config.json').unlink(missing_ok=True)
+        else:
+            cdn.save(json.loads(before))
+    try:
+        swap_container(cdn.CONTAINER, cdn.container_args(state, image),
+                       lambda: cdn.verify(state['settings']['origin_port']), restore=restore)
+    except BaseException:
+        raise PolicyError('Xray не прошёл проверку запуска. Проверьте состояние предыдущего контейнера.') from None
+    port = state['settings']['origin_port']
+    return (f'Xray {release["version"]} работает на TCP {port}. '
+            + ('Откройте порт для адресов CDN, затем укажите домен CDN кнопкой «Настроить CDN».' if fresh
+               else 'Пользователи и настройки CDN сохранены.'))
+
+
+HANDLERS = {'hysteria': install_hysteria, 'trusttunnel': install_trusttunnel, 'amnezia': install_amnezia, 'cdn': install_cdn}
 
 
 def install(op, data, agent):
