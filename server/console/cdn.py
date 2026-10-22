@@ -215,10 +215,10 @@ def configure(state, data):
     try:
         # Port and certificate mounts may change: recreate, keeping the old container until the new one listens.
         protocols.swap_container(CONTAINER, container_args(state, state['image']),
-                                 lambda: verify(state['settings']['origin_port']))
+                                 lambda: verify(state['settings']['origin_port']),
+                                 restore=lambda: save(json.loads(before)))
     except BaseException:
-        save(json.loads(before))
-        raise PolicyError('Xray не запустился с новыми настройками. Прежние настройки восстановлены.') from None
+        raise PolicyError('Xray не запустился с новыми настройками. Проверьте состояние предыдущего контейнера.') from None
 
 
 def public_settings(state):

@@ -345,7 +345,7 @@ def require_x86():
         raise PolicyError('Готовые сборки разработчика поддерживаются только для linux x86_64')
 
 
-def swap_container(name, args, verify):
+def swap_container(name, args, verify, restore=None):
     """Replace a container, keeping the previous one until the new one passes its check."""
     backup = name + '-previous'
     exists = quiet(['docker', 'inspect', name])[0] == 0
@@ -364,6 +364,9 @@ def swap_container(name, args, verify):
             quiet(['docker', 'rm', '-f', name], 30)
         if renamed:
             quiet(['docker', 'rename', backup, name])
+        # Mounted files belong to both containers. Restore them before the old process reads them.
+        if restore is not None:
+            restore()
         if exists:
             quiet(['docker', 'start', name], 30)
         raise
@@ -397,21 +400,21 @@ def install_amnezia(op, data, release, work, agent):
                 return
             time.sleep(1)
         raise PolicyError('AmneziaWG не запустился в новом контейнере')
+    def restore():
+        if before is None:
+            amnezia.STATE.unlink(missing_ok=True)
+            (amnezia.RUNTIME / (amnezia.INTERFACE + '.conf')).unlink(missing_ok=True)
+        else:
+            amnezia.save(json.loads(before), sync=False)
     try:
         swap_container(amnezia.CONTAINER, [
             '--restart', 'unless-stopped', '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--cap-add', 'NET_RAW',
             '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--security-opt', 'no-new-privileges',
             '-p', f'{port}:{port}/udp', '--mount', f'type=bind,src={amnezia.RUNTIME},dst=/etc/amnezia/amneziawg,readonly',
             '--label', 'vpn.console.version=' + release['version'], '--log-opt', 'max-size=5m', '--log-opt', 'max-file=2',
-            image], verify)
+            image], verify, restore=restore)
     except BaseException:
-        if before is None:
-            # Nothing was issued yet: a failed first install leaves no half-installed protocol.
-            amnezia.STATE.unlink(missing_ok=True)
-            (amnezia.RUNTIME / (amnezia.INTERFACE + '.conf')).unlink(missing_ok=True)
-        else:
-            amnezia.save(json.loads(before), sync=False)
-        raise PolicyError('AmneziaWG не прошёл проверку запуска. Предыдущее состояние восстановлено.') from None
+        raise PolicyError('AmneziaWG не прошёл проверку запуска. Проверьте состояние предыдущего контейнера.') from None
     return (f'AmneziaWG {release["version"]} работает на UDP {port}. '
             + ('Откройте этот порт в firewall и создайте пользователей.' if fresh else 'Ключи пользователей сохранены.'))
 
@@ -564,15 +567,17 @@ def install_cdn(op, data, release, work, agent):
     before = None if fresh else json.dumps(state, sort_keys=True)
     state.update(version=release['version'], tag=release['tag'], image=image)
     cdn.save(state)
-    try:
-        swap_container(cdn.CONTAINER, cdn.container_args(state, image), lambda: cdn.verify(state['settings']['origin_port']))
-    except BaseException:
+    def restore():
         if before is None:
             cdn.STATE.unlink(missing_ok=True)
             (cdn.RUNTIME / 'config.json').unlink(missing_ok=True)
         else:
             cdn.save(json.loads(before))
-        raise PolicyError('Xray не прошёл проверку запуска. Предыдущее состояние восстановлено.') from None
+    try:
+        swap_container(cdn.CONTAINER, cdn.container_args(state, image),
+                       lambda: cdn.verify(state['settings']['origin_port']), restore=restore)
+    except BaseException:
+        raise PolicyError('Xray не прошёл проверку запуска. Проверьте состояние предыдущего контейнера.') from None
     port = state['settings']['origin_port']
     return (f'Xray {release["version"]} работает на TCP {port}. '
             + ('Откройте порт для адресов CDN, затем укажите домен CDN кнопкой «Настроить CDN».' if fresh

@@ -242,7 +242,7 @@ def test_failed_first_install_leaves_nothing_and_failed_update_restores(host):
     before = amnezia.STATE.read_text()
     cache(amnezia=[dict(AWG, version='3.1.20260915', tag='v3.1.20260915')])
     host['port'] = 1
-    with pytest.raises(PolicyError, match='восстановлено'):
+    with pytest.raises(PolicyError, match='не прошёл проверку'):
         protocols.dispatch('protocols.update', {'component': 'amnezia', 'version': '3.1.20260915'}, None)
     assert amnezia.STATE.read_text() == before
     assert ['docker', 'rename', 'amnezia-awg-previous', 'amnezia-awg'] in host['calls']
@@ -646,6 +646,76 @@ def test_cdn_install_then_configure_recreates_container(host, monkeypatch):
     assert cdn.load()['settings']['domain'] == 'cdn.example.com'
 
     monkeypatch.setattr(cdn, 'verify', lambda port: (_ for _ in ()).throw(PolicyError('down')))
-    with pytest.raises(PolicyError, match='восстановлены'):
+    with pytest.raises(PolicyError, match='не запустился'):
         cdn.dispatch('cdn.configure', {'domain': 'other.example.com'})
     assert cdn.load()['settings']['domain'] == 'cdn.example.com'
+
+
+@pytest.mark.parametrize('change', [
+    {'origin_port': 2083},
+    {'origin_tls': False, 'origin_port': 2095, 'transport': 'xhttp', 'path': '/new-review-path'},
+])
+def test_cdn_rollback_restores_mounted_config_before_old_container_starts(host, monkeypatch, change):
+    state = cdn_state(domain='cdn.example.com')
+    state['image'] = 'vpn-xray:previous'
+    cdn.save(state)
+    before_state, before_config = cdn.STATE.read_text(), (cdn.RUNTIME / 'config.json').read_text()
+    host['containers'].add(cdn.CONTAINER)
+    plain = protocols.quiet
+    starts = []
+    def quiet(args, timeout=8):
+        if args[:2] == ['docker', 'start']:
+            starts.append(args[2])
+            assert cdn.STATE.read_text() == before_state
+            assert (cdn.RUNTIME / 'config.json').read_text() == before_config
+        return plain(args, timeout)
+    monkeypatch.setattr(protocols, 'quiet', quiet)
+    monkeypatch.setattr(cdn, 'verify', lambda port: (_ for _ in ()).throw(PolicyError('new process failed')))
+    with pytest.raises(PolicyError, match='не запустился'):
+        cdn.configure(state, change)
+    assert starts == [cdn.CONTAINER]
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_cdn_install_failure_restores_files_before_restarting_previous(host, monkeypatch, tmp_path, existing):
+    import zipfile
+    work = tmp_path / 'cdn-build'
+    work.mkdir()
+    (protocols.ASSETS / 'xray').mkdir()
+    (protocols.ASSETS / 'xray/Dockerfile').write_text('fixture')
+    monkeypatch.setattr(protocols, 'require_x86', lambda: None)
+    def download(url, dest, sha256):
+        with zipfile.ZipFile(dest, 'w') as archive:
+            archive.writestr('xray', b'fixture')
+    monkeypatch.setattr(protocols, 'download', download)
+    before = None
+    if existing:
+        state = cdn_state(domain='cdn.example.com')
+        state.update(image='vpn-xray:previous', version='previous')
+        cdn.save(state)
+        before = (cdn.STATE.read_text(), (cdn.RUNTIME / 'config.json').read_text())
+        host['containers'].add(cdn.CONTAINER)
+    plain = protocols.quiet
+    starts = []
+    def quiet(args, timeout=8):
+        if args[:2] == ['docker', 'start']:
+            starts.append(args[2])
+            assert (cdn.STATE.read_text(), (cdn.RUNTIME / 'config.json').read_text()) == before
+        return plain(args, timeout)
+    monkeypatch.setattr(protocols, 'quiet', quiet)
+    monkeypatch.setattr(cdn, 'verify', lambda port: (_ for _ in ()).throw(PolicyError('new process failed')))
+    with pytest.raises(PolicyError, match='не прошёл проверку'):
+        protocols.install_cdn('protocols.update' if existing else 'protocols.install', {}, XRAY, work,
+                              types.SimpleNamespace(ORIGIN='https://origin.example.invalid'))
+    assert starts == ([cdn.CONTAINER] if existing else [])
+    if not existing:
+        assert not cdn.STATE.exists() and not (cdn.RUNTIME / 'config.json').exists()
+
+
+def test_swap_does_not_start_previous_container_when_file_restore_fails(host):
+    host['containers'].add('svc')
+    def fail():
+        raise PolicyError('failed')
+    with pytest.raises(PolicyError):
+        protocols.swap_container('svc', ['image'], fail, restore=fail)
+    assert ['docker', 'start', 'svc'] not in host['calls']
