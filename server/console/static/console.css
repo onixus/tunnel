@@ -898,3 +898,18 @@ img.qr {
 .card + .stack {
   margin-top: 16px;
 }
+.note.warn {
+  background: #f2c46d14;
+  border-color: #f2c46d4d;
+  color: var(--warn);
+}
+.note.error {
+  background: #ff8f8a14;
+  border-color: #ff8f8a4d;
+  color: var(--red);
+}
+.note.warn a,
+.note.error a {
+  color: inherit;
+  text-decoration: underline;
+}

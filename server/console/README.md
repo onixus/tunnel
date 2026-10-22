@@ -89,6 +89,14 @@ never persisted in jobs, results or audit. See
 
 ## Updates
 
+The release check that runs every 6 hours (`protocols.check`, also «Проверить GitHub»)
+also lists stable onixus/Rust-trustvpn releases that ship a Windows installer. The
+page warns when GitHub has a newer version than any signed manifest on the server.
+The console never fetches or signs the client: the operator still signs offline and
+runs the client's `scripts/publish-signed-release.py`. Each manifest shows its expiry
+(at most 31 days after publication). Expired ones stay listed as invalid, and the
+active channel gets a warning in its last 7 days.
+
 Client release entries come from existing signed manifests. Promotion verifies the
 Ed25519 root in `server/console/update-root.pub`, target/schema/IPC/date/URL bounds and
 actual installer SHA-256, forbids decreasing sequence, preserves the prior feed,

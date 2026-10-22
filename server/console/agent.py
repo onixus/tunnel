@@ -186,16 +186,20 @@ def verify_manifest(path, artifact=False, fresh=True):
 def updates():
     result=[]
     active=FEED/'windows-x86_64'/'latest.json'
-    active_seq=None
-    try: active_seq=json.loads(base64.b64decode(json.loads(active.read_bytes())['payload']))['sequence']
+    active_seq=active_expires=None
+    try: payload=json.loads(base64.b64decode(json.loads(active.read_bytes())['payload'])); active_seq,active_expires=payload['sequence'],payload['expires']
     except (OSError,ValueError,KeyError): pass
     for p in sorted(FEED.glob('[0-9]*/windows-x86_64/manifest.json')):
         item={'id':p.parent.parent.name,'component':'rtrust','active':False}
         try:
-            m,_=verify_manifest(p); item.update(version=m['version'],sequence=m['sequence'],target=m['target'],valid=True,active=m['sequence']==active_seq)
+            # Signature first; freshness is reported separately so expiry is visible ahead of time.
+            m,_=verify_manifest(p,fresh=False)
+            item.update(version=m['version'],sequence=m['sequence'],target=m['target'],expires=m['expires'],active=m['sequence']==active_seq)
+            try: verify_manifest(p); item['valid']=True
+            except Rejected as e: item.update(valid=False,reason=str(e))
         except Exception: item.update(valid=False,reason='Подпись, срок или артефакт не прошли проверку')
         result.append(item)
-    return {'releases':result,'active_sequence':active_seq,'server_packages':server_packages()}
+    return {'releases':result,'active_sequence':active_seq,'active_expires':active_expires,'server_packages':server_packages()}
 
 def promote(data):
     seq=str(data.get('sequence',''))

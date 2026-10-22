@@ -59,6 +59,10 @@ SOURCES = {
     'cdn': {'title': 'VLESS через CDN', 'repo': 'XTLS/Xray-core', 'tag': r'v(\d+\.\d+\.\d+)',
             'asset': 'Xray-linux-64.zip', 'runtime': 'docker · ' + cdn.CONTAINER},
 }
+# The desktop client is only reported, never installed: its update channel accepts
+# operator-signed manifests (see the client's scripts/publish-signed-release.py).
+CLIENT = {'title': 'R-TrustTunnel', 'repo': 'onixus/Rust-trustvpn', 'tag': r'v(\d+\.\d+\.\d+)',
+          'asset': 'R-TrustTunnel-Windows-x64-Setup.exe'}
 # The console drives H UI through its 0.0.25 API and database layout; see docs/versions.md.
 HUI = {'repo': 'jonssonyan/h-ui', 'tag': 'v0.0.25', 'asset': 'h-ui-linux-amd64',
        'sha256': '900ed683b3a3af3a79e5bdcc691b9f3db82f1758545f0f603f8bdecd9d1cd7ee'}
@@ -137,6 +141,18 @@ def asset_url(repo, tag, asset):
 
 
 def discover(name):
+    if name == 'client':
+        found = []
+        for release in api(CLIENT['repo'] + '/releases?per_page=30'):
+            match = re.fullmatch(CLIENT['tag'], str(release.get('tag_name', '')))
+            if not match or release.get('draft') or release.get('prerelease'):
+                continue
+            if not any(a.get('name') == CLIENT['asset'] for a in release.get('assets', [])):
+                continue
+            # The link is built locally; nothing from the API reaches the page as a URL.
+            found.append({'version': match[1], 'tag': release['tag_name'], 'published': str(release.get('published_at', ''))[:10],
+                          'url': f"https://github.com/{CLIENT['repo']}/releases/tag/{release['tag_name']}"})
+        return sorted(found, key=lambda r: key(r['version']), reverse=True)[:5]
     src = SOURCES[name]
     found = []
     if name == 'amnezia':
@@ -200,11 +216,24 @@ def _check(data=None):
             failed.append(SOURCES[name]['title'])
             result['components'][name] = {'releases': old.get(name, {}).get('releases', []),
                                           'error': 'Репозиторий разработчика недоступен; показаны прежние данные'}
+    try:
+        result['client'] = {'releases': discover('client')}
+    except Exception:
+        failed.append(CLIENT['title'])
+        result['client'] = {'releases': cached().get('client', {}).get('releases', []),
+                            'error': 'Репозиторий клиента недоступен; показаны прежние данные'}
     amnezia.write(CACHE, json.dumps(result, sort_keys=True))
     _MEMO['value'] = None
     if failed:
         raise PolicyError('Не удалось получить версии: ' + ', '.join(failed))
     return {'message': 'Версии в репозиториях разработчиков проверены'}
+
+
+def client_releases():
+    value = cached()
+    client = value.get('client') if isinstance(value.get('client'), dict) else {}
+    return {'releases': client.get('releases', []), 'error': client.get('error'), 'checked': value.get('checked'),
+            'repo': 'https://github.com/' + CLIENT['repo']}
 
 
 def stale(max_age=AUTO_CHECK):
