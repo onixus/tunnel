@@ -4,7 +4,7 @@
 {% block body %}
 <div class="auth-wrap"><div class="auth-card">
   <div class="auth-logo">
-    <span class="logo acc">{{ icon('key', 26) }}</span>
+    <span class="logo acc">{{ icon('key', 24) }}</span>
     <div style="text-align:center;"><b style="font-size:18px;">Новый пароль</b></div>
   </div>
   <div class="card">
@@ -20,7 +20,7 @@
         <label>Новый пароль (мин. 6 символов)</label>
         <input name="password" type="password" required minlength="6" autofocus placeholder="••••••••">
       </div>
-      <button type="submit" style="width:100%;">{{ icon('check') }} Сохранить пароль</button>
+      <button class="primary" type="submit" style="width:100%;">{{ icon('check') }} Сохранить пароль</button>
     </form>
     {% else %}
     <p class="mut" style="margin:0;">Ссылка неполная — запросите сброс ещё раз: <a href="/forgot">восстановление пароля</a>.</p>

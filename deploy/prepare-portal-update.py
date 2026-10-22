@@ -38,10 +38,13 @@ def prepare(base, tag):
         context = Path(folder)
         shutil.copytree(ROOT / 'server/overlay/app', context / 'server/overlay/app',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        for folder in ('templates', 'static'):
+            shutil.copytree(ROOT / 'server/upstream/app' / folder, context / 'server/upstream/app' / folder,
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         (context / 'server/console').mkdir()
         shutil.copy2(ROOT / 'server/console/console_app.py', context / 'server/console/console_app.py')
         (context / 'deploy').mkdir()
-        for name in ('portal_patch.py', 'portal-update.Dockerfile'):
+        for name in ('portal_patch.py', 'portal-update.Dockerfile', 'apply-design-system.py'):
             shutil.copy2(ROOT / 'deploy' / name, context / 'deploy' / name)
         image_file = context / 'candidate.iid'
         run('docker', 'build', '--build-arg', 'BASE_IMAGE=' + pinned,
@@ -72,6 +75,8 @@ assert 'post' in paths['/admin/api/device-credentials/{identifier}/revoke']
 assert 'get' in paths['/portal/v2/routing']
 assert 'get' in paths['/admin/agent-routes']
 assert 'put' in paths['/admin/api/agent-routes/devices/{identifier}']
+assert Path('/app/app/static/apex/fonts/Inter.ttf').is_file()
+assert 'apex/theme.js' in Path('/app/app/templates/base_admin.html').read_text(encoding='utf-8')
 assert Path('/app/app/templates/rtrust_admin_routes.html').is_file()
 assert Path('/app/app/static/rtrust-admin-routes.js').is_file()
 assert {'get', 'post'} <= paths['/portal/v2/route-groups'].keys()

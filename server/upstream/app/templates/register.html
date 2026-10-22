@@ -4,7 +4,7 @@
 {% block body %}
 <div class="auth-wrap"><div class="auth-card">
   <div class="auth-logo">
-    <span class="logo green">{{ icon('shield', 26) }}</span>
+    <span class="logo green">{{ icon('shield', 24) }}</span>
     <div style="text-align:center;">
       <b style="font-size:18px;">{{ brand }}</b>
       <div class="mut" style="font-size:13px;">создание аккаунта</div>
@@ -25,7 +25,7 @@
         <label>Сколько будет {{ captcha_a }} + {{ captcha_b }}?</label>
         <input name="captcha" type="number" required placeholder="Введите число">
       </div>
-      <button type="submit" style="width:100%;">{{ icon('user-plus') }} Зарегистрироваться</button>
+      <button class="primary" type="submit" style="width:100%;">{{ icon('user-plus') }} Зарегистрироваться</button>
     </form>
     <p class="mut" style="margin:16px 0 0;text-align:center;">Уже есть аккаунт? <a href="/login">Войти</a></p>
   </div>

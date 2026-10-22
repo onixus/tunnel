@@ -5,7 +5,7 @@
 
 <div class="card" style="text-align:center;">
   <h2 style="margin-bottom:8px;">{{ icon('smartphone') }} Наведите камеру приложения</h2>
-  <p class="mut" style="margin-top:-6px;margin-bottom:18px;font-size:13.5px;line-height:1.45;">
+  <p class="mut" style="margin-top:-6px;margin-bottom:18px;font-size:13px;line-height:1.45;">
     В приложении TrustTunnel на телефоне выберите «Подключить по QR».
     Код одноразовый и действует <span id="left">{{ ttl }}</span> сек.
   </p>
@@ -15,7 +15,7 @@
   <style>
     #qr svg { width: 100%; height: auto; display: block; }
   </style>
-  <div id="qr" style="display:inline-block;background:#fff;padding:16px;border-radius:14px;
+  <div id="qr" style="display:inline-block;background:var(--qr-paper);padding:16px;border-radius:14px;
               line-height:0;width:min(78vw,340px);">
     {{ qr_svg|safe }}
   </div>
@@ -27,12 +27,12 @@
   <!-- Кабинет открыт на самом телефоне — камеры не хватит, там нечего снимать.
        Копируем ссылку: в ней и адрес сервера, и одноразовый код, а в приложении
        есть кнопка «Вставить». Так телефон подключается без компьютера. -->
-  <div id="copybox" style="margin-top:20px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08);">
-    <p class="mut" style="margin:0 0 10px;font-size:12.5px;">
+  <div id="copybox" style="margin-top:20px;padding-top:16px;border-top:1px solid var(--surface-2);">
+    <p class="mut" style="margin:0 0 10px;font-size:13px;">
       Открыли эту страницу на телефоне? Компьютер не нужен — нажмите кнопку ниже.
     </p>
     <p style="margin:0 0 10px;">
-      <a href="{{ app_link }}" class="btn">Подключить это устройство</a>
+      <a href="{{ app_link }}" class="btn primary">Подключить это устройство</a>
     </p>
     <p class="mut" style="margin:0 0 8px;font-size:12px;">
       Если кнопка не сработала (приложение ещё не установлено) — скопируйте ссылку

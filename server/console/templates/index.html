@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content="{{ csrf }}" />
     <title>Onixus · VPN Console</title>
+    <script src="/console/static/apex/theme.js"></script>
+    <link rel="stylesheet" href="/console/static/apex/tokens.css">
     <link rel="stylesheet" href="/console/static/console.css" />
     <link rel="stylesheet" href="/console/static/config-export.css" />
     <script src="/console/static/config-export.js" defer></script>
@@ -13,6 +15,7 @@
     <script src="/console/static/routing-ui.js" defer></script>
     <link rel="stylesheet" href="/console/static/protocols.css" />
     <script src="/console/static/protocols-ui.js" defer></script>
+    <link rel="stylesheet" href="/console/static/apex/components.css">
   </head>
   <body>
     <aside>
@@ -47,6 +50,7 @@
           <b id="breadcrumb">Обзор сети</b></span
         >
         <div class="header-right">
+          <label class="theme-switch"><span>Тема</span><select data-theme-switch aria-label="Тема"><option value="dark">Тёмная</option><option value="light">Светлая</option><option value="system">Как в системе</option></select></label>
           <span class="live" id="freshness">Подключение…</span
           ><button id="refresh" class="subtle">Обновить</button>
         </div>

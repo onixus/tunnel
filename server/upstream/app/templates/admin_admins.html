@@ -6,7 +6,7 @@
 {% if err %}<div class="alert warn">{{ icon('zap') }} {{ err }}</div>{% endif %}
 
 <div style="display:flex; justify-content:flex-end; margin-bottom:16px;">
-  <button type="button" onclick="openModal('adminModal')">{{ icon('user-plus', 16) }} Добавить администратора</button>
+  <button class="primary" type="button" onclick="openModal('adminModal')">{{ icon('user-plus', 16) }} Добавить администратора</button>
 </div>
 
 <div class="card">
@@ -20,7 +20,7 @@
       <tbody>
       {% for a in admins %}
         <tr>
-          <td><div class="who"><span class="avatar" style="background: var(--amber-soft); color: var(--amber);">{{ a['email'][0]|upper }}</span>
+          <td><div class="who"><span class="avatar" style="background: var(--accent-subtle); color: var(--accent);">{{ a['email'][0]|upper }}</span>
             <div>
               <span>{{ a['email'] }}</span>
               {% if a['recovery_email'] %}
@@ -33,13 +33,13 @@
               <!-- Форма смены пароля -->
               <form method="post" action="/admin/admins/{{ a['id'] }}/password" class="row" style="margin:0; gap:4px; align-items:center; flex-wrap:nowrap;">
                 <input type="password" name="password" placeholder="Сменить пароль" minlength="8" required style="width:130px; font-size:12px; padding:5px 8px; border-radius:6px;">
-                <button type="submit" class="ghost sm" title="Сохранить пароль" style="padding:5px 8px; border-radius:6px;">{{ icon('check', 12) }}</button>
+                <button type="submit" class="ghost sm" title="Сохранить пароль" style="padding:5px 8px; border-radius:6px;">{{ icon('check', 16) }}</button>
               </form>
 
               <!-- Кнопка удаления -->
               {% if a['id'] != admin['id'] %}
               <form method="post" action="/admin/admins/{{ a['id'] }}/delete" style="margin:0;" onsubmit="return confirm('Удалить администратора {{ a['email'] }}?');">
-                <button type="submit" class="danger ghost sm" title="Удалить" style="padding:5px 8px; border-radius:6px;">{{ icon('trash', 13) }}</button>
+                <button type="submit" class="danger ghost sm" title="Удалить" style="padding:5px 8px; border-radius:6px;">{{ icon('trash', 16) }}</button>
               </form>
               {% else %}
               <span class="mut" style="font-size:12px; padding:0 8px;">(Вы вошли)</span>
@@ -60,7 +60,7 @@
 <div class="modal-backdrop" id="adminModal" onclick="if(event.target===this)closeModal('adminModal')">
   <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="adminModalTitle">
     <div class="modal-head">
-      <span class="m-ic" style="background: linear-gradient(135deg, #fbbf24, #f59e0b);">{{ icon('user-plus', 20) }}</span>
+      <span class="m-ic" style="background: var(--accent);">{{ icon('user-plus', 20) }}</span>
       <h2 id="adminModalTitle" style="flex:1;">Добавить администратора</h2>
       <button type="button" class="modal-x" onclick="closeModal('adminModal')" aria-label="Закрыть" style="font-size:20px;">&times;</button>
     </div>

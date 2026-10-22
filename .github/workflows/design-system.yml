@@ -1,0 +1,31 @@
+name: APEX Design System
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  design-system:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated browser dependencies
+        run: python -m pip install pytest playwright Jinja2
+      - run: python -m playwright install --with-deps chromium
+      - name: Check shared distribution and syntax
+        run: |
+          python scripts/sync-design-system.py --check
+          node --check server/design-system/theme.js
+          node --check server/console/static/console.js
+      - name: Check tokens, contrast, themes and every console screen
+        run: python -m pytest -q server/tests/test_design_system.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apex-design-system-screenshots
+          path: test-results/design-system

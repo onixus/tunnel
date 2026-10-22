@@ -57,13 +57,13 @@ def site():
                 return self.send(box['state'])
             if self.path in ('/console', '/console/'):
                 return self.send((ROOT / 'server/console/templates/index.html').read_bytes().replace(b'{{ csrf }}', b'test-csrf'), kind='text/html')
-            name = self.path.rsplit('/', 1)[-1]
+            name = self.path.removeprefix('/console/static/')
             source = ROOT / 'server/console/static' / name
             # Optional compatibility assets for isolated extension development. CI uses repository files.
             if not source.exists() and os.environ.get('TUNNEL_LEGACY_ASSETS'):
                 source = Path(os.environ['TUNNEL_LEGACY_ASSETS']) / name
-            if source.is_file() and name in ('console.js', 'console.css', 'routing-ui.js', 'routing.css', 'protocols-ui.js', 'protocols.css', 'config-export.js', 'config-export.css'):
-                return self.send(source.read_bytes(), kind='text/javascript' if name.endswith('.js') else 'text/css')
+            if source.is_file() and (name.startswith('apex/') and '..' not in name or name in ('console.js', 'console.css', 'routing-ui.js', 'routing.css', 'protocols-ui.js', 'protocols.css', 'config-export.js', 'config-export.css')):
+                return self.send(source.read_bytes(), kind='text/javascript' if name.endswith('.js') else 'text/css' if name.endswith('.css') else 'font/ttf')
             self.send({'detail': 'not found'}, 404)
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
