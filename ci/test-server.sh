@@ -2,6 +2,7 @@
 # Same server/browser/native acceptance scope as all four GitHub workflows.
 set -euo pipefail
 mkdir -p reports test-results "$TMPDIR"
+if [[ "${1:-all}" != acceptance ]]; then
 python --version
 cargo --version
 python -m pip freeze > reports/python-environment.txt
@@ -28,6 +29,13 @@ done
 python -m pytest -q --junitxml=reports/device-browser.xml server/tests/test_credential_concurrency.py server/tests/test_agent_routes_browser.py server/tests/test_device_credentials_browser.py
 python server/tests/native_exchange.py
 python server/tests/routing_exchange.py
+if [[ "${1:-all}" == container ]]; then
+    mkdir -p .acceptance-bin/debug
+    cp "$CARGO_TARGET_DIR/debug/rtrust-codec" "$CARGO_TARGET_DIR/debug/rtrust-inspect" .acceptance-bin/debug/
+    exit 0
+fi
+fi
+export RTRUST_CODEC="$CARGO_TARGET_DIR/debug/rtrust-codec"
 mkdir -p endpoint-fixture
 curl -fL --retry 3 https://github.com/TrustTunnel/TrustTunnel/releases/download/v1.1.0/trusttunnel-v1.1.0-linux-x86_64.tar.gz -o endpoint-fixture/endpoint.tar.gz
 echo '91c2ea3db7416a01b5258a4c047ec22890490bc55e1b194206031aa75144f0e7  endpoint-fixture/endpoint.tar.gz' | sha256sum -c -

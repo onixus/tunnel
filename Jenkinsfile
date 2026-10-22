@@ -46,12 +46,19 @@ pipeline {
                     docker image inspect --format '{{.Id}}' "tunnel-ci:$BUILD_NUMBER" > reports/test-image.txt
                     mkdir -p .ci-tmp
                     docker run --rm --network host \
-                        -v "$WORKSPACE:$WORKSPACE" -w "$WORKSPACE" \
-                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v "$WORKSPACE:$WORKSPACE:z" -w "$WORKSPACE" \
                         -v tunnel-server-ci-target:/ci-target \
                         -e CARGO_TARGET_DIR=/ci-target \
                         -e "TMPDIR=$WORKSPACE/.ci-tmp" \
-                        "tunnel-ci:$BUILD_NUMBER" bash ci/test-server.sh
+                        "tunnel-ci:$BUILD_NUMBER" bash ci/test-server.sh container
+                    # Run Docker fixture orchestration on the agent; the test
+                    # container does not need access to the host Docker socket.
+                    python3 -m venv .acceptance-venv
+                    .acceptance-venv/bin/pip install -r server/test-environment/requirements.txt
+                    TMPDIR="$WORKSPACE/.ci-tmp" \
+                        PATH="$WORKSPACE/.acceptance-venv/bin:$PATH" \
+                        CARGO_TARGET_DIR="$WORKSPACE/.acceptance-bin" \
+                        bash ci/test-server.sh acceptance
                 '''
             }
             post {
