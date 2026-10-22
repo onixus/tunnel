@@ -96,12 +96,12 @@ def api(tmp_path, monkeypatch):
         connection.executescript('''
             CREATE TABLE users(id INTEGER, email TEXT, status TEXT, created_at TEXT);
             CREATE TABLE configs(id INTEGER, user_id INTEGER, tt_username TEXT, label TEXT,
-                                 created_at TEXT, revoked_at TEXT, tt_password TEXT);
+                                 created_at TEXT, revoked_at TEXT, tt_password TEXT, device_id INTEGER);
             CREATE TABLE app_devices(id INTEGER, user_id INTEGER, name TEXT, platform TEXT,
                                      last_seen_at TEXT, revoked_at TEXT);
             INSERT INTO users VALUES(1,'fixture@example.invalid','active','test');
-            INSERT INTO configs VALUES(7,1,'fixture','Fixture','test',NULL,'fixture-secret');
-            INSERT INTO configs VALUES(8,1,'revoked','Revoked','test','test','revoked-secret');
+            INSERT INTO configs VALUES(7,1,'fixture','Fixture','test',NULL,'fixture-secret',NULL);
+            INSERT INTO configs VALUES(8,1,'revoked','Revoked','test','test','revoked-secret',NULL);
         ''')
     def get_config(id):
         with connect() as connection:
