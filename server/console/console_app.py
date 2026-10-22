@@ -46,9 +46,21 @@ def init():
         CREATE TABLE IF NOT EXISTS contacts(source TEXT, user_id INTEGER, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,user_id));
         CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, actor INTEGER, channel TEXT, subject TEXT, body TEXT, state TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS deliveries(campaign TEXT, recipient TEXT, state TEXT, error TEXT, PRIMARY KEY(campaign,recipient));
-        CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS person_accounts(person INTEGER NOT NULL, source TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(source,user_id));
         ''')
+        # Existing installations also need monotonic IDs: stale tabs/jobs retain person IDs.
+        c.execute('BEGIN IMMEDIATE')
+        schema=c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='people'").fetchone()[0]
+        if 'AUTOINCREMENT' not in schema.upper():
+            # Deleted IDs remain in the durable job history even when no live people remain.
+            high_water=c.execute("SELECT MAX(COALESCE((SELECT MAX(id) FROM people),0),COALESCE((SELECT MAX(CAST(json_extract(payload,'$.id') AS INTEGER)) FROM jobs WHERE action='person.delete' AND json_valid(payload)),0))").fetchone()[0]
+            c.execute("CREATE TABLE people_next(id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP)")
+            c.execute('INSERT INTO people_next SELECT id,nick,email,chat_id,consent,created FROM people')
+            c.execute('DROP TABLE people')
+            c.execute('ALTER TABLE people_next RENAME TO people')
+            c.execute("DELETE FROM sqlite_sequence WHERE name='people'")
+            c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('people',?)",(high_water,))
         c.execute("UPDATE jobs SET state='unknown',result=? WHERE state='running'",(json.dumps({'message':'Сервис перезапущен. Проверьте состояние перед повтором.'}),))
         c.execute("UPDATE deliveries SET state='unknown',error='Прервано; автоматический повтор отключён' WHERE state='sending'")
         c.execute("UPDATE campaigns SET state='unknown' WHERE state='sending'")
@@ -182,7 +194,7 @@ def delete_account(source,uid,admin):
     if source=='trusttunnel':
         if not db.get_user(uid): return unlink(source,uid)
         with db.connect() as c:
-            devices=[r['id'] for r in c.execute('SELECT id FROM app_devices WHERE user_id=? AND revoked_at IS NULL',(uid,))]
+            devices=[r['id'] for r in c.execute('SELECT id FROM app_devices WHERE user_id=?',(uid,))]
             integrated=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rtrust_credential_operations'").fetchone()
         # Device credentials are revoked through their owner before the account disappears.
         for d in devices: managed_device_revoke(admin,d) if integrated else db.revoke_device(d)
@@ -258,7 +270,8 @@ def perform(action,data,admin):
         device=db.get_device(data['id'])
         if not device: raise RuntimeError('Устройство не найдено')
         # Revocation reaches the endpoint first; only revoked rows are removed.
-        if not device['revoked_at']: perform('trusttunnel.device-revoke',{'id':device['id']},admin)
+        # revoked_at records desired state, not confirmation that the endpoint applied it.
+        perform('trusttunnel.device-revoke',{'id':device['id']},admin)
         with db.connect() as c:
             c.execute('DELETE FROM configs WHERE device_id=? AND revoked_at IS NOT NULL',(device['id'],))
             c.execute('DELETE FROM app_devices WHERE id=? AND revoked_at IS NOT NULL',(device['id'],))

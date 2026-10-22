@@ -326,6 +326,82 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.post('people/unlink',{'source':'trusttunnel','user_id':self.user}).status_code,200)
         self.assertEqual(self.client.get('/console/api/state').json()['people'][0]['accounts'],{})
 
+    def test_pending_revocation_survives_device_account_and_person_deletion(self):
+        from app import rtrust_credentials as managed
+        managed.init()
+        for state in ('requested','pending','failed'):
+            for action in ('trusttunnel.device-delete','trusttunnel.delete','person.delete'):
+                with self.subTest(state=state,action=action):
+                    uid=db.create_user(secrets.token_hex(8)+'@example.invalid','unused')
+                    device=db.create_device(uid,'phone',secrets.token_hex(32))
+                    cfg=db.create_device_config(uid,device,secrets.token_hex(8),'synthetic','phone')
+                    operation=secrets.token_hex(16)
+                    with db.connect() as c:
+                        c.execute("UPDATE app_devices SET revoked_at=datetime('now') WHERE id=?",(device,))
+                        c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE id=?",(cfg,))
+                        c.execute("INSERT INTO rtrust_credential_operations(id,device,owner,action,generation,state,requested) VALUES(?,?,?,'revoke',1,?,0)",(operation,device,uid,state))
+                    with ui.connect() as c:pid=c.execute('INSERT INTO people(nick) VALUES(?)',('p'+secrets.token_hex(8),)).lastrowid
+                    ui.link(pid,'trusttunnel',uid)
+                    identifier=device if action=='trusttunnel.device-delete' else uid if action=='trusttunnel.delete' else pid
+                    # Integration still owns revocation when provisioning is disabled.
+                    with patch.dict(os.environ,RTRUST_MANAGED_CREDENTIALS='0'),patch.object(ui,'managed_device_revoke',side_effect=RuntimeError('endpoint pending')) as revoke,patch.object(ui,'legacy') as legacy:
+                        with self.assertRaisesRegex(RuntimeError,'endpoint pending'):ui.perform(action,{'id':identifier},self.admin)
+                        revoke.assert_called_once_with(self.admin,device)
+                        legacy.assert_not_called()
+                    self.assertIsNotNone(db.get_device(device));self.assertIsNotNone(db.get_user(uid));self.assertIsNotNone(db.get_config(cfg))
+                    self.assertEqual(ui.person(pid)['accounts'],{'trusttunnel':uid})
+                    with db.connect() as c:self.assertEqual(c.execute('SELECT state FROM rtrust_credential_operations WHERE id=?',(operation,)).fetchone()[0],state)
+                    # Once the owner confirms application, normal deletion can finish.
+                    with db.connect() as c:c.execute("UPDATE rtrust_credential_operations SET state='applied' WHERE id=?",(operation,))
+                    with patch.object(ui,'managed_device_revoke',return_value={'message':'applied'}) as revoke,patch.object(ui,'legacy',side_effect=lambda *a:db.delete_user(uid)):
+                        ui.perform(action,{'id':identifier},self.admin)
+                        revoke.assert_called_once_with(self.admin,device)
+                    self.assertIsNone(db.get_device(device));self.assertIsNone(db.get_config(cfg))
+                    with db.connect() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM rtrust_credential_operations WHERE id=?',(operation,)).fetchone()[0],0)
+
+    def test_deleting_revoked_shared_device_keeps_shared_key(self):
+        from app import rtrust_credentials as managed
+        managed.init()
+        device=db.create_device(self.user,'shared-phone',secrets.token_hex(32))
+        shared=db.create_config(self.user,'shared-key','synthetic','shared')
+        db.revoke_device(device)
+        with patch.object(ui,'managed_device_revoke',return_value={'message':'Shared and external credentials remain valid'}) as revoke:
+            ui.perform('trusttunnel.device-delete',{'id':device},self.admin)
+            revoke.assert_called_once_with(self.admin,device)
+        self.assertIsNone(db.get_device(device));self.assertIsNotNone(db.get_config(shared))
+
+    def test_people_migration_preserves_links_contacts_and_deleted_id_high_water(self):
+        with ui.connect() as c:
+            c.execute('DROP TABLE people')
+            c.execute('CREATE TABLE people(id INTEGER PRIMARY KEY,nick TEXT NOT NULL UNIQUE COLLATE NOCASE,email TEXT,chat_id INTEGER,consent INTEGER NOT NULL DEFAULT 0,created TEXT DEFAULT CURRENT_TIMESTAMP)')
+            c.execute("INSERT INTO people VALUES(7,'alice','alice@example.invalid',42,1,'original')")
+            c.execute("INSERT INTO jobs(id,action,payload,state) VALUES('historical','person.delete',?, 'success')",(json.dumps({'id':41}),))
+        ui.link(7,'trusttunnel',self.user)
+        ui.init()
+        self.assertEqual(ui.person(7),{'id':7,'nick':'alice','email':'alice@example.invalid','chat_id':42,'consent':1,'created':'original','accounts':{'trusttunnel':self.user}})
+        with ui.connect() as c:
+            self.assertEqual(tuple(c.execute('SELECT email,chat_id,consent FROM contacts').fetchone()),('alice@example.invalid',42,1))
+            with self.assertRaises(ui.sqlite3.IntegrityError):c.execute("INSERT INTO people(nick) VALUES('ALICE')")
+            new=c.execute("INSERT INTO people(nick) VALUES('bob')").lastrowid
+        self.assertGreater(new,41)
+        with ui.connect() as c:c.execute('DELETE FROM people')
+        ui.init()
+        with ui.connect() as c:after=c.execute("INSERT INTO people(nick) VALUES('carol')").lastrowid
+        self.assertGreater(after,new)
+
+    def test_stale_person_delete_cannot_target_a_new_person(self):
+        old=self.post('people/link',{'source':'trusttunnel','user_id':self.user,'nick':'alice'}).json()['id']
+        self.job('person.delete',{'id':old})
+        with patch.object(ui,'legacy',side_effect=lambda *a:db.delete_user(self.user)):ui.work_once()
+        replacement=db.create_user('bob@example.invalid','unused')
+        new=self.post('people/link',{'source':'trusttunnel','user_id':replacement,'nick':'bob'}).json()['id']
+        self.assertGreater(new,old)
+        self.job('person.delete',{'id':old})
+        with patch.object(ui,'legacy') as legacy:
+            ui.work_once();legacy.assert_not_called()
+        self.assertIsNotNone(db.get_user(replacement));self.assertEqual(ui.person(new)['accounts'],{'trusttunnel':replacement})
+        self.assertEqual(self.post('people/contact',{'id':old,'email':'stale@example.invalid'}).status_code,404)
+
 class AgentTests(unittest.TestCase):
     def test_fixed_allowlist(self):
         with self.assertRaises(agent.Rejected):agent.dispatch('system.shell',{'command':'id'})
