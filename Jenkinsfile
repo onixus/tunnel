@@ -49,7 +49,7 @@ pipeline {
                         -v "$WORKSPACE:$WORKSPACE:z" -w "$WORKSPACE" \
                         -v tunnel-server-ci-target:/ci-target \
                         -e CARGO_TARGET_DIR=/ci-target \
-                        -e "TMPDIR=$WORKSPACE/.ci-tmp" \
+                        -e TMPDIR=/tmp \
                         -e "CI_HOST_UID=$(id -u)" -e "CI_HOST_GID=$(id -g)" \
                         "tunnel-ci:$BUILD_NUMBER" bash ci/run-container-tests.sh
                     # Run Docker fixture orchestration on the agent; the test
