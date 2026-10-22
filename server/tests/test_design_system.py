@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -51,8 +52,8 @@ def source(path):
     return path.read_bytes()
 
 
-def render_portal(name):
-    env = Environment(loader=FileSystemLoader(ROOT / 'server/upstream/app/templates'), undefined=ChainableUndefined, autoescape=True)
+def render_portal(name, templates=None):
+    env = Environment(loader=FileSystemLoader(templates or ROOT / 'server/upstream/app/templates'), undefined=ChainableUndefined, autoescape=True)
     if BASELINE:
         from jinja2 import DictLoader
         env.loader = DictLoader({p.name: source(p).decode() for p in (ROOT / 'server/upstream/app/templates').glob('*.html')})
@@ -68,7 +69,14 @@ def render_portal(name):
 
 
 @pytest.fixture
-def page():
+def page(tmp_path):
+    installed = tmp_path / 'portal'
+    shutil.copytree(ROOT / 'server/upstream/app', installed, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    load_apply().apply(ROOT / 'server/upstream/app', installed)
+    spec = importlib.util.spec_from_file_location('portal_patch', ROOT / 'deploy/portal_patch.py')
+    patcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(patcher)
+    patcher.integrate(installed)
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, executable_path=os.environ.get('CHROMIUM_PATH'))
         context = browser.new_context(viewport={'width': 1440, 'height': 1000}, reduced_motion='reduce', color_scheme='dark')
@@ -95,6 +103,8 @@ def page():
             if path.startswith('/screen/'):
 
                 return req.fulfill(body=render_portal(path.rsplit('/', 1)[-1]), content_type='text/html')
+            if path.startswith('/installed/'):
+                return req.fulfill(body=render_portal(path.rsplit('/', 1)[-1], installed / 'templates'), content_type='text/html')
             for prefix, folder in [('/console/static/', 'server/console/static'), ('/static/', 'server/upstream/app/static'), ('/static/', 'server/overlay/app/static')]:
                 if path.startswith(prefix):
                     file = ROOT / folder / path.removeprefix(prefix)
@@ -162,6 +172,22 @@ def test_portal_screens(page, mode):
     page.set_viewport_size({'width': 390, 'height': 844})
     screenshot(page, f'portal-mobile-{mode}')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+@pytest.mark.parametrize('mode', ['dark', 'light'])
+@pytest.mark.parametrize('width', [320, 390])
+def test_installed_portal_mobile_navigation(page, mode, width):
+    page.set_viewport_size({'width': width, 'height': 844})
+    page.goto('https://design.example.invalid/installed/dashboard.html')
+    theme(page, mode)
+    for selector in ['header a[href="/profiles"]', 'header [data-theme-switch]', 'header a[href="/logout"]']:
+        control = page.locator(selector)
+        expect(control).to_be_visible()
+        box = control.bounding_box()
+        assert box['x'] >= 0 and box['x'] + box['width'] <= width, selector
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    assert_contrast(page)
+    screenshot(page, f'installed-portal-mobile-{width}-{mode}')
 
 
 def test_legacy_theme_preference_is_migrated(page):

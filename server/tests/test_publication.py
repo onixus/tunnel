@@ -84,6 +84,10 @@ class PublicationTests(unittest.TestCase):
             if args[:2] == ('docker', 'build'):
                 context = Path(args[-1])
                 self.assertTrue((context / 'server/overlay/app/rtrust_profiles.py').exists())
+                for folder in ('templates', 'static'):
+                    for source in (ROOT / 'server/console' / folder).rglob('*'):
+                        if source.is_file():
+                            self.assertEqual((context / 'server/console' / source.relative_to(ROOT / 'server/console')).read_bytes(), source.read_bytes())
                 self.assertEqual(set(p.name for p in context.iterdir()), {'server', 'deploy'})
                 self.assertFalse(list(context.rglob('*.pyc')))
                 self.assertIn('BASE_IMAGE=rtrust-portal-base:' + 'a' * 64, args)
@@ -104,6 +108,12 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(smoke[smoke.index('--network') + 1], 'none')
         self.assertNotIn('--mount', smoke)
         self.assertNotIn('-v', smoke)
+        check = smoke[-1]
+        compile(check, '<candidate-check>', 'exec')
+        self.assertIn("if Path('/console').is_dir():", check)
+        self.assertIn('templates/index.html', check)
+        self.assertIn('static/apex/theme.js', check)
+        self.assertIn('static/apex/fonts/Inter.ttf', check)
 
     def test_existing_tag_rejected_even_when_base_is_an_id(self):
         base = 'sha256:' + 'a' * 64

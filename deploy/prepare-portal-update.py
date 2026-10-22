@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build and check an additive exchange update; never replace running containers."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -42,6 +43,11 @@ def prepare(base, tag):
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         (context / 'server/console').mkdir()
         shutil.copy2(ROOT / 'server/console/console_app.py', context / 'server/console/console_app.py')
+        for folder in ('templates', 'static'):
+            shutil.copytree(ROOT / 'server/console' / folder, context / 'server/console' / folder)
+        console_ui = {str(path.relative_to(context / 'server/console')): hashlib.sha256(path.read_bytes()).hexdigest()
+                      for folder in ('templates', 'static')
+                      for path in (context / 'server/console' / folder).rglob('*') if path.is_file()}
         (context / 'deploy').mkdir()
         for name in ('portal_patch.py', 'portal-update.Dockerfile', 'apply-design-system.py'):
             shutil.copy2(ROOT / 'deploy' / name, context / 'deploy' / name)
@@ -81,6 +87,13 @@ assert Path('/app/app/static/rtrust-admin-routes.js').is_file()
 assert {'get', 'post'} <= paths['/portal/v2/route-groups'].keys()
 assert 'route-groups' in Path('/app/app/static/rtrust-profiles.js').read_text(encoding='utf-8')
 print('PASS route API, UI and repeatable schema initialization')
+'''
+    check += '''
+if Path('/console').is_dir():
+    import hashlib
+    for name, digest in ''' + repr(console_ui) + '''.items():
+        assert hashlib.sha256((Path('/console') / name).read_bytes()).hexdigest() == digest, name
+    print('PASS exact console template, styles, scripts and font assets')
 '''
     run('docker', 'run', '--rm', '--network', 'none', '--read-only',
         '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',

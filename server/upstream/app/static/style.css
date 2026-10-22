@@ -190,7 +190,7 @@ button.danger:hover, .btn.danger:hover { background: var(--danger); color: var(-
   .field { min-width: 0; }
 }
 @media (max-width: 640px) {
-  header.topbar-client { padding: 0 16px; }
+  header.topbar-client { padding: 8px 16px; height: auto; min-height: var(--header-height); flex-wrap: wrap; gap: 8px; }
   .brand small { display: none; }
   body.client main { margin: 20px auto; padding: 0 12px 40px; }
 }

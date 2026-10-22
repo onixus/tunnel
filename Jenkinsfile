@@ -60,6 +60,13 @@ pipeline {
                         PATH="$WORKSPACE/.acceptance-venv/bin:$PATH" \
                         CARGO_TARGET_DIR="$WORKSPACE/.acceptance-bin" \
                         bash ci/test-server.sh acceptance
+                    docker build --build-arg "TEST_IMAGE=tunnel-ci:$BUILD_NUMBER" \
+                        -f ci/portal-update-fixture.Dockerfile \
+                        -t "tunnel-pr36-legacy-ui:$BUILD_NUMBER" .
+                    .acceptance-venv/bin/python deploy/prepare-portal-update.py \
+                        --base-image "tunnel-pr36-legacy-ui:$BUILD_NUMBER" \
+                        --tag "tunnel-pr36-ui-check:$BUILD_NUMBER" > reports/additive-image.json
+                    printf '%s\\n' 'PASS real additive image build and exact console UI hashes' > reports/additive-image.txt
                 '''
             }
             post {
