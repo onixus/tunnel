@@ -48,8 +48,8 @@ const pill = (s, t) =>
   `<span class="pill ${["failed", "blocked", "unknown"].includes(s) ? "red" : ["queued", "draft", "partial"].includes(s) ? "warn" : ["running", "pending"].includes(s) ? "blue" : ""}">${esc(t || labels[s] || s)}</span>`;
 const heading = (title, sub, buttons = "") =>
   `<div class="heading"><div><div class="eyebrow">ONIXUS / CONTROL PLANE</div><h1>${title}</h1><p class="subtitle">${sub}</p></div>${buttons}</div>`;
-const table = (heads, rows) =>
-  `<div class="table-wrap"><table><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="${heads.length}" class="empty">Пока нет данных</td></tr>`}</tbody></table></div>`;
+const table = (heads, rows, { className = "", label = "" } = {}) =>
+  `<div class="table-wrap${className ? " " + esc(className) : ""}"${label ? ` role="region" aria-label="${esc(label)}" tabindex="0"` : ""}><table><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="${heads.length}" class="empty">Пока нет данных</td></tr>`}</tbody></table></div>`;
 const btn = (label, action, extra = "", cls = "") =>
   `<button class="${cls}" data-action="${action}" ${extra}>${label}</button>`;
 const bytes = (n) =>

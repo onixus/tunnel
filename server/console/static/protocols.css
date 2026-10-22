@@ -1,11 +1,26 @@
 /* Protocol lifecycle cards and container monitoring. */
-.protocol-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:18px; margin-bottom:14px; }
-.protocol-card { display:flex; flex-direction:column; }
-.protocol-card .service { padding-top:0; }
-.protocol-card dl { display:grid; grid-template-columns:auto 1fr; gap:8px 16px; margin:16px 0 4px; font-size:13px; }
+.protocol-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; margin-bottom:14px; }
+.protocol-card { display:flex; flex-direction:column; min-width:0; }
+.protocol-card .service { padding-top:0; flex-wrap:wrap; gap:12px; }
+.protocol-card .service strong { font-size:14px; }
+.protocol-card dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px 12px; margin:16px 0 4px; font-size:14px; }
 .protocol-card dt { color:var(--muted); }
 .protocol-card dd { margin:0; text-align:right; overflow-wrap:anywhere; }
 .protocol-card dd small { color:var(--muted); }
 .protocol-card .actions { margin-top:auto; padding-top:14px; align-items:center; }
-.protocol-card .muted { color:var(--muted); font-size:12.5px; }
+.protocol-card .muted { color:var(--muted); font-size:13px; }
 .unit-list { margin-bottom:18px; }
+.container-table table { table-layout:fixed; min-width:900px; white-space:normal; }
+.container-table th, .container-table td { padding:12px 8px; overflow-wrap:anywhere; }
+.container-table th { font-size:12px; letter-spacing:0; }
+.container-table th:nth-child(1) { width:18%; }
+.container-table th:nth-child(2) { width:22%; }
+.container-table th:nth-child(3), .container-table th:nth-child(4) { width:13%; }
+.container-table th:nth-child(5) { width:9%; }
+.container-table th:nth-child(6) { width:13%; }
+.container-table th:nth-child(7) { width:12%; }
+.container-table .pill { max-width:100%; white-space:normal; }
+.table-scroll-hint { display:none; color:var(--text-secondary); font-size:13px; margin:8px 0 18px; }
+@media (max-width:1100px) { .table-scroll-hint { display:block; } }
+@media (min-width:1500px) { .protocol-grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
+@media (max-width:600px) { .protocol-grid { grid-template-columns:minmax(0,1fr); } }

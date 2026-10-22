@@ -38,7 +38,7 @@ button {
     color 0.15s;
 }
 button:hover:not(:disabled) {
-  border-color: var(--accent-subtle);
+  border-color: var(--accent);
   background: var(--surface-2);
 }
 button:active:not(:disabled) {
@@ -252,8 +252,9 @@ header b {
 main {
   padding: 30px 36px 40px;
   min-height: calc(100vh - 110px);
-  max-width: 1480px;
-  margin: auto;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
 }
 .heading {
   display: flex;
@@ -489,6 +490,8 @@ p {
 /* Tables */
 .table-wrap {
   overflow: auto;
+  max-width: 100%;
+  min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -496,7 +499,7 @@ p {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 14px;
   text-align: left;
   white-space: nowrap;
 }
