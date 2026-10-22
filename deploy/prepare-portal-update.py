@@ -38,9 +38,8 @@ def prepare(base, tag):
         context = Path(folder)
         shutil.copytree(ROOT / 'server/overlay/app', context / 'server/overlay/app',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-        for folder in ('templates', 'static'):
-            shutil.copytree(ROOT / 'server/upstream/app' / folder, context / 'server/upstream/app' / folder,
-                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        shutil.copytree(ROOT / 'server/upstream/app', context / 'server/upstream/app',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         (context / 'server/console').mkdir()
         shutil.copy2(ROOT / 'server/console/console_app.py', context / 'server/console/console_app.py')
         (context / 'deploy').mkdir()

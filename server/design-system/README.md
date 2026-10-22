@@ -29,7 +29,11 @@ contacted at runtime. Status masks use Lucide check, triangle-alert, x and info
 geometry (ISC license, see `Lucide-LICENSE`).
 
 For additive images, `deploy/apply-design-system.py` installs UI assets while
-preserving profile and admin-route navigation. It does not replace Python API
-modules, databases, credentials or endpoint binaries. The console Dockerfile and
+preserving profile and admin-route navigation. It refuses an image whose
+template-rendering modules (`routes_*.py`, `templating.py`) differ from
+`server/upstream`, so templates never land on another portal release. It does not
+replace Python API modules, databases, credentials or endpoint binaries.
+
+`favicon.svg` is the portal brand mark, linked from both portal base templates. The console Dockerfile and
 portal candidate builder both include this step. Live installation requires a
 separate rollout; browser fixtures do not establish deployment acceptance.

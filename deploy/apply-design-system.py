@@ -3,8 +3,21 @@ from pathlib import Path
 import shutil
 import sys
 
+# The modules that render templates. main.py and endpoint.py are patched in deployed
+# images (portal_patch.py, install-trusttunnel-routing.py), so they cannot be compared.
+RENDERING_MODULES = ('routes_admin.py', 'routes_client.py', 'routes_device.py', 'templating.py')
+
+
+def check_portal_version(source, target):
+    """Templates are tied to the route code that renders them; refuse foreign images."""
+    for name in RENDERING_MODULES:
+        installed = target / name
+        if not installed.is_file() or installed.read_bytes() != (source / name).read_bytes():
+            raise RuntimeError(f'Portal {name} differs from server/upstream; rebuild the base image from this checkout')
+
 
 def apply(source, target):
+    check_portal_version(source, target)
     client = target / 'templates/base_client.html'
     admin = target / 'templates/base_admin.html'
     profiles = client.exists() and 'href="/profiles"' in client.read_text(encoding='utf-8')

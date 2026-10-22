@@ -3,8 +3,8 @@ ARG BASE_IMAGE=trusttunnel-web:profiles-20260930
 FROM ${BASE_IMAGE}
 USER root
 COPY server/console /console
-COPY server/upstream/app/templates /tmp/apex-portal/templates
-COPY server/upstream/app/static /tmp/apex-portal/static
+# Route modules come along so the script can refuse a different portal version.
+COPY server/upstream/app /tmp/apex-portal
 COPY deploy/apply-design-system.py /tmp/apply-design-system.py
 RUN python /tmp/apply-design-system.py /tmp/apex-portal /app/app && rm -rf /tmp/apex-portal /tmp/apply-design-system.py
 WORKDIR /app

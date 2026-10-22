@@ -2,6 +2,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
+import ast
 import importlib.util
 import json
 import os
@@ -36,6 +37,12 @@ def test_vendored_assets_and_component_colors():
             assert not re.search(r'#[0-9a-fA-F]{3,8}\b|rgba?\(|(?:slate|gray)-\d', source), path
             assert 'fonts.googleapis.com' not in source, path
             assert not re.search(r'font-size:\s*10(?:\.\d+)?px', source), path
+
+
+def overlay_csp():
+    """The production policy of the overlay pages, so blocked assets fail here too."""
+    match = re.search(r'^CSP = (".*")$', (ROOT / 'server/overlay/app/rtrust_profiles.py').read_text(), re.M)
+    return ast.literal_eval(match.group(1))
 
 
 def source(path):
@@ -84,7 +91,7 @@ def page():
             if path.startswith('/overlay/'):
                 env = Environment(loader=FileSystemLoader(ROOT / 'server/overlay/app/templates'), autoescape=True)
                 html = env.get_template(path.rsplit('/', 1)[-1]).render(csrf='synthetic', brand='ONIXUS', user={'email': 'operator@example.invalid'})
-                return req.fulfill(body=html, content_type='text/html')
+                return req.fulfill(body=html, content_type='text/html', headers={'Content-Security-Policy': overlay_csp()})
             if path.startswith('/screen/'):
 
                 return req.fulfill(body=render_portal(path.rsplit('/', 1)[-1]), content_type='text/html')
@@ -92,7 +99,7 @@ def page():
                 if path.startswith(prefix):
                     file = ROOT / folder / path.removeprefix(prefix)
                     if file.is_file():
-                        return req.fulfill(body=source(file), content_type='text/css' if file.suffix == '.css' else 'text/javascript' if file.suffix == '.js' else 'font/ttf')
+                        return req.fulfill(body=source(file), content_type={'.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml'}.get(file.suffix, 'font/ttf'))
             missing.append(path)
             req.fulfill(status=404)
         pg.route('**/*', route)
@@ -148,12 +155,25 @@ def test_portal_screens(page, mode):
         assert_contrast(page)
         if not BASELINE:
             assert page.locator('.primary:visible').count() <= 1
+            assert page.evaluate("fetch(document.querySelector('link[rel=icon]').href).then(r => r.ok)")
             assert page.evaluate("document.fonts.check('14px Inter')")
     page.goto('https://design.example.invalid/screen/dashboard.html')
     theme(page, mode)
     page.set_viewport_size({'width': 390, 'height': 844})
     screenshot(page, f'portal-mobile-{mode}')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+def test_legacy_theme_preference_is_migrated(page):
+    # Runs after the fixture's default, once: a returning user of the old portal toggle.
+    page.context.add_init_script("""if (!sessionStorage.getItem('seeded')) {
+      sessionStorage.setItem('seeded', '1'); localStorage.removeItem('apex.theme'); localStorage.setItem('theme', 'light');
+    }""")
+    page.emulate_media(color_scheme='dark')
+    page.goto('https://design.example.invalid/console/')
+    expect(page.locator('html')).to_have_attribute('data-theme', 'light')
+    assert page.locator('[data-theme-switch]').input_value() == 'light'
+    assert page.evaluate("[localStorage.getItem('apex.theme'), localStorage.getItem('theme')]") == ['light', None]
 
 
 def test_theme_lifecycle_and_contrast(page):
@@ -193,21 +213,50 @@ def test_theme_lifecycle_and_contrast(page):
     assert page.locator('body').evaluate('(e)=>getComputedStyle(e).backgroundColor') == 'rgb(245, 247, 251)'
 
 
-def test_additive_image_ui_keeps_navigation(tmp_path):
+def load_apply():
     spec = importlib.util.spec_from_file_location('apply_ds', ROOT / 'deploy/apply-design-system.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def install_portal_modules(module, target):
+    for name in module.RENDERING_MODULES:
+        (target / name).write_bytes((ROOT / 'server/upstream/app' / name).read_bytes())
+
+
+def test_additive_image_ui_keeps_navigation(tmp_path):
+    module = load_apply()
+    install_portal_modules(module, tmp_path)
     (tmp_path / 'templates').mkdir()
     (tmp_path / 'templates/base_client.html').write_text('<a href="/profiles">Profiles</a>')
     (tmp_path / 'templates/base_admin.html').write_text('<a href="/admin/agent-routes">Routes</a>')
     (tmp_path / 'static').mkdir()
     (tmp_path / 'static/existing-overlay.js').write_text('preserved')
+    for name in module.RENDERING_MODULES:
+        (tmp_path / name).write_bytes((ROOT / 'server/upstream/app' / name).read_bytes())
     module.apply(ROOT / 'server/upstream/app', tmp_path)
     module.apply(ROOT / 'server/upstream/app', tmp_path)
     assert (tmp_path / 'templates/base_client.html').read_text().count('href="/profiles"') == 1
     assert (tmp_path / 'templates/base_admin.html').read_text().count('href="/admin/agent-routes"') == 1
     assert (tmp_path / 'static/existing-overlay.js').read_text() == 'preserved'
     assert (tmp_path / 'static/apex/fonts/Inter.ttf').read_bytes() == (DS / 'fonts/Inter.ttf').read_bytes()
+    (tmp_path / 'routes_client.py').write_text('different installed portal')
+    before = (tmp_path / 'templates/base_client.html').read_bytes()
+    with pytest.raises(RuntimeError, match='differs'):
+        module.apply(ROOT / 'server/upstream/app', tmp_path)
+    assert (tmp_path / 'templates/base_client.html').read_bytes() == before
+
+
+def test_additive_image_ui_refuses_other_portal_version(tmp_path):
+    module = load_apply()
+    install_portal_modules(module, tmp_path)
+    (tmp_path / 'routes_client.py').write_text('# another portal release')
+    (tmp_path / 'templates').mkdir()
+    (tmp_path / 'templates/dashboard.html').write_text('kept')
+    with pytest.raises(RuntimeError, match='routes_client.py'):
+        module.apply(ROOT / 'server/upstream/app', tmp_path)
+    assert (tmp_path / 'templates/dashboard.html').read_text() == 'kept'
 
 
 def assert_contrast(page):
@@ -252,6 +301,8 @@ def test_overlay_screens(page, mode):
         page.goto('https://design.example.invalid/overlay/' + name + '.html')
         theme(page, mode)
         expect(page.locator('#status')).not_to_contain_text('Ошибка')
+        if not BASELINE:
+            assert page.evaluate("document.fonts.load('14px Inter').then(faces => faces.some(f => f.status === 'loaded'))")
         screenshot(page, f'overlay-{name}-{mode}')
         assert_contrast(page)
         page.set_viewport_size({'width': 390, 'height': 844})

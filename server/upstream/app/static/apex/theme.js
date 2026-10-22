@@ -5,7 +5,17 @@
   const media = matchMedia('(prefers-color-scheme: dark)');
   const valid = value => ['dark', 'light', 'system'].includes(value);
   let preference = 'system';
-  try { const saved = localStorage.getItem('apex.theme'); if (valid(saved)) preference = saved; } catch (_) { /* Private/locked storage. */ }
+  try {
+    let saved = localStorage.getItem('apex.theme');
+    // The pre-APEX portal toggle stored 'dark'/'light' under 'theme'; carry it over once.
+    const legacy = localStorage.getItem('theme');
+    if (saved === null && (legacy === 'dark' || legacy === 'light')) {
+      saved = legacy;
+      localStorage.setItem('apex.theme', saved);
+    }
+    if (legacy !== null) localStorage.removeItem('theme');
+    if (valid(saved)) preference = saved;
+  } catch (_) { /* Private/locked storage. */ }
   function apply() {
     const theme = preference === 'system' ? (media.matches ? 'dark' : 'light') : preference;
     root.dataset.theme = theme;
