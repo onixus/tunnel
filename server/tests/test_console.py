@@ -226,6 +226,182 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.job('hysteria.create',{'username':'x; touch /tmp/foo'}).status_code,422)
         self.assertEqual(self.post('contacts',{'source':'trusttunnel','id':999999,'email':'x@y.invalid'}).status_code,404)
 
+    def test_person_create_generates_every_account_and_links_contacts(self):
+        snapshot={'hysteria_users':[],'amnezia_users':[],'cdn_users':[]}
+        created=[]
+        def fake_agent(op,data=None):
+            if op=='snapshot':return snapshot
+            created.append((op,data));return {'message':'ok','id':7}
+        def fake_legacy(admin,path,data):
+            if path=='users/create':db.create_user(data['email'],'unused')
+            created.append((path,data.get('label')));return {'message':'ok'}
+        with patch.object(ui,'agent',side_effect=fake_agent):
+            r=self.job('person.create',{'nick':'Ivan','email':'','chat_id':42,'consent':True,'protocols':['cdn','trusttunnel','hysteria','amnezia']})
+            self.assertEqual(r.status_code,200,r.text)
+            with patch.object(ui,'legacy',side_effect=fake_legacy):ui.work_once()
+        with ui.connect() as c:job=dict(c.execute('SELECT * FROM jobs').fetchone())
+        self.assertEqual(job['state'],'success',job['result'])
+        tt=db.get_user_by_email('ivan@onixus-rf.duckdns.org')
+        self.assertIsNotNone(tt)
+        self.assertIn(('hysteria.create',{'username':'ivan-vpn','days':365,'devices':3}),created)
+        self.assertIn(('amnezia.create',{'username':'ivan'}),created)
+        self.assertIn((f'users/{tt["id"]}/configs','Основной'),created)
+        people=self.client.get('/console/api/state').json()['people']
+        self.assertEqual(people[0]['nick'],'ivan')
+        self.assertEqual(people[0]['accounts'],{'trusttunnel':tt['id'],'hysteria':7,'amnezia':7,'cdn':7})
+        with ui.connect() as c:self.assertEqual(c.execute("SELECT chat_id,consent FROM contacts WHERE source='cdn'").fetchone()[:],(42,1))
+        # The same nick, or a login already taken in a protocol, is refused before any job.
+        self.assertEqual(self.job('person.create',{'nick':'ivan','protocols':['trusttunnel']}).status_code,409)
+        snapshot['cdn_users']=[{'id':1,'username':'petr'}]
+        with patch.object(ui,'agent',return_value=snapshot):
+            r=self.job('person.create',{'nick':'petr','protocols':['cdn']})
+        self.assertEqual(r.status_code,409);self.assertIn('CDN (petr)',r.json()['detail'])
+        self.assertEqual(self.job('person.create',{'nick':'Bad Nick','protocols':['trusttunnel']}).status_code,422)
+        self.assertEqual(self.job('person.create',{'nick':'okay','protocols':[]}).status_code,422)
+
+    def test_person_partial_failure_keeps_created_accounts(self):
+        def fake_agent(op,data=None):
+            if op=='snapshot':return {'hysteria_users':[]}
+            raise RuntimeError('H UI отклонил операцию')
+        def fake_legacy(admin,path,data):
+            if path=='users/create':db.create_user(data['email'],'unused')
+            return {'message':'ok'}
+        with patch.object(ui,'agent',side_effect=fake_agent):
+            self.job('person.create',{'nick':'anna','email':'anna@example.invalid','protocols':['trusttunnel','hysteria']})
+            with patch.object(ui,'legacy',side_effect=fake_legacy):ui.work_once()
+        with ui.connect() as c:
+            job=c.execute('SELECT * FROM jobs').fetchone()
+            self.assertEqual(job['state'],'failed')
+            self.assertIn('создан частично',job['result']);self.assertIn('H UI отклонил',job['result'])
+            self.assertEqual([tuple(r) for r in c.execute('SELECT source FROM person_accounts')],[('trusttunnel',)])
+        self.assertIsNotNone(db.get_user_by_email('anna@example.invalid'))
+
+    def test_person_delete_removes_accounts_devices_and_card(self):
+        with ui.connect() as c:pid=c.execute("INSERT INTO people(nick) VALUES('olga')").lastrowid
+        ui.link(pid,'trusttunnel',self.user);ui.link(pid,'cdn',3)
+        device=db.create_device(self.user,'phone',secrets.token_hex(32))
+        calls=[]
+        with patch.object(ui,'agent',side_effect=lambda op,data=None:calls.append((op,data)) or {'message':'ok'}),\
+             patch.object(ui,'legacy',side_effect=lambda a,path,data:calls.append(path) or db.delete_user(self.user)) as legacy:
+            self.job('person.delete',{'id':pid});ui.work_once()
+        self.assertIn(('cdn.delete',{'id':3}),calls);self.assertIn(f'users/{self.user}/delete',calls)
+        self.assertIsNone(db.get_user(self.user));self.assertIsNone(db.get_device(device))
+        with ui.connect() as c:
+            self.assertEqual(c.execute('SELECT state FROM jobs').fetchone()[0],'success')
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM people').fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM contacts').fetchone()[0],0)
+
+    def test_key_and_device_deletion(self):
+        device=db.create_device(self.user,'phone',secrets.token_hex(32))
+        bound=db.create_device_config(self.user,device,'device-key','x','device')
+        plain=db.create_config(self.user,'plain-key','y','plain')
+        for action,id in (('trusttunnel.key-delete',bound),('trusttunnel.key-delete',plain),('trusttunnel.device-delete',device)):
+            self.assertEqual(self.job(action,{'id':id}).status_code,200)
+        with patch.object(ui,'legacy',side_effect=lambda a,path,data:db.delete_config(plain) if path.startswith('configs/') else {'message':'ok'}):
+            for _ in range(3):ui.work_once()
+        with ui.connect() as c:states=[r[0] for r in c.execute('SELECT state FROM jobs ORDER BY rowid')]
+        self.assertEqual(states,['failed','success','success'])
+        self.assertIsNone(db.get_config(plain));self.assertIsNone(db.get_device(device));self.assertIsNone(db.get_config(bound))
+
+    def test_device_enrollment_code_is_single_use_secret(self):
+        db.set_settings({'portal_url':'https://vpn.example.invalid/'})
+        r=self.post('enroll',{'id':self.user});self.assertEqual(r.status_code,200,r.text)
+        link=r.json()['content'];code=link.split('#',1)[1]
+        self.assertTrue(link.startswith('https://vpn.example.invalid/e#'))
+        self.assertTrue(r.json()['qr_data_url'].startswith('data:image/svg+xml'))
+        self.assertIn('server=https%3A%2F%2Fvpn.example.invalid#',r.json()['app_link'])
+        with db.connect() as c:self.assertEqual(c.execute('SELECT code_hash FROM enroll_codes').fetchone()[0],security.hash_api_token(code))
+        with ui.connect() as c:self.assertNotIn(code,str(c.execute('SELECT * FROM audit').fetchall()))
+        with db.connect() as c:c.execute("UPDATE users SET status='blocked'")
+        self.assertEqual(self.post('enroll',{'id':self.user}).status_code,409)
+
+    def test_link_existing_account_to_person(self):
+        self.post('contacts',{'source':'trusttunnel','id':self.user,'chat_id':5,'consent':True})
+        r=self.post('people/link',{'source':'trusttunnel','user_id':self.user,'nick':'tester'});self.assertEqual(r.status_code,200,r.text)
+        self.assertEqual(self.post('people/link',{'source':'trusttunnel','user_id':self.user,'nick':'other'}).status_code,409)
+        person=self.client.get('/console/api/state').json()['people'][0]
+        self.assertEqual((person['email'],person['chat_id'],person['consent']),('test@example.invalid',5,1))
+        self.assertEqual(self.post('people/contact',{'id':person['id'],'email':'new@example.invalid','consent':False}).status_code,200)
+        with ui.connect() as c:self.assertEqual(tuple(c.execute('SELECT email,chat_id,consent FROM contacts').fetchone()),('new@example.invalid',None,0))
+        self.assertEqual(self.post('people/unlink',{'source':'trusttunnel','user_id':self.user}).status_code,200)
+        self.assertEqual(self.client.get('/console/api/state').json()['people'][0]['accounts'],{})
+
+    def test_pending_revocation_survives_device_account_and_person_deletion(self):
+        from app import rtrust_credentials as managed
+        managed.init()
+        for state in ('requested','pending','failed'):
+            for action in ('trusttunnel.device-delete','trusttunnel.delete','person.delete'):
+                with self.subTest(state=state,action=action):
+                    uid=db.create_user(secrets.token_hex(8)+'@example.invalid','unused')
+                    device=db.create_device(uid,'phone',secrets.token_hex(32))
+                    cfg=db.create_device_config(uid,device,secrets.token_hex(8),'synthetic','phone')
+                    operation=secrets.token_hex(16)
+                    with db.connect() as c:
+                        c.execute("UPDATE app_devices SET revoked_at=datetime('now') WHERE id=?",(device,))
+                        c.execute("UPDATE configs SET revoked_at=datetime('now') WHERE id=?",(cfg,))
+                        c.execute("INSERT INTO rtrust_credential_operations(id,device,owner,action,generation,state,requested) VALUES(?,?,?,'revoke',1,?,0)",(operation,device,uid,state))
+                    with ui.connect() as c:pid=c.execute('INSERT INTO people(nick) VALUES(?)',('p'+secrets.token_hex(8),)).lastrowid
+                    ui.link(pid,'trusttunnel',uid)
+                    identifier=device if action=='trusttunnel.device-delete' else uid if action=='trusttunnel.delete' else pid
+                    # Integration still owns revocation when provisioning is disabled.
+                    with patch.dict(os.environ,RTRUST_MANAGED_CREDENTIALS='0'),patch.object(ui,'managed_device_revoke',side_effect=RuntimeError('endpoint pending')) as revoke,patch.object(ui,'legacy') as legacy:
+                        with self.assertRaisesRegex(RuntimeError,'endpoint pending'):ui.perform(action,{'id':identifier},self.admin)
+                        revoke.assert_called_once_with(self.admin,device)
+                        legacy.assert_not_called()
+                    self.assertIsNotNone(db.get_device(device));self.assertIsNotNone(db.get_user(uid));self.assertIsNotNone(db.get_config(cfg))
+                    self.assertEqual(ui.person(pid)['accounts'],{'trusttunnel':uid})
+                    with db.connect() as c:self.assertEqual(c.execute('SELECT state FROM rtrust_credential_operations WHERE id=?',(operation,)).fetchone()[0],state)
+                    # Once the owner confirms application, normal deletion can finish.
+                    with db.connect() as c:c.execute("UPDATE rtrust_credential_operations SET state='applied' WHERE id=?",(operation,))
+                    with patch.object(ui,'managed_device_revoke',return_value={'message':'applied'}) as revoke,patch.object(ui,'legacy',side_effect=lambda *a:db.delete_user(uid)):
+                        ui.perform(action,{'id':identifier},self.admin)
+                        revoke.assert_called_once_with(self.admin,device)
+                    self.assertIsNone(db.get_device(device));self.assertIsNone(db.get_config(cfg))
+                    with db.connect() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM rtrust_credential_operations WHERE id=?',(operation,)).fetchone()[0],0)
+
+    def test_deleting_revoked_shared_device_keeps_shared_key(self):
+        from app import rtrust_credentials as managed
+        managed.init()
+        device=db.create_device(self.user,'shared-phone',secrets.token_hex(32))
+        shared=db.create_config(self.user,'shared-key','synthetic','shared')
+        db.revoke_device(device)
+        with patch.object(ui,'managed_device_revoke',return_value={'message':'Shared and external credentials remain valid'}) as revoke:
+            ui.perform('trusttunnel.device-delete',{'id':device},self.admin)
+            revoke.assert_called_once_with(self.admin,device)
+        self.assertIsNone(db.get_device(device));self.assertIsNotNone(db.get_config(shared))
+
+    def test_people_migration_preserves_links_contacts_and_deleted_id_high_water(self):
+        with ui.connect() as c:
+            c.execute('DROP TABLE people')
+            c.execute('CREATE TABLE people(id INTEGER PRIMARY KEY,nick TEXT NOT NULL UNIQUE COLLATE NOCASE,email TEXT,chat_id INTEGER,consent INTEGER NOT NULL DEFAULT 0,created TEXT DEFAULT CURRENT_TIMESTAMP)')
+            c.execute("INSERT INTO people VALUES(7,'alice','alice@example.invalid',42,1,'original')")
+            c.execute("INSERT INTO jobs(id,action,payload,state) VALUES('historical','person.delete',?, 'success')",(json.dumps({'id':41}),))
+        ui.link(7,'trusttunnel',self.user)
+        ui.init()
+        self.assertEqual(ui.person(7),{'id':7,'nick':'alice','email':'alice@example.invalid','chat_id':42,'consent':1,'created':'original','accounts':{'trusttunnel':self.user}})
+        with ui.connect() as c:
+            self.assertEqual(tuple(c.execute('SELECT email,chat_id,consent FROM contacts').fetchone()),('alice@example.invalid',42,1))
+            with self.assertRaises(ui.sqlite3.IntegrityError):c.execute("INSERT INTO people(nick) VALUES('ALICE')")
+            new=c.execute("INSERT INTO people(nick) VALUES('bob')").lastrowid
+        self.assertGreater(new,41)
+        with ui.connect() as c:c.execute('DELETE FROM people')
+        ui.init()
+        with ui.connect() as c:after=c.execute("INSERT INTO people(nick) VALUES('carol')").lastrowid
+        self.assertGreater(after,new)
+
+    def test_stale_person_delete_cannot_target_a_new_person(self):
+        old=self.post('people/link',{'source':'trusttunnel','user_id':self.user,'nick':'alice'}).json()['id']
+        self.job('person.delete',{'id':old})
+        with patch.object(ui,'legacy',side_effect=lambda *a:db.delete_user(self.user)):ui.work_once()
+        replacement=db.create_user('bob@example.invalid','unused')
+        new=self.post('people/link',{'source':'trusttunnel','user_id':replacement,'nick':'bob'}).json()['id']
+        self.assertGreater(new,old)
+        self.job('person.delete',{'id':old})
+        with patch.object(ui,'legacy') as legacy:
+            ui.work_once();legacy.assert_not_called()
+        self.assertIsNotNone(db.get_user(replacement));self.assertEqual(ui.person(new)['accounts'],{'trusttunnel':replacement})
+        self.assertEqual(self.post('people/contact',{'id':old,'email':'stale@example.invalid'}).status_code,404)
+
 class AgentTests(unittest.TestCase):
     def test_fixed_allowlist(self):
         with self.assertRaises(agent.Rejected):agent.dispatch('system.shell',{'command':'id'})

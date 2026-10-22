@@ -860,3 +860,41 @@ footer {
     transition: none !important;
   }
 }
+.modal-error:not([hidden]) {
+  background: #ff8f8a14;
+  color: var(--red);
+  border: 1px solid #ff8f8a4d;
+  padding: 11px 15px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+button.link:hover {
+  text-decoration: underline;
+}
+.account-card h3 {
+  margin-top: 22px;
+}
+.account-card .actions {
+  margin-top: 12px;
+}
+.heading .actions {
+  margin-top: 0;
+}
+img.qr {
+  display: block;
+  width: min(280px, 100%);
+  margin: 12px auto;
+  background: #fff;
+  border-radius: var(--radius-sm);
+}
+.card + .stack {
+  margin-top: 16px;
+}

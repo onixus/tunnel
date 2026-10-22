@@ -14,11 +14,13 @@ const $ = (s) => document.querySelector(s),
     );
 let state = {},
   page = "overview",
+  personId = null,
   loading = false,
   routeDirty = false;
 const titles = {
   overview: "Обзор сети",
   users: "Пользователи",
+  person: "Пользователи",
   keys: "Ключи и устройства",
   routing: "Маршрутизация",
   protocols: "Протоколы",
@@ -57,6 +59,11 @@ const bytes = (n) =>
 function notice(text, error = false) {
   $("#notice").textContent = text;
   $("#notice").classList.toggle("error", error);
+  // The page notice sits behind an open dialog: repeat errors inside it.
+  if ($("#modal").open) {
+    $("#modal-error").textContent = error ? text : "";
+    $("#modal-error").hidden = !error;
+  }
 }
 async function api(path, data) {
   const r = await fetch("/console/api/" + path, {
@@ -94,6 +101,8 @@ async function refresh(renderPage = true) {
 }
 function modal(title, html) {
   $("#modal-title").textContent = title;
+  $("#modal-error").hidden = true;
+  $("#modal-error").textContent = "";
   $("#modal-body").innerHTML = html;
   $("#modal").showModal();
 }
@@ -120,6 +129,11 @@ async function pollJob(id) {
         result = JSON.parse(j.result || "{}");
       } catch {}
       notice(result.message || labels[j.state], j.state !== "success");
+      // A freshly created user opens straight into their card.
+      if (j.action === "person.create" && result.id) {
+        personId = result.id;
+        page = "person";
+      }
       if (!routeDirty) render();
       return;
     }
@@ -138,7 +152,7 @@ function confirmJob(title, description, action, data) {
       await job(action, data);
     } catch (e) {
       notice(e.message, true);
-      $("#modal").close();
+      b.disabled = false;
     }
   };
 }
@@ -183,41 +197,138 @@ function overview() {
       )}<div class="service"><div><strong>R-TrustTunnel</strong><small>Клиенты и подписанные обновления</small></div>${pill("running", "seq " + (state.updates?.active_sequence ?? "—"))}</div></div><div class="card"><h2>Каналы доставки</h2><div class="service"><div><strong>Telegram</strong><small>Существующий приватный бот</small></div>${pill(state.telegram?.running ? "active" : "unknown", state.telegram?.running ? "Работает" : "Нет связи")}</div><div class="service"><div><strong>E-mail</strong><small>SMTP из настроек TrustTunnel</small></div>${pill(state.smtp ? "active" : "unknown", state.smtp ? "Настроен" : "Не настроен")}</div></div></div></div><div class="heading"><h2>Последние операции</h2></div>${jobsTable((state.jobs || []).slice(0, 5))}`
   );
 }
+const list = (v) => (Array.isArray(v) ? v : []);
+const SOURCES = ["trusttunnel", "hysteria", "amnezia", "cdn"];
+const SOURCE_NAMES = { trusttunnel: "TrustTunnel", hysteria: "Hysteria", amnezia: "AmneziaWG", cdn: "VLESS · CDN" };
+const accounts = (source) => (source === "trusttunnel" ? state.users || [] : list(state[source + "_users"]));
+const account = (source, id) => accounts(source).find((u) => u.id === id);
+const accountName = (source, u) => (source === "trusttunnel" ? u?.email : u?.username) || "#" + (u?.id ?? "?");
+const blocked = (source, u) => (source === "trusttunnel" ? u.status === "blocked" : !!u.deleted);
+const personOf = (source, id) => (state.people || []).find((p) => p.accounts[source] === id);
+// A protocol whose account list cannot be read is not installed or not reachable.
+const available = (source) => source === "trusttunnel" || Array.isArray(state[source + "_users"]);
+const loginsFor = (nick, email) => ({
+  trusttunnel: email || `${nick}@${state.user_domain || "домен"}`,
+  hysteria: nick.length >= 6 ? nick : nick + "-vpn",
+  amnezia: nick,
+  cdn: nick,
+});
+function accountButtons(source, u, linked) {
+  const d = `data-source="${source}" data-id="${u.id}"`,
+    off = blocked(source, u);
+  const own =
+    source === "trusttunnel"
+      ? (linked ? "" : btn("Ключ", "user-key", `data-id="${u.id}"`)) + btn("Пароль", "password", `data-id="${u.id}"`)
+      : btn(source === "amnezia" ? "Конфиг" : source === "cdn" ? "Ссылка" : "Ключ", "export", d) +
+        btn("QR-код", "export-qr", d) +
+        btn("Сменить ключ", "rotate", d) +
+        (source === "hysteria" ? btn("Лимиты", "hysteria-limits", `data-id="${u.id}"`) : "");
+  return (
+    own +
+    btn("Отправить", "send-config", d) +
+    (linked ? "" : btn("Контакт", "contact", d) + btn("Привязать", "link-account", d)) +
+    btn(off ? "Включить" : "Блокировать", "status", `${d} data-block="${!off}"`) +
+    btn("Удалить", "delete-account", d, "danger")
+  );
+}
+function accountUsage(source, u) {
+  if (source === "hysteria") return `${bytes(u.download + u.upload)}<small>До ${new Date(u.expire_time).toLocaleDateString("ru")}</small>`;
+  if (source === "amnezia")
+    return `${bytes(u.download + u.upload)}<small>${esc(u.address)} · ${u.handshake ? "связь " + new Date(u.handshake * 1000).toLocaleString("ru") : "ещё не подключался"}</small>`;
+  if (source === "cdn") return `<small>с ${esc(u.created)}</small>`;
+  return `<small>Ключей: ${(state.keys || []).filter((k) => k.user_id === u.id && !k.revoked_at).length}</small>`;
+}
 function users() {
-  const h = Array.isArray(state.hysteria_users) ? state.hysteria_users : [],
-    awg = Array.isArray(state.amnezia_users) ? state.amnezia_users : [],
-    cdn = Array.isArray(state.cdn_users) ? state.cdn_users : [];
+  const people = state.people || [];
+  const loose = SOURCES.flatMap((source) => accounts(source).filter((u) => !personOf(source, u.id)).map((u) => [source, u]));
   return (
     heading(
       "Пользователи",
-      "Учётные записи всех VPN. Идентичности разных протоколов показаны отдельно.",
-      btn("+ Добавить", "new-user", "", "primary"),
+      "Один пользователь — один ник. Учётки протоколов, ключи и устройства создаются и управляются в его карточке.",
+      btn("+ Новый пользователь", "new-user", "", "primary"),
     ) +
-    `<div class="toolbar"><input id="user-search" placeholder="Поиск по имени или e-mail" aria-label="Поиск пользователей"><select id="user-filter" aria-label="Протокол"><option value="">Все протоколы</option><option>TrustTunnel</option><option>Hysteria</option><option>AmneziaWG</option><option>CDN</option></select></div>` +
+    `<div class="toolbar"><input id="user-search" placeholder="Поиск по нику, e-mail или логину" aria-label="Поиск пользователей"></div>` +
     table(
-      ["Пользователь", "Протокол", "Доступ", "Использование", "Управление"],
-      [
-        ...(state.users || []).map(
-          (u) =>
-            `<tr data-search="${esc(u.email.toLowerCase())}" data-protocol="TrustTunnel"><td>${esc(u.email)}<small>#${u.id}</small></td><td>${pill("running", "TrustTunnel")}</td><td>${pill(u.status)}</td><td>—</td><td>${btn("Ключ", "user-key", `data-id="${u.id}"`)}${btn("Пароль", "password", `data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="trusttunnel" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="trusttunnel" data-id="${u.id}"`)}${btn(u.status === "blocked" ? "Включить" : "Блокировать", "status", `data-source="trusttunnel" data-id="${u.id}" data-block="${u.status !== "blocked"}"`)}</td></tr>`,
-        ),
-        ...h.map(
-          (u) =>
-            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="Hysteria"><td>${esc(u.username)}<small>#${u.id}</small></td><td>${pill("running", "Hysteria")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>${bytes(u.download + u.upload)}<small>До ${new Date(u.expire_time).toLocaleDateString("ru")}</small></td><td>${btn("Ключ", "export", `data-source="hysteria" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="hysteria" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="hysteria" data-id="${u.id}"`)}${btn("Лимиты", "hysteria-limits", `data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="hysteria" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="hysteria" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="hysteria" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
-        ),
-        ...awg.map(
-          (u) =>
-            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="AmneziaWG"><td>${esc(u.username)}<small>#${u.id} · ${esc(u.address)}</small></td><td>${pill("running", "AmneziaWG")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>${bytes(u.download + u.upload)}<small>${u.handshake ? "Связь " + new Date(u.handshake * 1000).toLocaleString("ru") : "Ещё не подключался"}</small></td><td>${btn("Конфиг", "export", `data-source="amnezia" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="amnezia" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="amnezia" data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="amnezia" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="amnezia" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="amnezia" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
-        ),
-        ...cdn.map(
-          (u) =>
-            `<tr data-search="${esc(u.username.toLowerCase())}" data-protocol="CDN"><td>${esc(u.username)}<small>#${u.id} · с ${esc(u.created)}</small></td><td>${pill("running", "VLESS · CDN")}</td><td>${pill(u.deleted ? "blocked" : "active")}</td><td>—</td><td>${btn("Ссылка", "export", `data-source="cdn" data-id="${u.id}"`)}${btn("QR-код", "export-qr", `data-source="cdn" data-id="${u.id}"`)}${btn("Сменить ключ", "rotate", `data-source="cdn" data-id="${u.id}"`)}${btn("Отправить", "send-config", `data-source="cdn" data-id="${u.id}"`)}${btn("Контакт", "contact", `data-source="cdn" data-id="${u.id}"`)}${btn(u.deleted ? "Включить" : "Блокировать", "status", `data-source="cdn" data-id="${u.id}" data-block="${!u.deleted}"`)}</td></tr>`,
-        ),
-      ],
+      ["Пользователь", "Протоколы", "Устройства", "Управление"],
+      people.map((p) => {
+        const linked = SOURCES.filter((s) => p.accounts[s] !== undefined),
+          tt = p.accounts.trusttunnel,
+          devices = (state.devices || []).filter((d) => d.user_id === tt && !d.revoked_at).length,
+          names = linked.map((s) => accountName(s, account(s, p.accounts[s]))).join(" ");
+        return `<tr data-search="${esc([p.nick, p.email, names].join(" ").toLowerCase())}"><td><button class="link" data-action="person-open" data-id="${p.id}">${esc(p.nick)}</button><small>${esc(p.email || "")}${p.chat_id ? " · tg " + esc(p.chat_id) : ""}</small></td><td>${
+          linked
+            .map((s) => {
+              const u = account(s, p.accounts[s]);
+              return u ? pill(blocked(s, u) ? "blocked" : "active", SOURCE_NAMES[s]) : '<span class="pill gray">' + SOURCE_NAMES[s] + " · нет данных</span>";
+            })
+            .join(" ") || '<span class="muted">Нет учёток</span>'
+        }</td><td>${tt !== undefined ? devices : "—"}</td><td>${btn("Открыть", "person-open", `data-id="${p.id}"`, "primary")}</td></tr>`;
+      }),
     ) +
-    (state.hysteria_users?.error
-      ? '<p class="note">Hysteria временно недоступна.</p>'
-      : "")
+    (loose.length
+      ? `<h2>Учётки без пользователя</h2><p class="subtitle">Созданы до появления карточек или вне консоли. Привяжите их к пользователю, чтобы управлять в одном месте.</p>` +
+        table(
+          ["Учётка", "Протокол", "Доступ", "Использование", "Управление"],
+          loose.map(
+            ([source, u]) =>
+              `<tr data-search="${esc(accountName(source, u).toLowerCase())}"><td>${esc(accountName(source, u))}<small>#${u.id}</small></td><td>${pill("running", SOURCE_NAMES[source])}</td><td>${pill(blocked(source, u) ? "blocked" : "active")}</td><td>${accountUsage(source, u)}</td><td>${accountButtons(source, u, false)}</td></tr>`,
+          ),
+        )
+      : "") +
+    (state.hysteria_users?.error ? '<p class="note">Hysteria временно недоступна.</p>' : "")
+  );
+}
+function personPage() {
+  const p = (state.people || []).find((p) => p.id === personId);
+  if (!p) return heading("Пользователь не найден", "Возможно, он удалён.", btn("← К списку", "navigate", 'data-target="users"'));
+  const tt = p.accounts.trusttunnel;
+  const sections = SOURCES.map((source) => {
+    const id = p.accounts[source];
+    if (id === undefined)
+      return `<div class="card account-card"><div class="service"><div><strong>${SOURCE_NAMES[source]}</strong><small>Учётки нет · логин будет ${esc(loginsFor(p.nick, p.email)[source])}</small></div>${available(source) ? btn("+ Создать учётку", "person-add", `data-id="${p.id}" data-source="${source}"`, "primary") : '<span class="pill gray">Не установлен</span>'}</div></div>`;
+    const u = account(source, id);
+    if (!u)
+      return `<div class="card account-card"><div class="service"><div><strong>${SOURCE_NAMES[source]}</strong><small>#${id} · нет данных от сервиса</small></div>${btn("Отвязать", "unlink-account", `data-source="${source}" data-id="${id}"`)}</div></div>`;
+    let extra = "";
+    if (source === "trusttunnel") {
+      const keys = (state.keys || []).filter((k) => k.user_id === id),
+        devices = (state.devices || []).filter((d) => d.user_id === id);
+      extra =
+        `<h3>Ключи</h3>` +
+        table(
+          ["Ключ", "Статус", "Действия"],
+          keys.map(
+            (k) =>
+              `<tr><td>${esc(k.label || "Без названия")}<small>${esc(k.tt_username)}${k.device_id ? " · устройство" : ""}</small></td><td>${pill(k.revoked_at ? "blocked" : "active", k.revoked_at ? "Отозван" : "Действует")}</td><td>${
+                (!k.revoked_at
+                  ? btn("Показать", "export", `data-source="trusttunnel" data-id="${k.id}"`) +
+                    btn("QR-код", "export-qr", `data-source="trusttunnel" data-id="${k.id}"`) +
+                    (k.device_id ? "" : btn("Ротация", "rotate", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Отозвать", "revoke", `data-id="${k.id}"`))
+                  : "") + (k.device_id ? "" : btn("Удалить", "key-delete", `data-id="${k.id}"`, "danger"))
+              }</td></tr>`,
+          ),
+        ) +
+        `<div class="actions">${btn("+ Ключ", "user-key", `data-id="${id}"`)}</div><h3>Устройства R-TrustTunnel</h3>` +
+        table(
+          ["Устройство", "Платформа", "Активность", "Статус", "Действия"],
+          devices.map(
+            (d) =>
+              `<tr><td>${esc(d.name)}</td><td>${esc(d.platform)}</td><td>${esc(d.last_seen_at || "—")}</td><td>${pill(d.revoked_at ? "blocked" : "active", d.revoked_at ? "Отозвано" : "Активно")}</td><td>${(d.revoked_at ? "" : btn("Отозвать", "device-revoke", `data-id="${d.id}"`)) + btn("Удалить", "device-delete", `data-id="${d.id}"`, "danger")}</td></tr>`,
+          ),
+        ) +
+        `<div class="actions">${btn("+ Привязать устройство", "device-enroll", `data-id="${id}"`, "primary")}</div>`;
+    }
+    return `<div class="card account-card"><div class="service"><div><strong>${SOURCE_NAMES[source]}</strong><small>${esc(accountName(source, u))} · #${u.id}</small></div>${pill(blocked(source, u) ? "blocked" : "active")}</div><p class="subtitle">${accountUsage(source, u)}</p><div class="actions wrap">${accountButtons(source, u, true)}${btn("Отвязать", "unlink-account", `data-source="${source}" data-id="${id}"`, "subtle")}</div>${extra}</div>`;
+  });
+  return (
+    heading(
+      esc(p.nick),
+      `Создан ${esc(p.created)}. Все учётки, ключи и устройства пользователя.`,
+      `<div class="actions">${btn("← К списку", "navigate", 'data-target="users"', "subtle")}${btn("Блокировать всё", "person-status", `data-id="${p.id}" data-block="true"`)}${btn("Включить всё", "person-status", `data-id="${p.id}" data-block="false"`)}${btn("Удалить пользователя", "person-delete", `data-id="${p.id}"`, "danger")}</div>`,
+    ) +
+    `<div class="card"><h2>Контакты</h2><div class="service"><div><strong>E-mail</strong><small>${esc(p.email || "не задан")}</small></div><div><strong>Telegram</strong><small>${esc(p.chat_id || "не задан")}</small></div>${pill(p.consent ? "active" : "unknown", p.consent ? "Согласие получено" : "Нет согласия")}${btn("Изменить", "person-contact", `data-id="${p.id}"`)}</div></div>` +
+    `<div class="stack">${sections.join("")}</div>` +
+    (tt === undefined ? '<p class="note">Привязка устройств R-TrustTunnel доступна после создания учётки TrustTunnel.</p>' : "")
   );
 }
 function keys() {
@@ -230,15 +341,15 @@ function keys() {
       ["Владелец / ключ", "Протокол", "Статус", "Действия"],
       (state.keys || []).map(
         (k) =>
-          `<tr><td>${esc(k.email)}<small>${esc(k.tt_username)} · ${esc(k.label)}</small></td><td>TrustTunnel</td><td>${pill(k.revoked_at ? "blocked" : "active", k.revoked_at ? "Отозван" : "Действует")}</td><td>${!k.revoked_at ? btn("Показать / скачать", "export", `data-source="trusttunnel" data-id="${k.id}"`) + btn("QR-код", "export-qr", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Ротация", "rotate", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Отозвать", "revoke", `data-id="${k.id}"`, "danger") : ""}</td></tr>`,
+          `<tr><td>${esc(k.email)}<small>${esc(k.tt_username)} · ${esc(k.label)}</small></td><td>TrustTunnel</td><td>${pill(k.revoked_at ? "blocked" : "active", k.revoked_at ? "Отозван" : "Действует")}</td><td>${!k.revoked_at ? btn("Показать / скачать", "export", `data-source="trusttunnel" data-id="${k.id}"`) + btn("QR-код", "export-qr", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Ротация", "rotate", `data-source="trusttunnel" data-id="${k.id}"`) + btn("Отозвать", "revoke", `data-id="${k.id}"`) : ""}${!k.device_id ? btn("Удалить", "key-delete", `data-id="${k.id}"`, "danger") : ""}</td></tr>`,
       ),
     ) +
-    `<div class="note">Ключи Hysteria доступны в разделе «Пользователи». API-регистрация устройства и VPN-ключ имеют отдельные сроки и отзыв.</div><h2>Регистрации R-TrustTunnel</h2>` +
+    `<div class="note">Новые ключи и привязка устройств — в карточке пользователя (раздел «Пользователи»). API-регистрация устройства и VPN-ключ имеют отдельные сроки и отзыв.</div><h2>Регистрации R-TrustTunnel</h2>` +
     table(
       ["Устройство", "Владелец", "Платформа", "Последняя активность", "Статус"],
       (state.devices || []).map(
         (d) =>
-          `<tr><td>${esc(d.name)}</td><td>#${d.user_id}</td><td>${esc(d.platform)}</td><td>${esc(d.last_seen_at || "—")}</td><td>${pill(d.revoked_at ? "blocked" : "active")}${!d.revoked_at ? btn("Отозвать", "device-revoke", `data-id="${d.id}"`) : ""}</td></tr>`,
+          `<tr><td>${esc(d.name)}</td><td>${esc((state.users || []).find((u) => u.id === d.user_id)?.email || "#" + d.user_id)}</td><td>${esc(d.platform)}</td><td>${esc(d.last_seen_at || "—")}</td><td>${pill(d.revoked_at ? "blocked" : "active")}${!d.revoked_at ? btn("Отозвать", "device-revoke", `data-id="${d.id}"`) : ""}${btn("Удалить", "device-delete", `data-id="${d.id}"`, "danger")}</td></tr>`,
       ),
     )
   );
@@ -365,6 +476,7 @@ function render() {
   const map = {
     overview,
     users,
+    person: personPage,
     keys,
     routing,
     protocols: () => protocolsPage(),
@@ -373,27 +485,18 @@ function render() {
     telegram,
     audit: journal,
   };
+  // A deleted user's card falls back to the list.
+  if (page === "person" && !(state.people || []).some((p) => p.id === personId)) page = "users";
   $("#content").innerHTML = map[page]();
   $("#breadcrumb").textContent = titles[page];
   document
     .querySelectorAll("nav button")
-    .forEach((b) => b.classList.toggle("selected", b.dataset.page === page));
-  if (page === "users") {
-    const filter = () =>
+    .forEach((b) => b.classList.toggle("selected", b.dataset.page === (page === "person" ? "users" : page)));
+  if (page === "users")
+    $("#user-search").oninput = () =>
       document
         .querySelectorAll("tr[data-search]")
-        .forEach(
-          (r) =>
-            (r.hidden =
-              !r.dataset.search.includes(
-                $("#user-search").value.toLowerCase(),
-              ) ||
-              (!!$("#user-filter").value &&
-                r.dataset.protocol !== $("#user-filter").value)),
-        );
-    $("#user-search").oninput = filter;
-    $("#user-filter").onchange = filter;
-  }
+        .forEach((r) => (r.hidden = !r.dataset.search.includes($("#user-search").value.toLowerCase())));
   if (page === "routing") {
     $("#content").oninput = () => (routeDirty = true);
   } else {
@@ -427,19 +530,125 @@ async function handle(b) {
   if (a === "navigate") return navigate(b.dataset.target);
   if (a === "new-user") {
     modal(
-      "Добавить пользователя",
-      `<form id="user-form"><label class="field">Протокол<select name="source"><option value="trusttunnel">TrustTunnel / R-TrustTunnel</option><option value="hysteria">Hysteria</option><option value="amnezia">AmneziaWG 3.1</option><option value="cdn">VLESS через CDN</option></select></label><label class="field">E-mail для TrustTunnel / логин для Hysteria, AmneziaWG и CDN<input name="name" required maxlength="200"></label><div class="note">TrustTunnel: после создания задайте пароль и выпустите ключ. Hysteria: автоматически создаётся ключ на 365 дней, до 3 устройств. AmneziaWG: создаются ключи и адрес в туннеле; протокол должен быть установлен в разделе «Протоколы». CDN: создаётся UUID VLESS; ссылка выдаётся после указания домена CDN в «Протоколах».</div><button type="submit" class="primary">Создать</button></form>`,
+      "Новый пользователь",
+      `<form id="user-form"><label class="field">Ник<input name="nick" required minlength="3" maxlength="32" pattern="[a-z0-9][a-z0-9_\\-]{2,31}" autocomplete="off" placeholder="ivan"><small class="muted">Латиница в нижнем регистре, цифры, «-», «_». Из ника строятся логины всех протоколов.</small></label><label class="field">E-mail (необязательно)<input type="email" name="email" maxlength="200" placeholder="ivan@example.com"><small class="muted">Станет логином TrustTunnel и адресом для отправки конфигов. Без него логин — ник@${esc(state.user_domain || "домен")}.</small></label><label class="field">Telegram user ID (необязательно)<input name="chat" inputmode="numeric"></label><label><input type="checkbox" name="consent"> Получено согласие на уведомления</label><h3>Протоколы</h3><div class="contact-list">${SOURCES.map(
+        (s) =>
+          `<label><input type="checkbox" name="protocol" value="${s}" ${available(s) ? "checked" : "disabled"}> ${SOURCE_NAMES[s]} <small class="muted" data-login="${s}"></small>${available(s) ? "" : ' <small class="muted">(не установлен)</small>'}</label>`,
+      ).join("")}</div><div class="note">Учётки, ключи и конфиги создаются автоматически: TrustTunnel — учётка и основной ключ; Hysteria — ключ на 365 дней, до 3 устройств; AmneziaWG — ключи и адрес; CDN — UUID VLESS. Устройства R-TrustTunnel привязываются потом из карточки.</div><div class="actions"><button type="submit" class="primary">Создать</button></div></form>`,
     );
-    formSubmit("user-form", (f) =>
-      job(
-        f.get("source") + ".create",
-        f.get("source") === "hysteria"
-          ? { username: f.get("name"), days: 365, devices: 3 }
-          : ["amnezia", "cdn"].includes(f.get("source"))
-            ? { username: f.get("name") }
-            : { email: f.get("name") },
-      ),
+    const form = $("#user-form"),
+      preview = () => {
+        const names = loginsFor(form.nick.value.trim().toLowerCase() || "ник", form.email.value.trim().toLowerCase());
+        form.querySelectorAll("[data-login]").forEach((el) => (el.textContent = "· " + names[el.dataset.login]));
+      };
+    form.oninput = preview;
+    preview();
+    formSubmit("user-form", async (f) => {
+      const protocols = f.getAll("protocol");
+      if (!protocols.length) throw Error("Выберите хотя бы один протокол");
+      await job("person.create", {
+        nick: f.get("nick").trim().toLowerCase(),
+        email: f.get("email").trim(),
+        chat_id: f.get("chat") ? Number(f.get("chat")) : null,
+        consent: f.get("consent") === "on",
+        protocols,
+      });
+    });
+  }
+  if (a === "person-open") {
+    personId = id;
+    return navigate("person");
+  }
+  if (a === "person-add")
+    confirmJob(
+      "Создать учётку " + SOURCE_NAMES[source],
+      "Учётка и ключи будут созданы автоматически, логин строится из ника пользователя.",
+      "person.add",
+      { id, source },
     );
+  if (a === "person-status")
+    confirmJob(
+      "Изменить доступ",
+      b.dataset.block === "true" ? "Заблокировать все учётки пользователя?" : "Включить все учётки пользователя?",
+      b.dataset.block === "true" ? "person.block" : "person.unblock",
+      { id },
+    );
+  if (a === "person-delete")
+    confirmJob(
+      "Удалить пользователя",
+      "Будут безвозвратно удалены все его учётки, ключи и устройства во всех протоколах. Уже выданные конфиги перестанут работать.",
+      "person.delete",
+      { id },
+    );
+  if (a === "delete-account")
+    confirmJob(
+      "Удалить учётку " + SOURCE_NAMES[source],
+      "Учётка и её ключи будут безвозвратно удалены, доступ прекратится. Это нельзя отменить.",
+      source + ".delete",
+      { id },
+    );
+  if (a === "key-delete")
+    confirmJob("Удалить ключ", "Ключ будет удалён безвозвратно, доступ по нему прекратится.", "trusttunnel.key-delete", { id });
+  if (a === "device-delete")
+    confirmJob(
+      "Удалить устройство",
+      "Устройство будет отозвано (если ещё нет) и удалено вместе с его ключами.",
+      "trusttunnel.device-delete",
+      { id },
+    );
+  if (a === "unlink-account") {
+    await api("people/unlink", { source, user_id: id });
+    notice("Учётка отвязана. Доступ не изменён.");
+    await refresh();
+  }
+  if (a === "link-account") {
+    const u = account(source, id),
+      suggestion = accountName(source, u).split("@")[0].toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
+    modal(
+      "Привязать учётку",
+      `<form id="link-form"><p>${SOURCE_NAMES[source]} · ${esc(accountName(source, u))}</p><label class="field">Пользователь<select name="person"><option value="">Новый пользователь…</option>${(state.people || [])
+        .filter((p) => p.accounts[source] === undefined)
+        .map((p) => `<option value="${p.id}">${esc(p.nick)}</option>`)
+        .join("")}</select></label><label class="field">Ник нового пользователя<input name="nick" value="${esc(suggestion)}" maxlength="32"></label><div class="note">Доступ и ключи не меняются. Контакт учётки станет контактом пользователя.</div><div class="actions"><button type="submit" class="primary">Привязать</button></div></form>`,
+    );
+    formSubmit("link-form", async (f) => {
+      const r = await api("people/link", f.get("person") ? { source, user_id: id, person: Number(f.get("person")) } : { source, user_id: id, nick: f.get("nick") });
+      $("#modal").close();
+      notice("Учётка привязана");
+      personId = r.id;
+      await refresh(false);
+      navigate("person");
+    });
+  }
+  if (a === "person-contact") {
+    const p = (state.people || []).find((p) => p.id === id);
+    modal(
+      "Контакты · " + p.nick,
+      `<form id="contact-form"><label class="field">E-mail<input type="email" name="email" value="${esc(p.email)}"></label><label class="field">Telegram user ID<input name="chat" inputmode="numeric" value="${esc(p.chat_id)}"></label><label><input type="checkbox" name="consent" ${p.consent ? "checked" : ""}> Получено согласие на уведомления</label><div class="note">Контакт применяется ко всем учёткам пользователя. Логин TrustTunnel не меняется.</div><div class="actions"><button type="submit" class="primary">Сохранить</button></div></form>`,
+    );
+    formSubmit("contact-form", async (f) => {
+      await api("people/contact", { id, email: f.get("email"), chat_id: f.get("chat") ? Number(f.get("chat")) : null, consent: f.get("consent") === "on" });
+      $("#modal").close();
+      notice("Контакт сохранён");
+      await refresh();
+    });
+  }
+  if (a === "device-enroll") {
+    const r = await api("enroll", { id });
+    modal(
+      "Привязать устройство",
+      `<p>Откройте R-TrustTunnel на устройстве и отсканируйте QR-код или откройте ссылку на нём. Код одноразовый и действует <b id="enroll-left">${r.expires_in}</b> с.</p>${r.qr_data_url ? `<img class="qr" src="${r.qr_data_url}" alt="QR-код привязки устройства">` : `<p class="error">${esc(r.qr_error)}</p>`}<label class="field">Ссылка<input readonly value="${esc(r.content)}"></label><label class="field">Ссылка для приложения на этом же устройстве<input readonly value="${esc(r.app_link)}"></label><div class="note">После привязки устройство появится в карточке пользователя и получит собственный ключ VPN.</div>`,
+    );
+    const until = Date.now() + r.expires_in * 1000,
+      timer = setInterval(() => {
+        const left = Math.max(0, Math.round((until - Date.now()) / 1000));
+        if (!$("#enroll-left")) return clearInterval(timer);
+        $("#enroll-left").textContent = left;
+        if (!left) {
+          clearInterval(timer);
+          notice("Код истёк. Создайте новый.", true);
+        }
+      }, 1000);
   }
   if (a === "status")
     confirmJob(
@@ -479,7 +688,7 @@ async function handle(b) {
       { id },
     );
   if (a === "hysteria-limits") {
-    const u = state.hysteria_users.find((u) => u.id === id);
+    const u = list(state.hysteria_users).find((u) => u.id === id);
     modal(
       "Срок и лимиты Hysteria",
       `<form id="limits-form"><label class="field">Продлить от сегодня, дней<input type="number" name="days" min="1" max="3650" value="365" required></label><label class="field">Одновременные устройства<input type="number" name="devices" min="1" max="100" value="${u.device_no || 3}" required></label><label class="field">Общая квота GB (-1 = без лимита)<input type="number" name="quota" min="-1" max="100000" value="${u.quota < 0 ? -1 : Math.ceil(u.quota / 1073741824)}" required></label><button type="submit" class="primary">Применить</button></form>`,
@@ -512,10 +721,7 @@ async function handle(b) {
         (state.contacts || []).find(
           (c) => c.source === source && c.user_id === id,
         ) || {},
-      user =
-        source === "trusttunnel"
-          ? (state.users || []).find((u) => u.id === id)
-          : ((v) => (Array.isArray(v) ? v : []))(source === "amnezia" ? state.amnezia_users : source === "cdn" ? state.cdn_users : state.hysteria_users).find((u) => u.id === id),
+      user = account(source, id),
       email = c.email || (source === "trusttunnel" ? user?.email : ""),
       chat = c.chat_id,
       option = (value, label, address, extra = "") =>

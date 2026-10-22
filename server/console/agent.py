@@ -342,7 +342,13 @@ def dispatch(op,data):
         days=int(data.get('days',365)); devices=int(data.get('devices',3))
         if not 1<=days<=3650 or not 1<=devices<=100: raise Rejected('Неверный срок или лимит устройств')
         hui('POST','account/saveAccount',{'username':name,'pass':secrets.token_hex(16),'conPass':secrets.token_hex(16),'quota':-1,'expireTime':int((time.time()+days*86400)*1000),'deviceNo':devices,'deleted':0,'remark':'VPN Console'})
-        return {'message':'Пользователь Hysteria создан'}
+        created=read_db("SELECT id FROM account WHERE username=? AND role='user'",(name,))
+        return {'message':'Пользователь Hysteria создан','id':created[0]['id'] if created else None}
+    if op=='hysteria.delete':
+        a=account(data.get('id'))
+        hui('POST','hysteria2/hysteria2Kick',{'ids':[a['id']],'kickUtilTime':0})
+        hui('POST','account/deleteAccount',{'id':a['id']})
+        return {'message':'Пользователь Hysteria удалён'}
     if op=='hysteria.update':
         a=account(data.get('id'))
         days=data.get('days'); devices=data.get('devices'); quota=data.get('quota_gb')
