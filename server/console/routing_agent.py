@@ -23,6 +23,8 @@ def dispatch(op, data):
             result['routing'] = runtime.snapshot()
         except Exception:
             result['routing'] = {'error': 'Состояние маршрутов недоступно; изменения запрещены'}
+        if isinstance(result.get('updates'), dict) and 'error' not in result['updates']:
+            result['updates']['upstream'] = protocols.client_releases()
         for key, read in (('protocols', protocols.status), ('amnezia_users', amnezia.users), ('cdn_users', cdn.users)):
             try:
                 result[key] = read()

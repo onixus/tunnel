@@ -384,19 +384,47 @@ function routing() {
     `<div class="grid"><div class="card"><h2>Hysteria · общий выход</h2><label class="field">Весь трафик, не попавший под исключения<select id="route-exit">${r.exits.map((e) => `<option value="${esc(e.id)}" ${e.id === r.selected ? "selected" : ""}>${esc(e.id)} · ${esc(e.host)}</option>`).join("")}</select></label><h2>Исключения</h2><div id="route-rules">${rules}</div>${btn("+ Правило", "add-rule")}<div class="actions">${btn("Проверить изменения", "preview-routes", "", "primary")}</div></div><div class="stack"><div class="card"><h2>Область действия</h2><div class="service"><strong>Hysteria 2</strong>${pill("active", r.selected)}</div><div class="service"><strong>TrustTunnel</strong>${pill("running", "Напрямую")}</div><div class="service"><strong>Трафик сервера</strong>${pill("running", "Напрямую")}</div><div class="note">Правила Hysteria не меняют egress TrustTunnel или системную таблицу маршрутов.</div></div><div class="card"><h2>Локальная фильтрация рекламы</h2>${(state.adblock?.running && state.adblock?.dns_interception) ? pill("active", "Работает") : pill("unknown", "Не подтверждено")}<p class="subtitle">Доменов: ${esc(state.adblock?.domains ?? "—")}; ru/su: ${esc(state.adblock?.ru_su_domains ?? "—")}. Ежедневное обновление из нескольких источников.</p><p class="subtitle">Последний успех: ${esc(state.adblock?.last_success ?? "—")}</p><p class="subtitle">Следующее обновление: ${esc(state.adblock?.next_update ?? "—")}</p>${state.adblock?.last_error ? `<p class="error">${esc(state.adblock.last_error)}</p>` : ""}<ul>${(state.adblock?.sources || []).map((s) => `<li>${esc(s.id)}: ${esc(s.domains)}</li>`).join("")}</ul>${btn("Обновить списки", "refresh-adblock")}<p class="subtitle">Hysteria и TrustTunnel/Rust: обычный DNS внутри VPN фильтруется на сервере. Внешний DoH/DoT в профиле нужно отключить для применения локальных списков. Собственный DoH браузера и прямой обход VPN могут обходить фильтры. Зоны ru/su целиком не заблокированы.</p><h2>Защита применения</h2><p class="subtitle">Перед применением проверяется выход. После — реальный запрос через Hysteria. При сбое восстанавливается предыдущая конфигурация.</p><p class="subtitle">Доступ к панелям, блокировка приватных сетей и перенаправление DNS в локальный фильтр сохраняются. Переключение кратко переподключит клиентов.</p><details><summary>Текущие правила</summary><pre>${esc(r.rules.join("\n"))}</pre></details></div></div></div>`
   );
 }
+const versionKey = (v) => String(v || "").split(".").map(Number);
+const newerVersion = (a, b) => {
+  const x = versionKey(a), y = versionKey(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+};
+// Whole days still left, rounded up; a past timestamp is negative.
+const daysLeft = (ts) => (ts * 1000 <= Date.now() ? -1 : Math.ceil((ts * 1000 - Date.now()) / 86400000));
 function updates() {
-  const u = state.updates || {};
+  const u = state.updates || {},
+    up = u.upstream || {},
+    published = (u.releases || []).filter((r) => r.version).reduce((m, r) => (!m || newerVersion(r.version, m) ? r.version : m), null),
+    latest = (up.releases || [])[0],
+    activeLeft = u.active_expires ? daysLeft(u.active_expires) : null;
+  let alerts = "";
+  if (latest && (!published || newerVersion(latest.version, published)))
+    alerts += `<div class="note warn">На GitHub вышел R-TrustTunnel <b>${esc(latest.version)}</b> (${esc(latest.published)}), а на сервере самый новый — ${esc(published || "нет")}. Консоль не выкладывает клиент сама: подпишите манифест офлайн-ключом и опубликуйте его скриптом <code>scripts/publish-signed-release.py</code> из репозитория клиента, затем нажмите «Опубликовать». <a href="${esc(latest.url)}" target="_blank" rel="noopener noreferrer">Релиз ${esc(latest.tag)} ↗</a></div>`;
+  if (activeLeft !== null && activeLeft < 7)
+    alerts += `<div class="note error">${activeLeft < 0 ? "Манифест активного канала Windows истёк" : `Манифест активного канала Windows истекает через ${activeLeft} дн.`} (${new Date(u.active_expires * 1000).toLocaleDateString("ru")}). Клиенты не примут обновление из истёкшего канала: опубликуйте новый подписанный релиз.</div>`;
+  if (up.error) alerts += `<p class="error">${esc(up.error)}</p>`;
   return (
     heading(
       "Обновления",
       "Подписанные клиентские релизы и подготовленные пакеты серверов.",
+      btn("Проверить GitHub", "check-client-releases"),
     ) +
-    `<div class="note">Публикация канала не устанавливает обновление на устройства. Клиент проверяет подпись, срок, хеш и защиту от понижения версии.</div><h2>R-TrustTunnel · Windows</h2>` +
+    alerts +
+    `<div class="note">Публикация канала не устанавливает обновление на устройства. Клиент проверяет подпись, срок, хеш и защиту от понижения версии. Подписанный манифест действует не дольше 31 дня.</div><h2>R-TrustTunnel · Windows</h2>` +
     table(
-      ["Релиз", "Цель", "Проверка", "Канал", "Действие"],
-      (u.releases || []).map(
+      ["Релиз", "Цель", "Проверка", "Действует до", "Канал", "Действие"],
+      (u.releases || []).map((r) => {
+        const left = r.expires ? daysLeft(r.expires) : null;
+        return `<tr><td>${esc(r.version || r.id)}<small>sequence ${esc(r.sequence || r.id)}</small></td><td>${esc(r.target || "windows-x86_64")}</td><td>${pill(r.valid ? "active" : "unknown", r.valid ? "Подпись и срок ОК" : r.reason || "Недействителен")}</td><td>${r.expires ? esc(new Date(r.expires * 1000).toLocaleDateString("ru")) + `<small>${left < 0 ? "истёк" : "осталось " + left + " дн."}</small>` : "—"}</td><td>${r.active ? pill("active", "Текущий") : "Архив / кандидат"}</td><td>${r.valid && !r.active && r.sequence >= (u.active_sequence || 0) ? btn("Опубликовать", "promote", `data-sequence="${r.sequence}"`) : "—"}</td></tr>`;
+      }),
+    ) +
+    `<h2>Релизы на GitHub</h2><p class="subtitle">${up.checked ? "Проверено " + esc(new Date(up.checked).toLocaleString("ru")) + ". " : "Ещё не проверялось. "}Стабильные релизы с установщиком Windows из <a href="${esc(up.repo || "https://github.com/onixus/Rust-trustvpn")}" target="_blank" rel="noopener noreferrer">onixus/Rust-trustvpn ↗</a>. Проверка идёт автоматически раз в 6 часов.</p>` +
+    table(
+      ["Версия", "Опубликован", "На сервере"],
+      (up.releases || []).map(
         (r) =>
-          `<tr><td>${esc(r.version || r.id)}<small>sequence ${esc(r.sequence || r.id)}</small></td><td>${esc(r.target || "windows-x86_64")}</td><td>${pill(r.valid ? "active" : "unknown", r.valid ? "Подпись и срок ОК" : "Недействителен")}</td><td>${r.active ? pill("active", "Текущий") : "Архив / кандидат"}</td><td>${r.valid && !r.active && r.sequence >= (u.active_sequence || 0) ? btn("Опубликовать", "promote", `data-sequence="${r.sequence}"`) : "—"}</td></tr>`,
+          `<tr><td><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.version)} ↗</a></td><td>${esc(r.published)}</td><td>${(u.releases || []).some((x) => x.version === r.version) ? pill("active", "Выложен") : pill("queued", "Не выложен")}</td></tr>`,
       ),
     ) +
     `<div class="note">Полный хеш установщика проверяется перед публикацией. Истёкшие манифесты не публикуются повторно.</div><h2>Серверные пакеты</h2>` +
@@ -768,6 +796,7 @@ async function handle(b) {
   }
   if (a === "refresh-adblock") confirmJob("Обновить локальные списки", "Загрузить списки из настроенных источников? При ошибке останется последняя рабочая версия.", "adblock.refresh", {});
   if (a === "check-routes") await job("routes.check", {});
+  if (a === "check-client-releases") await job("protocols.check", {});
   if (a === "preview-routes") {
     if ($("#route-rules .error"))
       throw Error("Есть неподдерживаемые правила. Применение запрещено.");

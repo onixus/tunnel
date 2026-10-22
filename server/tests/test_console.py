@@ -423,6 +423,21 @@ class AgentTests(unittest.TestCase):
             with self.assertRaises(agent.Rejected):agent.verify_manifest(p2/'manifest.json',True)
             tampered=json.loads(e1);tampered['signature']=base64.b64encode(bytes(64)).decode();(p1/'manifest.json').write_text(json.dumps(tampered))
             with self.assertRaises(Exception):agent.verify_manifest(p1/'manifest.json',True)
+    def test_feed_reports_expiry_without_hiding_expired_releases(self):
+        root=Path(TMP.name)/secrets.token_hex(8);root.mkdir();key=Ed25519PrivateKey.generate();pub=root/'root.pub';pub.write_bytes(key.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw))
+        now=int(time.time())
+        def release(seq,published,expires):
+            p=root/str(seq)/'windows-x86_64';p.mkdir(parents=True);(p/'setup.exe').write_bytes(b'installer')
+            m={'schema':1,'sequence':seq,'version':f'0.{seq}.0','target':'windows-x86_64','min_ipc':1,'max_ipc':1,'published':published,'expires':expires,'url':f'https://onixus-rf.duckdns.org/rtrust/releases/{seq}/windows-x86_64/setup.exe','size':9,'sha256':hashlib.sha256(b'installer').hexdigest()}
+            raw=json.dumps(m).encode();env=json.dumps({'payload':base64.b64encode(raw).decode(),'signature':base64.b64encode(key.sign(raw)).decode()}).encode();(p/'manifest.json').write_bytes(env);return env
+        release(1,now-40*86400,now-9*86400);active=release(2,now-25*86400,now+3*86400)
+        (root/'windows-x86_64').mkdir();(root/'windows-x86_64'/'latest.json').write_bytes(active)
+        with patch.object(agent,'FEED',root),patch.object(agent,'ROOT_KEY',pub),patch.object(agent,'server_packages',return_value=[]):
+            feed=agent.updates()
+        old,current=feed['releases']
+        self.assertEqual((old['version'],old['valid'],old['reason'],old['expires']),('0.1.0',False,'Манифест истёк',now-9*86400))
+        self.assertEqual((current['valid'],current['active']),(True,True))
+        self.assertEqual(feed['active_expires'],now+3*86400)
     def test_limits_validation_and_api_mapping(self):
         with patch.object(agent,'account',return_value={'id':1,'username':'fixture'}),patch.object(agent,'hui') as hui:
             agent.dispatch('hysteria.update',{'id':1,'days':10,'devices':2,'quota_gb':5})

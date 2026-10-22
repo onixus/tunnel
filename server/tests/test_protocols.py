@@ -165,6 +165,28 @@ def test_discovery_keeps_only_stable_verifiable_releases(monkeypatch):
     assert awg[0]['published'] == '2026-08-28'
 
 
+def test_client_releases_are_reported_with_local_links(host, monkeypatch):
+    setup = 'R-TrustTunnel-Windows-x64-Setup.exe'
+    replies = {'onixus/Rust-trustvpn/releases?per_page=30': [
+        release('v0.6.2', setup, html_url='https://evil.invalid/'), release('v0.6.2-beta.1', setup, prerelease=True),
+        release('v0.6.1', 'R-TrustTunnel-Android.apk'), release('v0.6.0', setup), release('v0.7.0', setup, draft=True)]}
+    monkeypatch.setattr(protocols, 'api', lambda path: replies[path])
+    assert protocols.discover('client') == [
+        {'version': '0.6.2', 'tag': 'v0.6.2', 'published': '2026-09-01', 'url': 'https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.2'},
+        {'version': '0.6.0', 'tag': 'v0.6.0', 'published': '2026-09-01', 'url': 'https://github.com/onixus/Rust-trustvpn/releases/tag/v0.6.0'}]
+    monkeypatch.setattr(protocols, 'discover', lambda name: [{'version': '0.6.2'}] if name == 'client' else [])
+    protocols.check()
+    assert protocols.client_releases()['releases'] == [{'version': '0.6.2'}]
+
+    def offline(name):
+        raise OSError('GitHub down')
+    monkeypatch.setattr(protocols, 'discover', offline)
+    with pytest.raises(PolicyError, match='R-TrustTunnel'):
+        protocols.check()
+    kept = protocols.client_releases()
+    assert kept['releases'] == [{'version': '0.6.2'}] and 'недоступен' in kept['error']
+
+
 def test_redirects_cannot_leave_github():
     handler = protocols.GitHubOnly()
     request = urllib.request.Request('https://github.com/x')
