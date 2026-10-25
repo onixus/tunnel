@@ -41,8 +41,21 @@ what was created; missing protocols are added from the person card (`person.add`
 The card holds contacts (applied to every linked account, so delivery and campaigns
 keep reading per-account contacts), each account's actions, TrustTunnel keys and
 R-TrustTunnel devices. «Привязать устройство» issues the same one-time, 180-second
-enrollment code as the client portal (`/e#code` link, QR and `ttsuperlink://`); only
-the code hash is stored.
+enrollment code as the v2 client portal. The QR contains a JSON invitation with
+`kind=rtrust_enrollment`, `version=1`, HTTPS `origin`, `code` and `expires_at`;
+only the code hash is stored. Current clients enroll through `/portal/v2/enroll`.
+For manual entry the dialog also shows the portal address and one-time code.
+The authenticated browser's verified origin takes precedence over a legacy
+`portal_url`, so an old internal port cannot leak into invitations from the console.
+
+Administrators can use «Доступ к профилям» beside an active device in the person
+card or «Ключи и устройства». The dialog lists the owner's profiles and their
+current grants, with «Дать доступ» and «Отозвать доступ». It changes the same
+grants as the owner's `/profiles` page; neither role overrides the other. The
+shared grant transaction enforces ownership, the 64-profile device limit and
+device-bound credentials. Both administrator identity and changes are audited.
+Revoking a grant removes profile synchronization, not previously exported VPN
+credentials; revoke or rotate those separately to terminate VPN access.
 
 Accounts, keys, devices and whole people can be deleted, not only revoked. Deleting a
 TrustTunnel account revokes its active devices through the portal first; a device key

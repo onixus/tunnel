@@ -312,14 +312,122 @@ class ConsoleTests(unittest.TestCase):
     def test_device_enrollment_code_is_single_use_secret(self):
         db.set_settings({'portal_url':'https://vpn.example.invalid/'})
         r=self.post('enroll',{'id':self.user});self.assertEqual(r.status_code,200,r.text)
-        link=r.json()['content'];code=link.split('#',1)[1]
-        self.assertTrue(link.startswith('https://vpn.example.invalid/e#'))
+        invitation=json.loads(r.json()['content']);code=invitation['code']
+        self.assertEqual(set(invitation),{'kind','version','origin','code','expires_at'})
+        self.assertEqual(invitation['kind'],'rtrust_enrollment')
+        self.assertEqual(invitation['version'],1)
+        self.assertEqual(invitation['origin'],'https://vpn.example.invalid')
+        self.assertEqual(r.json()['origin'],invitation['origin'])
+        self.assertEqual(r.json()['code'],code)
+        self.assertTrue(0<invitation['expires_at']-int(time.time())<=180)
         self.assertTrue(r.json()['qr_data_url'].startswith('data:image/svg+xml'))
-        self.assertIn('server=https%3A%2F%2Fvpn.example.invalid#',r.json()['app_link'])
+        self.assertEqual(r.headers['cache-control'],'no-store')
+        # Decode the actual SVG so a renderer/response mismatch cannot regress.
+        import cairosvg,cv2,numpy as np
+        svg=base64.b64decode(r.json()['qr_data_url'].split(',',1)[1])
+        pixels=cv2.imdecode(np.frombuffer(cairosvg.svg2png(bytestring=svg,scale=2),np.uint8),cv2.IMREAD_COLOR)
+        self.assertEqual(cv2.QRCodeDetector().detectAndDecode(pixels)[0],r.json()['content'])
         with db.connect() as c:self.assertEqual(c.execute('SELECT code_hash FROM enroll_codes').fetchone()[0],security.hash_api_token(code))
         with ui.connect() as c:self.assertNotIn(code,str(c.execute('SELECT * FROM audit').fetchall()))
+        from app import rtrust_profiles as exchange
+        from fastapi import FastAPI
+        exchange.init()
+        api=FastAPI();api.include_router(exchange.router)
+        client=TestClient(api)
+        self.assertEqual(client.get('/portal/v2/capabilities').json()['version'],2)
+        payload={'code':code,'name':'QR fixture','platform':'android'}
+        enrolled=client.post('/portal/v2/enroll',json=payload)
+        self.assertEqual(enrolled.status_code,200,enrolled.text)
+        self.assertGreater(enrolled.json()['expires_in'],0)
+        self.assertEqual(db.get_device(enrolled.json()['device_id'])['user_id'],self.user)
+        self.assertEqual(client.post('/portal/v2/enroll',json=payload).status_code,401)
         with db.connect() as c:c.execute("UPDATE users SET status='blocked'")
         self.assertEqual(self.post('enroll',{'id':self.user}).status_code,409)
+
+    def test_device_enrollment_requires_https_portal_origin(self):
+        for origin in ['http://vpn.example.invalid','https://vpn.example.invalid/path',
+                       'https://user@vpn.example.invalid','https://vpn.example.invalid?query=1',
+                       'https://vpn.example.invalid#fragment','https://vpn.example.invalid:bad']:
+            with self.subTest(origin=origin):
+                db.set_settings({'portal_url':origin})
+                self.assertEqual(self.post('enroll',{'id':self.user}).status_code,409)
+        with db.connect() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM enroll_codes').fetchone()[0],0)
+
+    def test_device_enrollment_prefers_verified_browser_origin_over_legacy_port(self):
+        db.set_settings({'portal_url':'https://onixus-rf.duckdns.org:18082'})
+        origin='https://onixus-rf.duckdns.org'
+        response=self.client.post('/console/api/enroll',json={'id':self.user},
+                                  headers={'X-CSRF-Token':self.csrf,'Origin':origin})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(json.loads(response.json()['content'])['origin'],origin)
+        self.assertEqual(response.json()['origin'],origin)
+        rejected=self.client.post('/console/api/enroll',json={'id':self.user},
+                                  headers={'X-CSRF-Token':self.csrf,'Origin':'https://foreign.invalid'})
+        self.assertEqual(rejected.status_code,403)
+
+    def grant_fixture(self):
+        from app import rtrust_profiles as exchange
+        exchange.init()
+        db.set_settings({'panel_domain':'vpn.example.invalid'})
+        device=db.create_device(self.user,'Approval phone',secrets.token_hex(32))
+        key=db.create_config(self.user,'approval-key','profile-secret-never-in-list','Approval profile')
+        return exchange,device,'managed-'+str(key)
+
+    def test_admin_and_user_manage_the_same_profile_grants(self):
+        exchange,device,profile=self.grant_fixture()
+        listing=self.client.get('/console/api/device-profiles',params={'device_id':device})
+        self.assertEqual(listing.status_code,200,listing.text)
+        self.assertEqual(listing.json()['profiles'],[{'id':profile,'name':'Approval profile','allowed':False}])
+        self.assertNotIn('profile-secret-never-in-list',listing.text)
+        payload={'device_id':device,'profile_id':profile,'allow':True}
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+        with db.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM rtrust_grants').fetchone()[0],1)
+            self.assertEqual(c.execute("SELECT actor FROM rtrust_audit WHERE action='grant' LIMIT 1").fetchone()[0],'admin:'+str(self.admin))
+        from fastapi import FastAPI
+        api=FastAPI();api.include_router(exchange.router)
+        user_client=TestClient(api)
+        cookie=security.create_session_token(str(self.user),'user');user_client.cookies.set('user_token',cookie)
+        csrf=hmac.new(config.SECRET_KEY.encode(),('rtrust-csrf:'+cookie).encode(),hashlib.sha256).hexdigest()
+        response=user_client.post('/portal/v2/profiles/'+profile+'/grants',
+                                  json={'device_id':device,'allow':False},headers={'X-CSRF-Token':csrf})
+        self.assertEqual(response.status_code,200,response.text)
+        listing=self.client.get('/console/api/device-profiles',params={'device_id':device})
+        self.assertFalse(listing.json()['profiles'][0]['allowed'])
+        payload['allow']=False
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+
+    def test_admin_profile_grants_enforce_auth_ownership_and_device_binding(self):
+        exchange,device,profile=self.grant_fixture()
+        other=db.create_user('other-grant@example.invalid','unused')
+        foreign=db.create_config(other,'foreign-key','foreign-secret','Foreign profile')
+        bound_device=db.create_device(self.user,'Other phone',secrets.token_hex(32))
+        bound=db.create_device_config(self.user,bound_device,'bound-key','bound-secret','Bound profile')
+        for identifier,status in [('managed-'+str(foreign),404),('managed-'+str(bound),409)]:
+            response=self.post('device-profile-grant',{'device_id':device,'profile_id':identifier,'allow':True})
+            self.assertEqual(response.status_code,status,response.text)
+        listing=self.client.get('/console/api/device-profiles',params={'device_id':device})
+        self.assertEqual([p['id'] for p in listing.json()['profiles']],[profile])
+        payload={'device_id':device,'profile_id':profile,'allow':True}
+        self.assertEqual(self.client.post('/console/api/device-profile-grant',json=payload).status_code,403)
+        self.assertEqual(self.post('device-profile-grant',{**payload,'owner':other}).status_code,422)
+        self.assertEqual(self.post('device-profile-grant',{**payload,'device_id':True}).status_code,422)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get('/console/api/device-profiles',params={'device_id':device}).status_code,401)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,401)
+
+    def test_admin_profile_grants_preserve_capacity_and_revoke_for_blocked_users(self):
+        exchange,device,profile=self.grant_fixture()
+        payload={'device_id':device,'profile_id':profile,'allow':True}
+        with patch.object(exchange,'MAX_CLIENT_PROFILES',0):
+            self.assertEqual(self.post('device-profile-grant',payload).status_code,409)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+        with db.connect() as c:c.execute("UPDATE users SET status='blocked' WHERE id=?",(self.user,))
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,409)
+        self.assertEqual(self.post('device-profile-grant',{**payload,'allow':False}).status_code,200)
+        db.revoke_device(device)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,404)
 
     def test_link_existing_account_to_person(self):
         self.post('contacts',{'source':'trusttunnel','id':self.user,'chat_id':5,'consent':True})

@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from urllib.parse import urlsplit, parse_qs, urlencode, quote
+from urllib.parse import urlsplit, parse_qs, urlencode
 import http.client
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -558,20 +558,80 @@ async def export(request:Request):
 
 ENROLL_TTL=180
 
+def profile_device(device_id):
+    if type(device_id) is not int: raise HTTPException(422,'Некорректный ID устройства')
+    device=db.get_device(device_id)
+    if not device or device['revoked_at']: raise HTTPException(404,'Действующее устройство не найдено')
+    return device
+
+@app.get('/console/api/device-profiles')
+def device_profiles(request:Request,device_id:int):
+    actor(request)
+    from app import rtrust_profiles as exchange
+    device=profile_device(device_id);owner=device['user_id']
+    source_user('trusttunnel',owner)
+    with db.connect() as c:
+        c.execute('BEGIN')
+        # Use the same bounded device grant scan as client synchronization.
+        granted=set(exchange.device_live_ids(c,owner,device_id,exchange.SYNC_LIMIT_ERROR))
+        profiles=[]
+        for identifier in exchange.client_profile_ids(c,owner,None):
+            row=exchange.live_row(c,owner,None,identifier)
+            if row is None: continue
+            if identifier.startswith('managed-'):
+                if row['device_id'] is not None and row['device_id']!=device_id: continue
+                name=row['label'] or row['tt_username']
+            else:
+                name=json.loads(row['summary']).get('name') or identifier
+            profiles.append({'id':identifier,'name':name,'allowed':identifier in granted})
+    return {'device':{'id':device_id,'name':device['name'],'user_id':owner},'profiles':profiles}
+
+@app.post('/console/api/device-profile-grant')
+async def device_profile_grant(request:Request):
+    admin=actor(request,True);q=await body(request)
+    if set(q)!={'device_id','profile_id','allow'} or not isinstance(q.get('profile_id'),str) or not 1<=len(q['profile_id'])<=80 or type(q.get('allow')) is not bool:
+        raise HTTPException(422,'Некорректные параметры доступа')
+    return await run_in_threadpool(apply_profile_grant,request,q,admin)
+
+def apply_profile_grant(request,q,admin):
+    from app import rtrust_profiles as exchange
+    device=profile_device(q['device_id']);owner=device['user_id']
+    user=source_user('trusttunnel',owner)
+    if q['allow'] and user['status']!='active': raise HTTPException(409,'Пользователь заблокирован')
+    # The existing transaction enforces owner isolation, device credential
+    # binding, capacity and the same durable grants for both browser roles.
+    result=exchange._grant(q['profile_id'],request,{'device_id':device['id'],'allow':q['allow']},(owner,'admin:'+str(admin),None))
+    audit(admin,'device.profile-grant' if q['allow'] else 'device.profile-ungrant',
+          json.dumps({'device_id':device['id'],'profile_id':q['profile_id']},separators=(',',':')))
+    return result
+
 @app.post('/console/api/enroll')
 async def enroll(request:Request):
     admin=actor(request,True); q=await body(request)
     if type(q.get('id')) is not int: raise HTTPException(422,'Некорректный ID')
     user=source_user('trusttunnel',q['id'])
     if user['status']!='active': raise HTTPException(409,'Пользователь заблокирован: сначала включите доступ')
+    # actor() already checked the browser Origin against the configured console.
+    # Prefer it over a legacy portal_url that may still name an internal port.
+    base=(request.headers.get('origin') or os.environ.get('CONSOLE_ORIGIN')
+          or db.get_setting('portal_url') or 'https://onixus-rf.duckdns.org').rstrip('/')
+    try:
+        origin=urlsplit(base); port=origin.port
+        valid=(base.isascii() and len(base)<=512 and origin.scheme=='https' and origin.hostname
+               and origin.username is None and origin.password is None and not origin.path
+               and not origin.query and not origin.fragment and port!=0 and not any(ch.isspace() for ch in base))
+    except ValueError:
+        valid=False
+    if not valid: raise HTTPException(409,'Укажите корректный HTTPS-адрес портала без пути в настройках сервера')
     raw=security.new_token(24)
+    expires=int(time.time())+ENROLL_TTL
     db.create_enroll_code(user['id'],security.hash_api_token(raw),ENROLL_TTL)
-    base=(db.get_setting('portal_url') or os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).rstrip('/')
-    # Same invitation as the client portal: the code stays in the fragment, out of logs.
-    link=f'{base}/e#{raw}'
+    # Current clients dispatch this JSON to v2 enrollment; legacy /e links are
+    # otherwise interpreted as profile imports and fail profile-version checks.
+    invitation={'kind':'rtrust_enrollment','version':1,'origin':base,'code':raw,'expires_at':expires}
     audit(admin,'device.enroll-code',str(user['id']))
-    result=await run_in_threadpool(with_qr,{'content':link})
-    return dict(result,app_link=f"ttsuperlink://enroll?server={quote(base,safe='')}#{raw}",expires_in=ENROLL_TTL)
+    result=await run_in_threadpool(with_qr,{'content':json.dumps(invitation,separators=(',',':'))})
+    return dict(result,origin=base,code=raw,expires_in=ENROLL_TTL)
 
 @app.post('/console/api/people/contact')
 async def person_contact(request:Request):
