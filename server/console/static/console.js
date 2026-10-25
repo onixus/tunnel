@@ -681,7 +681,7 @@ async function handle(b) {
     const r = await api("enroll", { id });
     modal(
       "Привязать устройство",
-      `<p>Откройте R-TrustTunnel на устройстве и отсканируйте QR-код или откройте ссылку на нём. Код одноразовый и действует <b id="enroll-left">${r.expires_in}</b> с.</p>${r.qr_data_url ? `<img class="qr" src="${r.qr_data_url}" alt="QR-код привязки устройства">` : `<p class="error">${esc(r.qr_error)}</p>`}<label class="field">Ссылка<input readonly value="${esc(r.content)}"></label><label class="field">Ссылка для приложения на этом же устройстве<input readonly value="${esc(r.app_link)}"></label><div class="note">После привязки устройство появится в карточке пользователя и получит собственный ключ VPN.</div>`,
+      `<p>Откройте R-TrustTunnel на устройстве и отсканируйте QR-код или введите адрес портала и код вручную. Код одноразовый и действует <b id="enroll-left">${r.expires_in}</b> с.</p>${r.qr_data_url ? `<img class="qr" src="${r.qr_data_url}" alt="QR-код привязки устройства">` : `<p class="error">${esc(r.qr_error)}</p>`}<label class="field">Адрес портала<input readonly value="${esc(r.origin)}"></label><label class="field">Одноразовый код<input readonly value="${esc(r.code)}"></label><div class="note">После привязки устройство появится в карточке пользователя. Доступ к профилям настраивается отдельно.</div>`,
     );
     const until = Date.now() + r.expires_in * 1000,
       timer = setInterval(() => {

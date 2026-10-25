@@ -312,14 +312,58 @@ class ConsoleTests(unittest.TestCase):
     def test_device_enrollment_code_is_single_use_secret(self):
         db.set_settings({'portal_url':'https://vpn.example.invalid/'})
         r=self.post('enroll',{'id':self.user});self.assertEqual(r.status_code,200,r.text)
-        link=r.json()['content'];code=link.split('#',1)[1]
-        self.assertTrue(link.startswith('https://vpn.example.invalid/e#'))
+        invitation=json.loads(r.json()['content']);code=invitation['code']
+        self.assertEqual(set(invitation),{'kind','version','origin','code','expires_at'})
+        self.assertEqual(invitation['kind'],'rtrust_enrollment')
+        self.assertEqual(invitation['version'],1)
+        self.assertEqual(invitation['origin'],'https://vpn.example.invalid')
+        self.assertEqual(r.json()['origin'],invitation['origin'])
+        self.assertEqual(r.json()['code'],code)
+        self.assertTrue(0<invitation['expires_at']-int(time.time())<=180)
         self.assertTrue(r.json()['qr_data_url'].startswith('data:image/svg+xml'))
-        self.assertIn('server=https%3A%2F%2Fvpn.example.invalid#',r.json()['app_link'])
+        self.assertEqual(r.headers['cache-control'],'no-store')
+        # Decode the actual SVG so a renderer/response mismatch cannot regress.
+        import cairosvg,cv2,numpy as np
+        svg=base64.b64decode(r.json()['qr_data_url'].split(',',1)[1])
+        pixels=cv2.imdecode(np.frombuffer(cairosvg.svg2png(bytestring=svg,scale=2),np.uint8),cv2.IMREAD_COLOR)
+        self.assertEqual(cv2.QRCodeDetector().detectAndDecode(pixels)[0],r.json()['content'])
         with db.connect() as c:self.assertEqual(c.execute('SELECT code_hash FROM enroll_codes').fetchone()[0],security.hash_api_token(code))
         with ui.connect() as c:self.assertNotIn(code,str(c.execute('SELECT * FROM audit').fetchall()))
+        from app import rtrust_profiles as exchange
+        from fastapi import FastAPI
+        exchange.init()
+        api=FastAPI();api.include_router(exchange.router)
+        client=TestClient(api)
+        self.assertEqual(client.get('/portal/v2/capabilities').json()['version'],2)
+        payload={'code':code,'name':'QR fixture','platform':'android'}
+        enrolled=client.post('/portal/v2/enroll',json=payload)
+        self.assertEqual(enrolled.status_code,200,enrolled.text)
+        self.assertGreater(enrolled.json()['expires_in'],0)
+        self.assertEqual(db.get_device(enrolled.json()['device_id'])['user_id'],self.user)
+        self.assertEqual(client.post('/portal/v2/enroll',json=payload).status_code,401)
         with db.connect() as c:c.execute("UPDATE users SET status='blocked'")
         self.assertEqual(self.post('enroll',{'id':self.user}).status_code,409)
+
+    def test_device_enrollment_requires_https_portal_origin(self):
+        for origin in ['http://vpn.example.invalid','https://vpn.example.invalid/path',
+                       'https://user@vpn.example.invalid','https://vpn.example.invalid?query=1',
+                       'https://vpn.example.invalid#fragment','https://vpn.example.invalid:bad']:
+            with self.subTest(origin=origin):
+                db.set_settings({'portal_url':origin})
+                self.assertEqual(self.post('enroll',{'id':self.user}).status_code,409)
+        with db.connect() as c:self.assertEqual(c.execute('SELECT COUNT(*) FROM enroll_codes').fetchone()[0],0)
+
+    def test_device_enrollment_prefers_verified_browser_origin_over_legacy_port(self):
+        db.set_settings({'portal_url':'https://onixus-rf.duckdns.org:18082'})
+        origin='https://onixus-rf.duckdns.org'
+        response=self.client.post('/console/api/enroll',json={'id':self.user},
+                                  headers={'X-CSRF-Token':self.csrf,'Origin':origin})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(json.loads(response.json()['content'])['origin'],origin)
+        self.assertEqual(response.json()['origin'],origin)
+        rejected=self.client.post('/console/api/enroll',json={'id':self.user},
+                                  headers={'X-CSRF-Token':self.csrf,'Origin':'https://foreign.invalid'})
+        self.assertEqual(rejected.status_code,403)
 
     def test_link_existing_account_to_person(self):
         self.post('contacts',{'source':'trusttunnel','id':self.user,'chat_id':5,'consent':True})

@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from urllib.parse import urlsplit, parse_qs, urlencode, quote
+from urllib.parse import urlsplit, parse_qs, urlencode
 import http.client
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -564,14 +564,27 @@ async def enroll(request:Request):
     if type(q.get('id')) is not int: raise HTTPException(422,'Некорректный ID')
     user=source_user('trusttunnel',q['id'])
     if user['status']!='active': raise HTTPException(409,'Пользователь заблокирован: сначала включите доступ')
+    # actor() already checked the browser Origin against the configured console.
+    # Prefer it over a legacy portal_url that may still name an internal port.
+    base=(request.headers.get('origin') or os.environ.get('CONSOLE_ORIGIN')
+          or db.get_setting('portal_url') or 'https://onixus-rf.duckdns.org').rstrip('/')
+    try:
+        origin=urlsplit(base); port=origin.port
+        valid=(base.isascii() and len(base)<=512 and origin.scheme=='https' and origin.hostname
+               and origin.username is None and origin.password is None and not origin.path
+               and not origin.query and not origin.fragment and port!=0 and not any(ch.isspace() for ch in base))
+    except ValueError:
+        valid=False
+    if not valid: raise HTTPException(409,'Укажите корректный HTTPS-адрес портала без пути в настройках сервера')
     raw=security.new_token(24)
+    expires=int(time.time())+ENROLL_TTL
     db.create_enroll_code(user['id'],security.hash_api_token(raw),ENROLL_TTL)
-    base=(db.get_setting('portal_url') or os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).rstrip('/')
-    # Same invitation as the client portal: the code stays in the fragment, out of logs.
-    link=f'{base}/e#{raw}'
+    # Current clients dispatch this JSON to v2 enrollment; legacy /e links are
+    # otherwise interpreted as profile imports and fail profile-version checks.
+    invitation={'kind':'rtrust_enrollment','version':1,'origin':base,'code':raw,'expires_at':expires}
     audit(admin,'device.enroll-code',str(user['id']))
-    result=await run_in_threadpool(with_qr,{'content':link})
-    return dict(result,app_link=f"ttsuperlink://enroll?server={quote(base,safe='')}#{raw}",expires_in=ENROLL_TTL)
+    result=await run_in_threadpool(with_qr,{'content':json.dumps(invitation,separators=(',',':'))})
+    return dict(result,origin=base,code=raw,expires_in=ENROLL_TTL)
 
 @app.post('/console/api/people/contact')
 async def person_contact(request:Request):
