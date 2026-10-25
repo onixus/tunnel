@@ -313,7 +313,7 @@ function personPage() {
           ["Устройство", "Платформа", "Активность", "Статус", "Действия"],
           devices.map(
             (d) =>
-              `<tr><td>${esc(d.name)}</td><td>${esc(d.platform)}</td><td>${esc(d.last_seen_at || "—")}</td><td>${pill(d.revoked_at ? "blocked" : "active", d.revoked_at ? "Отозвано" : "Активно")}</td><td>${(d.revoked_at ? "" : btn("Отозвать", "device-revoke", `data-id="${d.id}"`)) + btn("Удалить", "device-delete", `data-id="${d.id}"`, "danger")}</td></tr>`,
+              `<tr><td>${esc(d.name)}</td><td>${esc(d.platform)}</td><td>${esc(d.last_seen_at || "—")}</td><td>${pill(d.revoked_at ? "blocked" : "active", d.revoked_at ? "Отозвано" : "Активно")}</td><td>${(d.revoked_at ? "" : btn("Доступ к профилям", "device-profiles", `data-id="${d.id}"`) + btn("Отозвать", "device-revoke", `data-id="${d.id}"`)) + btn("Удалить", "device-delete", `data-id="${d.id}"`, "danger")}</td></tr>`,
           ),
         ) +
         `<div class="actions">${btn("+ Привязать устройство", "device-enroll", `data-id="${id}"`, "primary")}</div>`;
@@ -349,7 +349,7 @@ function keys() {
       ["Устройство", "Владелец", "Платформа", "Последняя активность", "Статус"],
       (state.devices || []).map(
         (d) =>
-          `<tr><td>${esc(d.name)}</td><td>${esc((state.users || []).find((u) => u.id === d.user_id)?.email || "#" + d.user_id)}</td><td>${esc(d.platform)}</td><td>${esc(d.last_seen_at || "—")}</td><td>${pill(d.revoked_at ? "blocked" : "active")}${!d.revoked_at ? btn("Отозвать", "device-revoke", `data-id="${d.id}"`) : ""}${btn("Удалить", "device-delete", `data-id="${d.id}"`, "danger")}</td></tr>`,
+          `<tr><td>${esc(d.name)}</td><td>${esc((state.users || []).find((u) => u.id === d.user_id)?.email || "#" + d.user_id)}</td><td>${esc(d.platform)}</td><td>${esc(d.last_seen_at || "—")}</td><td>${pill(d.revoked_at ? "blocked" : "active")}${!d.revoked_at ? btn("Доступ к профилям", "device-profiles", `data-id="${d.id}"`) + btn("Отозвать", "device-revoke", `data-id="${d.id}"`) : ""}${btn("Удалить", "device-delete", `data-id="${d.id}"`, "danger")}</td></tr>`,
       ),
     )
   );
@@ -676,6 +676,23 @@ async function handle(b) {
       notice("Контакт сохранён");
       await refresh();
     });
+  }
+  if (a === "device-profiles") {
+    const r = await api("device-profiles?device_id=" + id);
+    modal(
+      "Доступ к профилям · " + r.device.name,
+      `<p>Профили владельца устройства. Пользователь также может управлять доступом в своём кабинете.</p>${table(
+        ["Профиль", "Доступ", "Действие"],
+        r.profiles.map((p) => `<tr><td>${esc(p.name)}</td><td>${pill(p.allowed ? "active" : "blocked", p.allowed ? "Разрешён" : "Не предоставлен")}</td><td>${btn(p.allowed ? "Отозвать доступ" : "Дать доступ", "device-profile-grant", `data-id="${id}" data-profile="${esc(p.id)}" data-allow="${!p.allowed}"`)}</td></tr>`),
+      )}<p class="note">После изменения обновите профили в приложении. Отзыв доступа убирает синхронизацию профиля; ранее скачанный VPN-пароль продолжает действовать до его отзыва или смены.</p><p><a href="/profiles" target="_blank" rel="noopener">Открыть пользовательский кабинет профилей</a> — вход под учётной записью владельца.</p>`,
+    );
+  }
+  if (a === "device-profile-grant") {
+    const allow = b.dataset.allow === "true";
+    await api("device-profile-grant", {device_id: id, profile_id: b.dataset.profile, allow});
+    $("#modal").close();
+    notice(allow ? "Доступ предоставлен. Обновите профили в приложении." : "Доступ отозван. Ранее скачанный VPN-пароль продолжает действовать.");
+    await handle({dataset: {action: "device-profiles", id: String(id)}});
   }
   if (a === "device-enroll") {
     const r = await api("enroll", { id });

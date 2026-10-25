@@ -365,6 +365,70 @@ class ConsoleTests(unittest.TestCase):
                                   headers={'X-CSRF-Token':self.csrf,'Origin':'https://foreign.invalid'})
         self.assertEqual(rejected.status_code,403)
 
+    def grant_fixture(self):
+        from app import rtrust_profiles as exchange
+        exchange.init()
+        db.set_settings({'panel_domain':'vpn.example.invalid'})
+        device=db.create_device(self.user,'Approval phone',secrets.token_hex(32))
+        key=db.create_config(self.user,'approval-key','profile-secret-never-in-list','Approval profile')
+        return exchange,device,'managed-'+str(key)
+
+    def test_admin_and_user_manage_the_same_profile_grants(self):
+        exchange,device,profile=self.grant_fixture()
+        listing=self.client.get('/console/api/device-profiles',params={'device_id':device})
+        self.assertEqual(listing.status_code,200,listing.text)
+        self.assertEqual(listing.json()['profiles'],[{'id':profile,'name':'Approval profile','allowed':False}])
+        self.assertNotIn('profile-secret-never-in-list',listing.text)
+        payload={'device_id':device,'profile_id':profile,'allow':True}
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+        with db.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM rtrust_grants').fetchone()[0],1)
+            self.assertEqual(c.execute("SELECT actor FROM rtrust_audit WHERE action='grant' LIMIT 1").fetchone()[0],'admin:'+str(self.admin))
+        from fastapi import FastAPI
+        api=FastAPI();api.include_router(exchange.router)
+        user_client=TestClient(api)
+        cookie=security.create_session_token(str(self.user),'user');user_client.cookies.set('user_token',cookie)
+        csrf=hmac.new(config.SECRET_KEY.encode(),('rtrust-csrf:'+cookie).encode(),hashlib.sha256).hexdigest()
+        response=user_client.post('/portal/v2/profiles/'+profile+'/grants',
+                                  json={'device_id':device,'allow':False},headers={'X-CSRF-Token':csrf})
+        self.assertEqual(response.status_code,200,response.text)
+        listing=self.client.get('/console/api/device-profiles',params={'device_id':device})
+        self.assertFalse(listing.json()['profiles'][0]['allowed'])
+        payload['allow']=False
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+
+    def test_admin_profile_grants_enforce_auth_ownership_and_device_binding(self):
+        exchange,device,profile=self.grant_fixture()
+        other=db.create_user('other-grant@example.invalid','unused')
+        foreign=db.create_config(other,'foreign-key','foreign-secret','Foreign profile')
+        bound_device=db.create_device(self.user,'Other phone',secrets.token_hex(32))
+        bound=db.create_device_config(self.user,bound_device,'bound-key','bound-secret','Bound profile')
+        for identifier,status in [('managed-'+str(foreign),404),('managed-'+str(bound),409)]:
+            response=self.post('device-profile-grant',{'device_id':device,'profile_id':identifier,'allow':True})
+            self.assertEqual(response.status_code,status,response.text)
+        listing=self.client.get('/console/api/device-profiles',params={'device_id':device})
+        self.assertEqual([p['id'] for p in listing.json()['profiles']],[profile])
+        payload={'device_id':device,'profile_id':profile,'allow':True}
+        self.assertEqual(self.client.post('/console/api/device-profile-grant',json=payload).status_code,403)
+        self.assertEqual(self.post('device-profile-grant',{**payload,'owner':other}).status_code,422)
+        self.assertEqual(self.post('device-profile-grant',{**payload,'device_id':True}).status_code,422)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get('/console/api/device-profiles',params={'device_id':device}).status_code,401)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,401)
+
+    def test_admin_profile_grants_preserve_capacity_and_revoke_for_blocked_users(self):
+        exchange,device,profile=self.grant_fixture()
+        payload={'device_id':device,'profile_id':profile,'allow':True}
+        with patch.object(exchange,'MAX_CLIENT_PROFILES',0):
+            self.assertEqual(self.post('device-profile-grant',payload).status_code,409)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,200)
+        with db.connect() as c:c.execute("UPDATE users SET status='blocked' WHERE id=?",(self.user,))
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,409)
+        self.assertEqual(self.post('device-profile-grant',{**payload,'allow':False}).status_code,200)
+        db.revoke_device(device)
+        self.assertEqual(self.post('device-profile-grant',payload).status_code,404)
+
     def test_link_existing_account_to_person(self):
         self.post('contacts',{'source':'trusttunnel','id':self.user,'chat_id':5,'consent':True})
         r=self.post('people/link',{'source':'trusttunnel','user_id':self.user,'nick':'tester'});self.assertEqual(r.status_code,200,r.text)

@@ -558,6 +558,53 @@ async def export(request:Request):
 
 ENROLL_TTL=180
 
+def profile_device(device_id):
+    if type(device_id) is not int: raise HTTPException(422,'Некорректный ID устройства')
+    device=db.get_device(device_id)
+    if not device or device['revoked_at']: raise HTTPException(404,'Действующее устройство не найдено')
+    return device
+
+@app.get('/console/api/device-profiles')
+def device_profiles(request:Request,device_id:int):
+    actor(request)
+    from app import rtrust_profiles as exchange
+    device=profile_device(device_id);owner=device['user_id']
+    source_user('trusttunnel',owner)
+    with db.connect() as c:
+        c.execute('BEGIN')
+        # Use the same bounded device grant scan as client synchronization.
+        granted=set(exchange.device_live_ids(c,owner,device_id,exchange.SYNC_LIMIT_ERROR))
+        profiles=[]
+        for identifier in exchange.client_profile_ids(c,owner,None):
+            row=exchange.live_row(c,owner,None,identifier)
+            if row is None: continue
+            if identifier.startswith('managed-'):
+                if row['device_id'] is not None and row['device_id']!=device_id: continue
+                name=row['label'] or row['tt_username']
+            else:
+                name=json.loads(row['summary']).get('name') or identifier
+            profiles.append({'id':identifier,'name':name,'allowed':identifier in granted})
+    return {'device':{'id':device_id,'name':device['name'],'user_id':owner},'profiles':profiles}
+
+@app.post('/console/api/device-profile-grant')
+async def device_profile_grant(request:Request):
+    admin=actor(request,True);q=await body(request)
+    if set(q)!={'device_id','profile_id','allow'} or not isinstance(q.get('profile_id'),str) or not 1<=len(q['profile_id'])<=80 or type(q.get('allow')) is not bool:
+        raise HTTPException(422,'Некорректные параметры доступа')
+    return await run_in_threadpool(apply_profile_grant,request,q,admin)
+
+def apply_profile_grant(request,q,admin):
+    from app import rtrust_profiles as exchange
+    device=profile_device(q['device_id']);owner=device['user_id']
+    user=source_user('trusttunnel',owner)
+    if q['allow'] and user['status']!='active': raise HTTPException(409,'Пользователь заблокирован')
+    # The existing transaction enforces owner isolation, device credential
+    # binding, capacity and the same durable grants for both browser roles.
+    result=exchange._grant(q['profile_id'],request,{'device_id':device['id'],'allow':q['allow']},(owner,'admin:'+str(admin),None))
+    audit(admin,'device.profile-grant' if q['allow'] else 'device.profile-ungrant',
+          json.dumps({'device_id':device['id'],'profile_id':q['profile_id']},separators=(',',':')))
+    return result
+
 @app.post('/console/api/enroll')
 async def enroll(request:Request):
     admin=actor(request,True); q=await body(request)

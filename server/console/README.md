@@ -48,6 +48,15 @@ For manual entry the dialog also shows the portal address and one-time code.
 The authenticated browser's verified origin takes precedence over a legacy
 `portal_url`, so an old internal port cannot leak into invitations from the console.
 
+Administrators can use «Доступ к профилям» beside an active device in the person
+card or «Ключи и устройства». The dialog lists the owner's profiles and their
+current grants, with «Дать доступ» and «Отозвать доступ». It changes the same
+grants as the owner's `/profiles` page; neither role overrides the other. The
+shared grant transaction enforces ownership, the 64-profile device limit and
+device-bound credentials. Both administrator identity and changes are audited.
+Revoking a grant removes profile synchronization, not previously exported VPN
+credentials; revoke or rotate those separately to terminate VPN access.
+
 Accounts, keys, devices and whole people can be deleted, not only revoked. Deleting a
 TrustTunnel account revokes its active devices through the portal first; a device key
 is deleted only with its device; a device is revoked before its rows are removed.
