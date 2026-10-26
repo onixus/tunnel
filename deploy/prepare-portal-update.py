@@ -59,7 +59,8 @@ def prepare(base, tag):
         if not candidate.startswith('sha256:') or len(candidate) != 71:
             raise RuntimeError('Expected a candidate image ID')
     # Disposable database, no live mounts, no network and no endpoint startup.
-    check = '''from app import db, rtrust_profiles as exchange
+    check = '''from app import db, endpoint, rtrust_profiles as exchange
+assert endpoint.SUPERVISOR_CONTRACT >= 2 and hasattr(db, "claim_credential"), "Base supervisor predates the overlay contract"
 from app.main import app
 import json
 import os

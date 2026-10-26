@@ -189,7 +189,9 @@ def apply_pending():
                     raise RuntimeError('Certificate issuance unavailable during credential application')
                 endpoint.ensure_letsencrypt=no_issue
                 try:
-                    endpoint.manager.reconcile()
+                    # The fence is this thread's write transaction: standby
+                    # rotation must use it, a second writer would wait on it.
+                    endpoint.manager.reconcile(conn=fence)
                 finally:
                     endpoint.ensure_letsencrypt=issue
                 deadline=attempt_started+15
@@ -293,7 +295,18 @@ def revoke(c, owner, device):
             operation(c, owner, device, 'revoke', binding['generation'] if binding else 0, str(uuid.uuid4()))
 
 
+REQUIRED_SUPERVISOR_CONTRACT = 2
+
+
+def require_supervisor():
+    """Refuse an older base image: its reconcile() does not restart on revocation
+    (fail-open) and its db lacks the standby credentials this overlay issues from."""
+    if getattr(endpoint, 'SUPERVISOR_CONTRACT', 1) < REQUIRED_SUPERVISOR_CONTRACT or not hasattr(db, 'claim_credential'):
+        raise RuntimeError('Portal base image predates the endpoint supervisor contract; rebuild it from server/upstream')
+
+
 def install():
+    require_supervisor()
     db.active_credentials = active_credentials
     db.create_device_config = create_device_config
     endpoint.write_credentials_toml = write_credentials

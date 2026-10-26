@@ -301,25 +301,42 @@ def claim_credential(conn: sqlite3.Connection, tt_username: str, tt_password: st
     return row["username"], row["password"]
 
 
-def standby_credentials() -> list[dict]:
-    with connect() as conn:
-        rows = conn.execute("SELECT username, password FROM endpoint_standby ORDER BY username").fetchall()
+@contextmanager
+def _maybe(conn: sqlite3.Connection | None):
+    """Переданное соединение (транзакция вызывающего) или своё."""
+    if conn is not None:
+        yield conn
+        return
+    with connect() as own:
+        yield own
+
+
+def standby_credentials(conn: sqlite3.Connection | None = None) -> list[dict]:
+    with _maybe(conn) as c:
+        rows = c.execute("SELECT username, password FROM endpoint_standby ORDER BY username").fetchall()
     return [{"username": r["username"], "password": r["password"]} for r in rows]
 
 
-def top_up_standby(target: int) -> None:
-    """Дополнить резерв до target случайными кредами (только перед рестартом endpoint'а)."""
+def rotate_standby(target: int, conn: sqlite3.Connection | None = None) -> None:
+    """Заменить весь невыданный резерв на target новых случайных кредов.
+
+    Вызывается только перед рестартом endpoint'а: старый резерв живёт не дольше
+    одного процесса, target=0 очищает его. conn — уже открытая пишущая транзакция
+    вызывающего (например, fence в apply_pending): второе пишущее соединение из
+    того же потока ждало бы его и упиралось в таймаут блокировки.
+    """
     import secrets
-    with connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        have = conn.execute("SELECT count(*) FROM endpoint_standby").fetchone()[0]
+    with _maybe(conn) as c:
+        if conn is None:
+            c.execute("BEGIN IMMEDIATE")
+        c.execute("DELETE FROM endpoint_standby")
+        have = 0
         while have < target:
             name = "t" + secrets.token_hex(8)
-            if conn.execute("SELECT 1 FROM configs WHERE tt_username = ?", (name,)).fetchone():
+            if c.execute("SELECT 1 FROM configs WHERE tt_username = ?", (name,)).fetchone():
                 continue
-            conn.execute("INSERT OR IGNORE INTO endpoint_standby(username, password) VALUES (?, ?)",
-                         (name, secrets.token_urlsafe(32)))
-            have = conn.execute("SELECT count(*) FROM endpoint_standby").fetchone()[0]
+            have += c.execute("INSERT OR IGNORE INTO endpoint_standby(username, password) VALUES (?, ?)",
+                              (name, secrets.token_urlsafe(32))).rowcount
 
 
 def create_config(user_id: int, tt_username: str, tt_password: str, label: str | None) -> int:

@@ -16,8 +16,21 @@ def check_portal_version(source, target):
             raise RuntimeError(f'Portal {name} differs from server/upstream; rebuild the base image from this checkout')
 
 
+# Supervisor contract the overlay relies on (fail-closed revocation, standby
+# credentials). Checked by marker because endpoint.py is patched in deployed images.
+SUPERVISOR_MARKERS = (('endpoint.py', 'SUPERVISOR_CONTRACT = 2'), ('db.py', 'def claim_credential('))
+
+
+def check_supervisor(target):
+    for name, marker in SUPERVISOR_MARKERS:
+        installed = target / name
+        if not installed.is_file() or marker not in installed.read_text(encoding='utf-8'):
+            raise RuntimeError(f'Portal {name} predates the endpoint supervisor contract; rebuild the base image from this checkout')
+
+
 def apply(source, target):
     check_portal_version(source, target)
+    check_supervisor(target)
     client = target / 'templates/base_client.html'
     admin = target / 'templates/base_admin.html'
     profiles = client.exists() and 'href="/profiles"' in client.read_text(encoding='utf-8')
