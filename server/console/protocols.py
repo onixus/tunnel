@@ -229,8 +229,8 @@ def discover(name):
             return result
         core, tools = tags(src['repo']), tags(src['tools'])
         for version, (tag, commit) in core.items():
-            # The newest tools tag that is not newer than the protocol tag.
-            fit = [v for v in tools if key(v) <= key(version)]
+            # Tools and daemon have independent release dates within the supported protocol line.
+            fit = [v for v in tools if key(v)[:2] == key(version)[:2]]
             if fit:
                 tools_tag, tools_commit = tools[max(fit, key=key)]
                 date = version.rsplit('.', 1)[1]
@@ -443,7 +443,13 @@ def installed(name):
         saved = amnezia.load()
     except PolicyError:
         saved = None
-    return {'installed': code == 0 and saved is not None, 'version': (saved or {}).get('version'),
+    actual = {'version': None, 'tools_version': None}
+    if code == 0 and state == 'running':
+        try:
+            actual = amnezia.versions(execute=run)
+        except (PolicyError, OSError, subprocess.TimeoutExpired):
+            pass
+    return {'installed': code == 0 or saved is not None, **actual,
             'state': state if code == 0 else 'absent', 'port': (saved or {}).get('port')}
 
 
@@ -481,6 +487,9 @@ def status():
         releases = [{'version': r['version'], 'published': r.get('published', '')} for r in known.get('releases', [])]
         latest = releases[0]['version'] if releases else None
         newer = bool(latest and info['installed'] and (not info['version'] or key(latest) > key(info['version'])))
+        if name == 'amnezia' and latest and info['installed'] and latest == info['version']:
+            tools_tag = known['releases'][0].get('tools_tag', '')
+            newer = bool(tools_tag and (not info['tools_version'] or key(tools_tag[1:]) > key(info['tools_version'])))
         items.append(dict(info, id=name, title=src['title'], repo='https://github.com/' + src['repo'],
                           runtime=src['runtime'], releases=releases, latest=latest, update=newer,
                           error=known.get('error', '')))
@@ -566,12 +575,13 @@ def install_amnezia(op, data, release, work, agent):
         with tar.extractfile(member) as source, open(work / 'sing-box', 'wb') as target:
             shutil.copyfileobj(source, target)
     archive.unlink()
-    image = 'vpn-amneziawg:' + release['version']
+    image = 'vpn-amneziawg:' + release['version'] + '-tools-' + release['tools_tag'][1:]
     build(['--pull', '--build-arg', 'AWG_GO_REF=' + release['tag'],
          '--build-arg', 'AWG_GO_COMMIT=' + release['commit'], '--build-arg', 'AWG_TOOLS_REF=' + release['tools_tag'],
          '--build-arg', 'AWG_TOOLS_COMMIT=' + release['tools_commit'], '-t', image, str(work)], 1500)
     before = None if fresh else json.dumps(state, sort_keys=True)
-    state.update(version=release['version'], tag=release['tag'], image=image)
+    state.update(version=release['version'], tag=release['tag'], image=image,
+                 tools_version=release['tools_tag'][1:], commit=release['commit'], tools_commit=release['tools_commit'])
     amnezia.save(state, sync=False)
     port = state['port']
 
@@ -768,10 +778,23 @@ def install(op, data, agent):
         raise PolicyError('Протокол уже установлен. Используйте обновление.')
     if op == 'protocols.update' and not current['installed']:
         raise PolicyError('Протокол не установлен')
-    release = pick(name, data.get('version'))
+    if name == 'amnezia':
+        # Installation must fail on upstream errors rather than silently using an old cache.
+        try:
+            available = discover(name)
+        except Exception:
+            raise PolicyError('Не удалось проверить актуальную серверную версию AmneziaWG. Повторите установку позже.') from None
+        release = next((r for r in available if data.get('version') in (None, r['version'])), None)
+        if release is None:
+            raise PolicyError('Серверная версия AmneziaWG не найдена в репозитории разработчика')
+    else:
+        release = pick(name, data.get('version'))
     if op == 'protocols.update' and current['version']:
         if key(release['version']) == key(current['version']):
-            raise PolicyError('Эта версия уже установлена')
+            tools_newer = (name == 'amnezia' and (not current.get('tools_version') or
+                           key(release['tools_tag'][1:]) > key(current['tools_version'])))
+            if not tools_newer:
+                raise PolicyError('Эта версия уже установлена')
         if key(release['version']) < key(current['version']):
             raise PolicyError('Понижение версии запрещено')
     BUILD.mkdir(mode=0o700, parents=True, exist_ok=True)
