@@ -181,10 +181,8 @@ def test_discovery_keeps_only_stable_verifiable_releases(monkeypatch):
             release('v1.1.0', 'trusttunnel-v1.1.0-linux-x86_64.tar.gz'), release('v1.2.0', 'trusttunnel-v1.2.0-linux-x86_64.tar.gz', draft=True)],
         'amnezia-vpn/amneziawg-go/tags?per_page=50': GO,
         'amnezia-vpn/amneziawg-tools/tags?per_page=50': TOOLS,
-        'SagerNet/sing-box/releases?per_page=30': [
-            release('v1.13.0-rc.1', 'sing-box-1.13.0-rc.1-linux-amd64.tar.gz'), release('v2.0.0', 'sing-box-2.0.0-linux-amd64.tar.gz'),
-            release('v1.11.9', 'sing-box-1.11.9-linux-amd64.tar.gz'), release('v1.12.9', 'sing-box-1.12.9-linux-amd64.tar.gz'),
-            release('v1.12.8', 'sing-box-1.12.8-linux-amd64.tar.gz')],
+        # GitHub resolves /latest to the newest stable, non-draft release.
+        'SagerNet/sing-box/releases/latest': release('v1.12.9', 'sing-box-1.12.9-linux-amd64.tar.gz'),
     }
     monkeypatch.setattr(protocols, 'api', lambda path: replies[path])
     assert [r['version'] for r in protocols.discover('hysteria')] == ['2.12.4']
@@ -194,8 +192,10 @@ def test_discovery_keeps_only_stable_verifiable_releases(monkeypatch):
     assert [(r['version'], r['commit'], r['tools_tag'], r['tools_commit']) for r in awg] == [
         ('3.1.20260828', 'a' * 40, 'v3.1.20260812', 'e' * 40), ('3.1.20260812', 'b' * 40, 'v3.1.20260812', 'e' * 40)]
     assert awg[0]['published'] == '2026-08-28'
-    # Router: the newest stable 1.12+ release with a published digest, never a new major line.
+    # Router: the latest stable 1.12+ release with a published digest, never a new major line.
     assert {(r['box_version'], r['box_tag'], r['box_sha256']) for r in awg} == {('1.12.9', 'v1.12.9', '1' * 64)}
+    replies['SagerNet/sing-box/releases/latest'] = release('v2.0.0', 'sing-box-2.0.0-linux-amd64.tar.gz')
+    assert not any('box_tag' in r for r in protocols.discover('amnezia'))
 
 
 SETUP = 'R-TrustTunnel-Windows-x64-Setup.exe'

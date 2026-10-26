@@ -174,10 +174,12 @@ def client_build(tag):
     return {'sequence': int(sequence[1]), 'ipc': int(ipc[1]), 'root': root.hex()}
 
 
-def releases(src):
+def releases(src, latest=False):
     """Stable releases whose asset carries a digest GitHub published, newest first."""
     found = []
-    for release in api(src['repo'] + '/releases?per_page=30'):
+    # A page of releases with many assets can exceed the response limit; then ask only for the latest stable one.
+    listing = [api(src['repo'] + '/releases/latest')] if latest else api(src['repo'] + '/releases?per_page=30')
+    for release in listing:
         match = re.fullmatch(src['tag'], str(release.get('tag_name', '')))
         if not match or release.get('draft') or release.get('prerelease'):
             continue
@@ -234,7 +236,7 @@ def discover(name):
                 date = version.rsplit('.', 1)[1]
                 found.append({'version': version, 'tag': tag, 'commit': commit, 'tools_tag': tools_tag,
                               'tools_commit': tools_commit, 'published': f'{date[:4]}-{date[4:6]}-{date[6:]}'})
-        box = releases(src['box'])
+        box = releases(src['box'], latest=True)
         for release in found:
             if box:
                 release.update(box_version=box[0]['version'], box_tag=box[0]['tag'], box_sha256=box[0]['sha256'])
