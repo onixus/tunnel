@@ -1,6 +1,8 @@
 # Журнал закрытия сессий TrustTunnel endpoint
 
-Официальный endpoint 1.1.0 на уровне INFO пишет только `Listening to TCP/UDP …`, поэтому обрыв клиентского туннеля не оставляет следа на сервере. [Патч](../patches/trusttunnel-endpoint-session-close-log.patch) к исходникам [TrustTunnel v1.1.0](https://github.com/TrustTunnel/TrustTunnel/tree/v1.1.0) добавляет запись о закрытии каждой клиентской сессии. Сейчас на сервере работает официальный бинарь без патча; чтобы получить журнал, нужно собрать endpoint самостоятельно (ниже) и заменить им `trusttunnel_endpoint` при сборке образа.
+Официальный endpoint 1.1.0 на уровне INFO пишет только `Listening to TCP/UDP …`, поэтому обрыв клиентского туннеля не оставляет следа на сервере. [Патч](../patches/trusttunnel-endpoint-session-close-log.patch) к исходникам [TrustTunnel v1.1.0](https://github.com/TrustTunnel/TrustTunnel/tree/v1.1.0) добавляет запись о закрытии каждой клиентской сессии. Чтобы получить этот журнал, соберите endpoint с патчем (ниже) и замените
+им `trusttunnel_endpoint` при сборке образа. Наличие патча в репозитории
+само по себе не меняет установленный бинарник.
 
 ## Что пишется
 

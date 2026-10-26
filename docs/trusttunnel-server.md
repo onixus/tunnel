@@ -1,6 +1,6 @@
 # TrustTunnel и trusttunnel-web
 
-Инструкция восстановления текущего варианта на Ubuntu x86_64 с Docker Engine и Compose. Панель сторонняя; официальный endpoint — TrustTunnel 1.1.0. TCP/UDP 8443 не конфликтуют с Hysteria UDP 443.
+Пример ручной установки на Ubuntu x86_64 с Docker Engine и Compose. Панель сторонняя; официальный endpoint — TrustTunnel 1.1.0. TCP/UDP 8443 не конфликтуют с Hysteria UDP 443.
 
 ## Подготовить исходники и образ
 
@@ -12,7 +12,7 @@ cd /opt/trusttunnel-web
 git checkout fd8c6efae205e3d3a77b5ae3a632b46a702cc661
 ```
 
-Примените `patches/trusttunnel-web-local.patch` из **этого** репозитория: сначала `git apply --check /абсолютный/путь/к/patch`, затем `git apply /абсолютный/путь/к/patch`. Patch соответствует установленным локальным изменениям:
+Примените `patches/trusttunnel-web-local.patch` из **этого** репозитория: сначала `git apply --check /абсолютный/путь/к/patch`, затем `git apply /абсолютный/путь/к/patch`. Patch добавляет следующие изменения:
 
 - официальный endpoint копируется в образ после проверки SHA256;
 - контейнер работает как UID/GID 10001;
@@ -37,22 +37,23 @@ cd /opt/trusttunnel-web
 install -d -o 10001 -g 10001 -m 750 data data/runtime certs/live/trusttunnel.internal
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
   -nodes -days 365 -subj /CN=trusttunnel.internal \
-  -addext subjectAltName=DNS:trusttunnel.internal,IP:139.100.233.173 \
+  -addext subjectAltName=DNS:trusttunnel.internal,IP:192.0.2.10 \
   -keyout certs/live/trusttunnel.internal/privkey.pem \
   -out certs/live/trusttunnel.internal/fullchain.pem
 chown 10001:10001 certs/live/trusttunnel.internal/*.pem
 chmod 640 certs/live/trusttunnel.internal/*.pem
 ```
 
-На восстановленном сервере используйте прежний сертификат/ключ из защищённой копии, чтобы клиенты сохранили доверие. Текущий сертификат действителен до **28.09.2027 00:00:48 UTC**. Продление автоматикой не настроено.
+На восстановленном сервере используйте прежний сертификат/ключ из защищённой копии, чтобы клиенты сохранили доверие. Срок проверяйте через `openssl x509 -noout -dates`. Для самоподписанного
+сертификата заранее организуйте замену и обновление доверия клиентов.
 
 Скопируйте [Compose](../examples/trusttunnel-compose.yaml) в `/opt/trusttunnel-web/compose.yaml`. Сгенерируйте `.env` локально (не коммитьте):
 
 ```dotenv
-ADMIN_EMAIL=admin@onixus.ru
+ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=REPLACE_LOCALLY_RANDOM_ADMIN_PASSWORD
 SECRET_KEY=REPLACE_LOCALLY_RANDOM_SESSION_SECRET
-PUBLIC_ADDRESS=139.100.233.173
+PUBLIC_ADDRESS=192.0.2.10
 CLIENT_CA_FILE=/certs/live/trusttunnel.internal/fullchain.pem
 ACCESS_TOKEN_TTL_MIN=480
 ```
@@ -73,12 +74,12 @@ db.init_db()
 db.set_settings({
     'panel_domain': 'trusttunnel.internal',
     'conn_domain': 'trusttunnel.internal',
-    'conn_address': '139.100.233.173',
+    'conn_address': '192.0.2.10',
     'conn_port': '8443',
     'conn_protocol': 'HTTP2',
     'cert_mode': 'external',
     'registration_enabled': '0',
-    'brand_name': 'Onixus TrustTunnel',
+    'brand_name': 'VPN',
     'portal_url': 'http://10.254.77.1:18082',
 })
 PY
@@ -91,9 +92,9 @@ docker compose -f compose.yaml up -d
 
 Разрешите публичные TCP+UDP 8443. Docker publish публикует их независимо от части правил UFW; проверьте фактическую экспозицию. Панель публикуется **только** `127.0.0.1:18082:8000`.
 
-SSH: `-L 127.0.0.1:18082:127.0.0.1:18082`. Через Hysteria доступ обеспечивает ACL `local(10.254.77.1, tcp/18082, 127.0.0.1)` плюс явный маршрут на клиенте. Этот адрес не является публичной панелью; на `.120` маршрут уже настроен.
+SSH: `-L 127.0.0.1:18082:127.0.0.1:18082`. Через Hysteria доступ обеспечивает ACL `local(10.254.77.1, tcp/18082, 127.0.0.1)` плюс явный маршрут на клиенте. Этот адрес не является публичной панелью; маршрут клиента нужно настроить явно.
 
-Через сам TrustTunnel private IP запрещены. Управляйте через SSH или Hysteria. Публичный домен для панели не настроен; SMTP и сторонние приложения портала не настроены.
+Через сам TrustTunnel private IP запрещены. Управляйте через SSH или Hysteria. Публичный HTTPS-домен, SMTP и сторонние интеграции настраиваются отдельно.
 
 ## Проверки
 
@@ -105,6 +106,7 @@ docker exec trusttunnel-web /opt/trusttunnel/trusttunnel_endpoint --version
 curl --max-time 5 http://127.0.0.1:18082/healthz
 ```
 
-В логах endpoint должны быть TCP и UDP `0.0.0.0:8443`. Затем выполните HTTP/2 и QUIC тесты официальным клиентом по [инструкции](clients.md); ожидаемый IP — `139.100.233.173`. Healthcheck панели сам по себе не подтверждает VPN.
+В логах endpoint должны быть TCP и UDP `0.0.0.0:8443`. Затем выполните HTTP/2 и QUIC тесты официальным клиентом по [инструкции](clients.md); ожидаемый IP — адрес выбранного выхода. Healthcheck панели сам по себе не подтверждает VPN.
 
-В данной установке ICMP и работа приложений на всех ОС не проверялись. HTTP/2, QUIC, TLS trust и HTTPS проверены с Linux.
+Отдельно проверьте необходимые приложения и ОС, TCP/UDP и длительные передачи:
+успешный healthcheck или единичный HTTPS-запрос не подтверждает их работу.

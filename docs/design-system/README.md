@@ -14,23 +14,23 @@ QR images retain white paper in both themes.
 
 ## Review screenshots
 
-All users, passwords and configurations are synthetic. Before is commit
-`cf61422bfb139860d4733710e4f67bbc3b2ff89e`. The old network console had **no light
-theme**, so its two before captures show the same dark UI. Before portal font
+Portal review captures use synthetic users, passwords and profiles. Before is commit
+`cf61422bfb139860d4733710e4f67bbc3b2ff89e`. Before portal font
 CDN requests were blocked for isolated, reproducible capture; the new UI loads
 its fonts locally. Full screen captures, including every tested section, are
 uploaded by the APEX Design System workflow.
 
 | Screen | Before dark | Before light | After dark | After light |
 | --- | --- | --- | --- | --- |
-| Network | [image](screenshots/before-console-overview-dark.png) | [unavailable](screenshots/before-console-overview-light.png) | [image](screenshots/console-overview-dark.png) | [image](screenshots/console-overview-light.png) |
 | Portal admin | [image](screenshots/before-portal-admin_dashboard-dark.png) | [image](screenshots/before-portal-admin_dashboard-light.png) | [image](screenshots/portal-admin_dashboard-dark.png) | [image](screenshots/portal-admin_dashboard-light.png) |
 | Portal client | [image](screenshots/before-portal-dashboard-dark.png) | [image](screenshots/before-portal-dashboard-light.png) | [image](screenshots/portal-dashboard-dark.png) | [image](screenshots/portal-dashboard-light.png) |
 
-Mobile: [network dark](screenshots/console-mobile-dark.png),
-[network light](screenshots/console-mobile-light.png),
-[portal dark](screenshots/portal-mobile-dark.png),
-[portal light](screenshots/portal-mobile-light.png).
+Mobile portal: [dark](screenshots/portal-mobile-dark.png),
+[light](screenshots/portal-mobile-light.png).
+
+Generate network review screenshots with neutral infrastructure fixtures before
+publishing them. Hostnames, node labels and topology must be synthetic as well
+as user accounts. CI capture artifacts are not deployment documentation.
 
 ## Validation boundary
 

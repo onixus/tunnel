@@ -1,7 +1,6 @@
 # Telegram and HTTPS authentication protection
 
-Deployed on onixus-rf on 2026-10-01. `/panel` and the compatible `/panels`
-command now open the unified console. `/bans` shows both `sshd` and `vpn-web`.
+`/panel` and the compatible `/panels` command open the configured unified console. `/bans` shows both `sshd` and `vpn-web`.
 Owner ID, private-chat checks and one-time mutation confirmations remain required.
 No credentials are included in the button URL.
 
@@ -52,17 +51,9 @@ and bot, remove the new proxy container, rename/start the retained previous
 container, and restore/remove the jail/filter/logrotate files according to the
 backup. Restart the bot. Do not flush the host firewall.
 
-## Evidence and limits
+## Verification and limits
 
-Four isolated bot tests pass (links, allowlist/staleness, both jails, expired
-confirmation). Live Telegram command registration and service health were
-verified without sending messages. Both HTTPS login pages return 200.
-
-An isolated nginx fixture confirmed that only the failed login POST is logged; GET, success, 403, unrelated requests and forged forwarded IPs do not produce a matching failure.
-
-Fail2ban regex fixtures matched IPv4/IPv6 failures and rejected unrelated or
-injected suffix text. Ten synthetic log entries triggered bans for two reserved
-documentation addresses; the resulting nftables rules explicitly matched TCP
-443. Both test bans were removed. This validates log parsing and action creation;
-no real user's address or infrastructure node was deliberately banned, and an
-end-to-end blocked live connection is not claimed.
+Use isolated nginx and Fail2ban fixtures to check failed-login matching,
+IPv4/IPv6 actions and rejection of forged forwarded addresses. Then verify your
+configured HTTPS origin, source-IP handling, jail counters and unban procedure.
+Synthetic log matches do not prove a connection is blocked in your network.

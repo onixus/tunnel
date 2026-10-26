@@ -1,8 +1,10 @@
 # Hysteria 2 и H UI
 
-Текущая Hysteria использует [Let’s Encrypt и домен onixus-rf.duckdns.org](hysteria-letsencrypt.md); прежние инструкции с самоподписанным CA относятся к старой конфигурации.
+Для публичного сертификата см. [Let’s Encrypt](hysteria-letsencrypt.md);
+ниже также приведён пример с самоподписанным сертификатом.
 
-В действующей установке ядро запускает **H UI**, а не прежняя `hysteria-server.service`. Не запускайте обе службы на UDP 443.
+При использовании **H UI** панель сама запускает ядро; отдельная
+`hysteria-server.service` для него не нужна. Не запускайте обе службы на UDP 443.
 
 ## Установка с нуля
 
@@ -22,8 +24,8 @@
 
 ```sh
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-  -nodes -days 365 -subj /CN=139.100.233.173 \
-  -addext subjectAltName=IP:139.100.233.173 \
+  -nodes -days 365 -subj /CN=192.0.2.10 \
+  -addext subjectAltName=IP:192.0.2.10 \
   -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt
 chown root:hysteria /etc/hysteria/server.key /etc/hysteria/server.crt
 chmod 640 /etc/hysteria/server.key /etc/hysteria/server.crt
@@ -58,6 +60,7 @@ Unit оставляет только `CAP_NET_BIND_SERVICE`; порт-хоппи
 
 ## Существующие пользователи
 
-Учетная запись `existing-clients` сохраняет прежний общий VPN-пароль. Для новых устройств предпочтительны отдельные пользователи, чтобы отзыв одного не затронул остальных. Пароль входа в UI, connection password пользователя, salamander и SOCKS-пароль — разные секреты.
+Выдавайте отдельные учётные записи, чтобы отзыв одного устройства
+не затрагивал остальных. Пароль входа в UI, connection password пользователя, salamander и SOCKS-пароль — разные секреты.
 
 Самоподписанный сертификат требует передачи доверенного публичного `server.crt` клиенту или корректного fingerprint. Экспорт H UI сам по себе может не содержать это доверие. Не исправляйте TLS-ошибки постоянным `insecure=true`.

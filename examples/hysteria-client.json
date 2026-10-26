@@ -1,8 +1,8 @@
 {
-  "server": "139.100.233.173:443",
+  "server": "192.0.2.10:443",
   "auth": "REPLACE_LOCALLY_HYSTERIA_PASSWORD",
   "tls": {
-    "sni": "139.100.233.173",
+    "sni": "192.0.2.10",
     "insecure": false,
     "ca": "/etc/hysteria/server.crt"
   },

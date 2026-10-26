@@ -22,7 +22,7 @@ acl:
   - local(geoip:az)
   - local(geoip:md)
   - local(geoip:tm)
-  - onixus(all)
+  - primary(all)
 auth:
   http:
     insecure: false
@@ -34,7 +34,7 @@ obfs:
     password: REPLACE_LOCALLY_OBFS_PASSWORD
   type: salamander
 outbounds:
-- name: onixus
+- name: primary
   socks5:
     addr: 10.254.77.2:1080
     password: REPLACE_LOCALLY_SOCKS_PASSWORD

@@ -1,13 +1,13 @@
 {
   "primary": {
-    "expected_ip": "151.241.234.124",
+    "expected_ip": "198.51.100.10",
     "outbound": {
-      "name": "onixus", "type": "socks5",
+      "name": "primary", "type": "socks5",
       "socks5": {"addr": "10.254.77.2:1080", "username": "hysteria", "password": "REPLACE_LOCALLY_PRIMARY_SOCKS_PASSWORD"}
     }
   },
   "reserve": {
-    "expected_ip": "185.199.158.8",
+    "expected_ip": "203.0.113.10",
     "outbound": {
       "name": "reserve", "type": "socks5",
       "socks5": {"addr": "10.254.78.2:1080", "username": "hysteria", "password": "REPLACE_LOCALLY_RESERVE_SOCKS_PASSWORD"}

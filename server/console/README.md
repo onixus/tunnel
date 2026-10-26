@@ -1,6 +1,7 @@
 # Unified VPN Console
 
-Live entry: `https://onixus-rf.duckdns.org/console/`. Uses the existing TrustTunnel
+Example HTTPS entry: `https://vpn.example.com/console/`. Fresh installations use
+SSH access to loopback HTTPS; a public domain requires separate configuration. Uses the existing TrustTunnel
 administrator login. The HTTPS `/admin/dashboard` entry redirects to this console;
 legacy settings and client/profile APIs remain available.
 
@@ -230,8 +231,8 @@ runtime/database and no external network. It refuses to run the inner acceptance
 script without its explicit isolation flag. Neither test suite sends real messages.
 
 Tests use isolated SQLite and synthetic identities. The original profile exchange
-codec tests use the real built `rtrust-codec`. See [deployment acceptance](../../docs/unified-console.md) for the
-live acceptance record and unexercised operations.
+codec tests use the real built `rtrust-codec`. See [console operations](../../docs/unified-console.md)
+for deployment, rollback and verification guidance.
 
 ## Local advertising and tracking filters
 

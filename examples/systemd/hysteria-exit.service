@@ -1,6 +1,6 @@
 # /etc/systemd/system/hysteria-exit.service
 [Unit]
-Description=Private Hysteria exit via onixus.ru
+Description=Private Hysteria exit via exit.example.com
 Requires=wg-quick@wg-private.service
 After=network-online.target wg-quick@wg-private.service
 [Service]

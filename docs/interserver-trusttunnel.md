@@ -1,63 +1,54 @@
 # Primary interserver transport: TrustTunnel
 
-Deployed 2026-10-02. Hysteria ingress connects to `onixus.duckdns.org:8443` over TrustTunnel HTTP/2 (TCP). Its local SOCKS listener is `127.0.0.1:10810`; the primary Hysteria outbound named `onixus` uses this listener. Public egress was verified as `212.237.219.42`. Existing RU/RF/CIS bypass rules and the forced `hostkey.ru` exception remain in place.
-
-The old primary WireGuard interface `wg-private` is disabled and stopped on both hosts; the old primary SOCKS service `hysteria-exit` is also disabled. Configurations and keys are preserved. The reserve WireGuard transport and reserve exit remain active. TrustTunnel supplies the proxy transport for client traffic; it does not recreate WireGuard's private layer-3 addresses.
+TrustTunnel HTTP/2 can provide the proxy transport between the ingress and
+primary exit. Example endpoint: `exit.example.com:8443`, local authenticated
+SOCKS listener: `127.0.0.1:10810`. This transports VPN client traffic rather than
+recreating WireGuard layer-3 addresses. Prepare an independent reserve before
+changing a working primary path.
 
 ## Services and credentials
 
-Ingress: `tt-primary.service`, `/etc/tt-primary/client.toml` (root:tt-primary, 0640), official CLI 1.1.7. Main exit: `tt-exit.service`, static endpoint binary, `/etc/tt-exit/{vpn,hosts,credentials,rules}.toml`, dedicated `tt-exit` service user. The independently generated interserver password is stored only in those restricted configs. The loopback SOCKS listener requires its own username and password since 2026-10-02 (see below). The exit accepts authenticated TCP connections on 8443; UDP 8443 is not opened because the transport uses HTTP/2. UDP client traffic is still carried inside TrustTunnel and was tested with a SOCKS UDP DNS exchange.
+The ingress uses `tt-primary.service` and `/etc/tt-primary/client.toml`.
+The exit uses `tt-exit.service` with restricted configuration files under
+`/etc/tt-exit/`. Generate separate interserver credentials, use a service account,
+and configure the endpoint certificate for your own TLS hostname. Keep TLS
+verification enabled. Configure certificate renewal and reload for your actual
+certificate provider; copying a mail server's private key is not a prerequisite.
 
-TCP connects through the DuckDNS hostname. TLS verifies `mail.onixus.ru` using the system CA store and the existing Let's Encrypt certificate; verification is never skipped. `tt-exit-cert-sync.timer` runs every five minutes, copies the renewed Maddy certificate/key with restricted permissions, and reloads the endpoint when changed. Caddy and `maddy-cert-sync` remain responsible for obtaining and syncing this certificate. Availability of public DNS for the certificate name remains necessary for renewal.
+For HTTP/2, open TCP 8443 only to the intended source. UDP client traffic may
+be carried inside this connection; validate it separately through SOCKS.
 
-## Switch scripts
+## Transport controller
 
-On the ingress server as root:
+[primary-transport.py](../scripts/primary-transport.py) coordinates the two
+primary definitions, stored in root-only `/etc/hysteria/primary-wireguard.json`
+and `primary-trusttunnel.json`. `/etc/hysteria/primary-transport` records the last
+completed switch. Configure service names, remote SSH control and exit profiles
+before installing the controller as `/usr/local/sbin/primary-transport`.
 
-```sh
-/root/enable-wireguard.sh
-/root/enable-trusttunnel.sh
-```
+Use a dedicated SSH key restricted to
+[wg-primary-control](../scripts/wg-primary-control), with only `enable`/`disable`,
+no forwarding or arbitrary shell. Pin the remote host key independently.
+Check script arguments and configured paths before invoking a switch.
 
-The first enables the primary WG and old SOCKS service on the exit, enables WG locally, refreshes peer DNS, then selects that primary route. The second selects the verified TrustTunnel primary route before disabling primary WG on both hosts. Both scripts intentionally select the primary exit. On failure the controller attempts to move Hysteria traffic to the independent reserve.
+The WireGuard DNS refresher can disable individual peers. Update monitoring
+service lists when choosing a different primary transport. Preserve the old
+configs and keys for recovery; stopping a service does not remove its data.
 
-The implementation is `/usr/local/sbin/primary-transport`. Root-only `/etc/hysteria/primary-wireguard.json` and `primary-trusttunnel.json` preserve the two primary outbound definitions. `/etc/hysteria/primary-transport` records the last completed switch. The exit also has `/root/enable-wireguard.sh`, which enables only its local side.
+## Container access to the local SOCKS listener
 
-Ingress `/root/.ssh/primary-wg-control` is a dedicated key. Its authorization on the exit is restricted to `/usr/local/sbin/wg-primary-control` with `enable` or `disable`; forwarding and arbitrary shell execution are disallowed. The host key is pinned in `/etc/hysteria/primary-control-known-hosts`; the SSH destination remains a DNS hostname.
-
-WG DNS refresh supports an `enabled` flag per peer, preventing disabled primary WG from causing updater failures. Monitoring uses explicit `services` lists in the existing root-only SMTP settings and monitors the TrustTunnel services instead of stopped WG. Backups use `.before-trust-transport` beside the affected files; the old route switcher is `/root/hysteria-exit-switch.before-transport`.
+Keep the native client listener on loopback and require authentication.
+The [bridge socket](../examples/systemd/tt-primary-bridge.socket) and
+[service](../examples/systemd/tt-primary-bridge.service) can forward from an
+explicit Docker gateway address to loopback. Adapt the gateway, subnet and
+interface to your Docker network, then allow only that source in the firewall.
+Pass the same SOCKS credentials to the exit profile and relay configuration.
+Do not expose this listener publicly.
 
 ## Verification and limits
 
-Verified: full Hysteria-to-primary internet path, direct TrustTunnel SOCKS TCP egress, SOCKS UDP DNS exchange, both exit probes, active service state, disabled/inactive primary WG on both hosts, successful DNS updater runs and monitor collection without extra emails. Script syntax was checked.
-
-The requested switch to TrustTunnel completed successfully. A separate live test enabling WG and switching back was blocked by automatic approval review because it could interrupt VPN traffic. Therefore the WG restoration script has not been validated with a complete live round trip. Do not interpret syntax validation as proof of rollback connectivity.
-
-## Исправления 2 октября 2026
-
-После PR #13 листенер `tt-primary` вручную перевели на `0.0.0.0:10810`, чтобы до
-него дотягивался контейнер TrustTunnel. Клиент 1.1.7 без логина не слушает
-не-loopback адрес: служба уходила в цикл перезапусков (1485 за сутки), primary
-был недоступен, и консоль откатила TrustTunnel на `direct`.
-
-Текущая схема:
-
-- `tt-primary` слушает **только** `127.0.0.1:10810` и требует логин `tt-local`
-  со случайным паролем. Те же учётные данные лежат в `/etc/hysteria/exits.json`,
-  `primary-trusttunnel.json` и outbound `onixus` в конфигурации H UI.
-- Контейнер обращается к `172.18.0.1:10810` через
-  [tt-primary-bridge.socket](../examples/systemd/tt-primary-bridge.socket) и
-  [service](../examples/systemd/tt-primary-bridge.service): `systemd-socket-proxyd`
-  пересылает на loopback. `FreeBind=yes` позволяет стартовать до создания моста.
-  UFW пропускает 10810 только с `172.18.0.0/16` на интерфейсе моста.
-- `relay_config` передаёт учётные данные и для этого выхода; без них генерация
-  отказывает.
-
-**Не вешайте клиент на мост или `0.0.0.0`.** На не-loopback сокетах он отдаёт в
-4–5 раз меньше: прямое подключение из контейнера давало 5–7 МБ/с, через
-loopback-пересылку — 60–70 МБ/с (потолок канала onixus около 73 МБ/с). Сам мост
-даёт 1.2 ГБ/с; UFW, ретрансмиты и версии curl исключены замерами.
-
-Также `h-ui.service` больше не тянет `wg-quick@wg-private` через `Wants=`:
-отключённый primary WG снова поднимался при каждом перезапуске H UI.
-`primary-transport wireguard` по-прежнему включает его явно.
+Check service health, authenticated TCP and UDP through SOCKS, both exit probes
+and a full Hysteria client request. Test restoration to WireGuard in a maintenance
+window with independent SSH access. Syntax validation alone does not prove
+rollback connectivity. Ensure H UI startup dependencies do not unintentionally
+start a transport you have disabled.

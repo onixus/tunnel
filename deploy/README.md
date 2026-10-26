@@ -8,7 +8,7 @@
 Ниже — установка sidecar на существующем сервере.
 
 
-The console is an additive sidecar for the **existing onixus-rf installation**,
+The console is an additive sidecar for an **existing TrustTunnel portal**,
 not a general-purpose installer for a fresh VPN server. It uses the live portal
 image, database, explicit session secret, Docker network and nginx configuration.
 The exact host paths and dependencies are documented in

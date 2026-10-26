@@ -1,7 +1,7 @@
 # Unified VPN administration
 
 `console/` is the additive management UI for the existing Hysteria/H UI,
-TrustTunnel portal and R-TrustTunnel clients on onixus-rf. It reuses portal admin
+TrustTunnel portal and R-TrustTunnel clients. It reuses portal admin
 identity, existing VPN accounts and the private Telegram bot.
 
 - [APEX design system and visual review](../docs/design-system/README.md)
