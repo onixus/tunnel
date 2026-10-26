@@ -118,13 +118,52 @@ def install(application):
 
 
 def install_legacy_handlers(application):
-    """The additive overlay also owns offloading the installed settings writer."""
-    from . import routes_admin
+    """The additive overlay also owns offloading the installed settings writer
+    and the dashboard enrollment QR, whose installed /e#code link current clients reject."""
+    from . import routes_admin, routes_client
+    handlers = {('/admin/settings', 'POST'): legacy_settings_save, ('/devices/enroll-qr', 'POST'): legacy_enroll_qr}
     # Older FastAPI copies included routes; newer releases retain the router.
-    for route in [*application.routes, *routes_admin.router.routes]:
-        if getattr(route, 'path', None) == '/admin/settings' and 'POST' in (getattr(route, 'methods', None) or set()):
-            route.endpoint = legacy_settings_save
-            route.dependant.call = legacy_settings_save
+    for route in [*application.routes, *routes_admin.router.routes, *routes_client.router.routes]:
+        for (path, method), handler in handlers.items():
+            if getattr(route, 'path', None) == path and method in (getattr(route, 'methods', None) or set()):
+                route.endpoint = handler
+                route.dependant.call = handler
+
+
+def https_origin(value):
+    """Return value when it is a bare HTTPS origin, as enrollment invitations require."""
+    if not isinstance(value, str) or len(value) > 512 or not value.isascii() or any(ch.isspace() for ch in value):
+        return None
+    try:
+        parsed = urlsplit(value); port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or port == 0:
+        return None
+    return value
+
+
+def legacy_enroll_qr(request:Request):
+    """Same one-time v2 invitation as /profiles and the console, rendered for the installed dashboard."""
+    from . import qr, routes_client
+    from urllib.parse import quote
+    user = webauth.current_user(request)
+    if not user: return RedirectResponse('/login', 302)
+    # The lax session cookie keeps this POST same-site; the browser Origin is the
+    # address the user actually reached, while portal_url may name an internal port.
+    origin = https_origin(request.headers.get('origin')) or https_origin((db.get_setting('portal_url') or '').rstrip('/'))
+    if origin is None:
+        return RedirectResponse('/?error=' + quote('Укажите HTTPS-адрес портала без пути в настройках сервера'), 302)
+    db.purge_expired_enroll_codes()
+    raw = security.new_token(24)
+    expires = int(time.time()) + routes_client.ENROLL_TTL_SECONDS
+    db.create_enroll_code(user['id'], security.hash_api_token(raw), routes_client.ENROLL_TTL_SECONDS)
+    invitation = json.dumps({'kind':'rtrust_enrollment','version':1,'origin':origin,'code':raw,'expires_at':expires}, separators=(',',':'))
+    return templates.TemplateResponse(
+        request, 'device_qr.html',
+        {'brand': routes_client._brand(), 'user': user, 'qr_svg': qr.svg(invitation),
+         'origin': origin, 'code': raw, 'ttl': routes_client.ENROLL_TTL_SECONDS},
+        headers=HEADERS)
 
 
 async def legacy_settings_save(request:Request):
@@ -314,12 +353,9 @@ def _enrollment_code(request,data,context):
     rate(identity)
     origin=data.get('origin')
     if origin is not None:
-        if not isinstance(origin,str) or len(origin)>512 or not origin.isascii() or origin!=request.headers.get('origin'):
+        if not isinstance(origin,str) or origin!=request.headers.get('origin'):
             raise HTTPException(422,'Same browser origin required for QR')
-        try:
-            parsed=urlsplit(origin); port=parsed.port
-        except ValueError:raise HTTPException(422,'Invalid HTTPS origin')
-        if parsed.scheme!='https' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or port==0 or any(ch.isspace() for ch in origin):
+        if https_origin(origin) is None:
             raise HTTPException(422,'HTTPS origin required for QR')
     expires=int(time.time())+180
     raw=secrets.token_urlsafe(24)

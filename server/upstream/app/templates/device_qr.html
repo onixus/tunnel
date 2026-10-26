@@ -25,22 +25,18 @@
   </p>
 
   <!-- Кабинет открыт на самом телефоне — камеры не хватит, там нечего снимать.
-       Копируем ссылку: в ней и адрес сервера, и одноразовый код, а в приложении
-       есть кнопка «Вставить». Так телефон подключается без компьютера. -->
-  <div id="copybox" style="margin-top:20px;padding-top:16px;border-top:1px solid var(--surface-2);">
+       В приложении есть ручной ввод: адрес панели и одноразовый код. -->
+  <div id="copybox" style="margin-top:20px;padding-top:16px;border-top:1px solid var(--surface-2);text-align:left;max-width:420px;margin-left:auto;margin-right:auto;">
     <p class="mut" style="margin:0 0 10px;font-size:13px;">
-      Открыли эту страницу на телефоне? Компьютер не нужен — нажмите кнопку ниже.
+      Открыли эту страницу на телефоне? Введите в приложении адрес портала и код.
     </p>
-    <p style="margin:0 0 10px;">
-      <a href="{{ app_link }}" class="btn primary">Подключить это устройство</a>
+    <label class="mut" style="display:block;font-size:12px;">Адрес портала
+      <input readonly value="{{ origin }}" style="width:100%;"></label>
+    <label class="mut" style="display:block;font-size:12px;margin-top:8px;">Одноразовый код
+      <input readonly value="{{ code }}" style="width:100%;font-family:var(--font-mono, monospace);"></label>
+    <p style="margin:10px 0 0;text-align:center;">
+      <button type="button" class="btn ghost" id="copybtn" onclick="copyEnrollCode()">Скопировать код</button>
     </p>
-    <p class="mut" style="margin:0 0 8px;font-size:12px;">
-      Если кнопка не сработала (приложение ещё не установлено) — скопируйте ссылку
-      и нажмите в приложении «Вставить ссылку из кабинета».
-    </p>
-    <button type="button" class="btn ghost" id="copybtn" onclick="copyEnrollLink()">
-      Скопировать ссылку
-    </button>
   </div>
 
   <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:18px;">
@@ -50,33 +46,28 @@
     <a href="/" class="btn ghost">Готово</a>
   </div>
 
-  <p class="mut" style="margin:16px 0 0;font-size:12px;">
-    Камера не нужна, если кабинет открыт на самом телефоне — скопируйте ссылку кнопкой выше.
-  </p>
 </div>
 
 <script>
-  // Ссылку держим в JS, а не в разметке: код одноразовый и короткоживущий, но
-  // светить его текстом на странице ни к чему.
-  var ENROLL_LINK = {{ link|tojson }};
+  var ENROLL_CODE = {{ code|tojson }};
 
-  function copyEnrollLink() {
+  function copyEnrollCode() {
     var btn = document.getElementById('copybtn');
     function done(ok) {
-      btn.textContent = ok ? 'Ссылка скопирована' : 'Не удалось скопировать';
-      setTimeout(function () { btn.textContent = 'Скопировать ссылку'; }, 2500);
+      btn.textContent = ok ? 'Код скопирован' : 'Не удалось скопировать';
+      setTimeout(function () { btn.textContent = 'Скопировать код'; }, 2500);
     }
     // navigator.clipboard есть не везде (нужен https и свежий браузер) — на этот
     // случай запасной путь через временное поле.
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(ENROLL_LINK).then(function () { done(true); },
+      navigator.clipboard.writeText(ENROLL_CODE).then(function () { done(true); },
                                                       function () { fallback(); });
     } else {
       fallback();
     }
     function fallback() {
       var ta = document.createElement('textarea');
-      ta.value = ENROLL_LINK;
+      ta.value = ENROLL_CODE;
       ta.style.position = 'fixed';
       ta.style.opacity = '0';
       document.body.appendChild(ta);

@@ -90,6 +90,38 @@ class ExchangeTests(unittest.TestCase):
         self.client.cookies.clear()
         self.assertEqual(self.client.get('/profiles',follow_redirects=False).status_code,302)
 
+    def test_dashboard_qr_is_v2_invitation_not_legacy_link(self):
+        import json, re
+        from urllib.parse import parse_qs, urlsplit
+        from app import routes_client
+        # Installed order: overlay first, then the upstream client router.
+        api=FastAPI(); exchange.install(api); api.include_router(routes_client.router)
+        exchange.templates=Jinja2Templates(directory=[str(ROOT/'server/overlay/app/templates'),str(PORTAL/'app/templates')])
+        client=TestClient(api); client.cookies.update(self.client.cookies)
+        db.set_settings({'portal_url':'https://portal.example/'})
+        page=client.post('/devices/enroll-qr',headers={'origin':'https://panel.example'})
+        self.assertEqual(page.status_code,200,page.text)
+        self.assertEqual(page.headers['cache-control'],'no-store')
+        self.assertNotIn('/e#',page.text); self.assertNotIn('ttsuperlink://',page.text)
+        code=re.search(r'var ENROLL_CODE = "([^"]+)"',page.text).group(1)
+        self.assertIn('value="https://panel.example"',page.text)
+        # Without a browser Origin the configured portal address is used.
+        fallback=client.post('/devices/enroll-qr')
+        self.assertIn('value="https://portal.example"',fallback.text)
+        db.set_settings({'portal_url':'http://portal.example:8080'})
+        refused=client.post('/devices/enroll-qr',headers={'origin':'http://panel.example'},follow_redirects=False)
+        self.assertEqual(refused.status_code,302); self.assertIn('error',parse_qs(urlsplit(refused.headers['location']).query))
+        from unittest.mock import patch
+        from app import qr
+        with patch.object(qr,'svg',wraps=qr.svg) as drawn:
+            client.post('/devices/enroll-qr',headers={'origin':'https://panel.example'})
+        invite=json.loads(drawn.call_args.args[0])
+        self.assertEqual(set(invite),{'kind','version','origin','code','expires_at'})
+        self.assertEqual((invite['kind'],invite['version'],invite['origin']),('rtrust_enrollment',1,'https://panel.example'))
+        # The code shown on the first page is still unused and enrolls a device once.
+        body={'code':code,'name':'Dashboard QR','platform':'android'}
+        self.assertEqual(self.post('enroll',body).status_code,200)
+
     def test_qr_uses_browser_https_origin_and_only_one_time_code(self):
         response=self.client.post('/portal/v2/enrollment-codes',json={'origin':'https://panel.example'},headers={**self.headers,'origin':'https://panel.example'})
         self.assertEqual(response.status_code,200,response.text)
