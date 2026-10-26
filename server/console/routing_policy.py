@@ -1,7 +1,10 @@
 """Pure service-routing policy. No network, filesystem or privileged operations."""
 from copy import deepcopy
 
-SERVICES = {'hysteria': 'Hysteria 2', 'trusttunnel': 'TrustTunnel / R-TrustTunnel'}
+SERVICES = {'hysteria': 'Hysteria 2', 'trusttunnel': 'TrustTunnel / R-TrustTunnel', 'cdn': 'VLESS через CDN',
+            'amnezia': 'AmneziaWG'}
+# Exception-mirroring services: they copy the Hysteria ACL into their own router.
+RELAYS = ('trusttunnel', 'cdn', 'amnezia')
 EXITS = ('primary', 'reserve')
 
 
@@ -55,11 +58,17 @@ def initial_policy(actual):
     return {'schema': 1, 'group_exit': group, 'services': services}
 
 
-def validate_saved(policy):
+def validate_saved(policy, defaults=None):
+    """`defaults` (an initial policy) fills services added after the policy was saved."""
     if not isinstance(policy, dict) or set(policy) != {'schema', 'group_exit', 'services'} or policy['schema'] != 1:
         raise PolicyError('Повреждена сохранённая политика; требуется проверка оператора')
-    if policy['group_exit'] not in EXITS or not isinstance(policy['services'], dict) or set(policy['services']) != set(SERVICES):
+    if policy['group_exit'] not in EXITS or not isinstance(policy['services'], dict) or not set(policy['services']) <= set(SERVICES):
         raise PolicyError('Повреждена сохранённая политика; требуется проверка оператора')
+    policy = deepcopy(policy)
+    for name in SERVICES.keys() - policy['services'].keys():
+        if defaults is None:
+            raise PolicyError('Повреждена сохранённая политика; требуется проверка оператора')
+        policy['services'][name] = deepcopy(defaults['services'][name])
     for value in policy['services'].values():
         if value != {'mode': 'unmanaged'}:
             validate_mode(value)

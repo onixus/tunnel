@@ -12,19 +12,21 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'server/console'))
-from routing_policy import PolicyError, initial_policy, make_plan, validate_request
+from routing_policy import PolicyError, initial_policy, make_plan, validate_request, validate_saved
+import amnezia
+import cdn
 import service_routes as sr
 import trusttunnel_routing as tt
 
 REV = 'a' * 64
 
 
-def state(h='primary', t='direct'):
-    return {'revision': REV, 'saved': initial_policy({'hysteria': h, 'trusttunnel': t}),
+def state(h='primary', t='direct', c='direct', a='direct'):
+    return {'revision': REV, 'saved': initial_policy({'hysteria': h, 'trusttunnel': t, 'cdn': c, 'amnezia': a}),
             'raw_policy': None,
             'services': {name: {'actual_exit': value, 'configurable': True, 'reason': '',
                                'available_exits': ['primary', 'reserve', 'direct']}
-                         for name, value in [('hysteria', h), ('trusttunnel', t)]}}
+                         for name, value in [('hysteria', h), ('trusttunnel', t), ('cdn', c), ('amnezia', a)]}}
 
 
 def request(group='reserve', **services):
@@ -32,7 +34,8 @@ def request(group='reserve', **services):
 
 
 def test_initial_policy_does_not_enroll_trusttunnel():
-    assert state()['saved']['services'] == {'hysteria': {'mode': 'follow'}, 'trusttunnel': {'mode': 'direct'}}
+    assert state()['saved']['services'] == {'hysteria': {'mode': 'follow'}, 'trusttunnel': {'mode': 'direct'},
+                                            'cdn': {'mode': 'direct'}, 'amnezia': {'mode': 'direct'}}
 
 
 def test_shared_switch_leaves_direct_service_untouched():
@@ -65,7 +68,9 @@ def test_excluded_drift_is_not_reconciled():
     s = state(t='reserve')
     s['services']['trusttunnel']['actual_exit'] = 'primary'
     plan = make_plan(request(), s)
-    assert plan['untouched'] == [{'id': 'trusttunnel', 'title': 'TrustTunnel / R-TrustTunnel', 'exit': 'primary'}]
+    assert plan['untouched'] == [{'id': 'trusttunnel', 'title': 'TrustTunnel / R-TrustTunnel', 'exit': 'primary'},
+                                 {'id': 'cdn', 'title': 'VLESS через CDN', 'exit': 'direct'},
+                                 {'id': 'amnezia', 'title': 'AmneziaWG', 'exit': 'direct'}]
 
 
 def test_explicit_same_mode_can_reconcile_drift():
@@ -113,7 +118,7 @@ def test_unprepared_driver_rejected():
 class FakeRuntime:
     def __init__(self):
         self.s = state()
-        self.values = {'hysteria': 'old-h', 'trusttunnel': 'old-t'}
+        self.values = {'hysteria': 'old-h', 'trusttunnel': 'old-t', 'cdn': 'old-cdn', 'amnezia': 'old-awg'}
         self.calls = []
         self.fail = None
         self.fail_rollback = False
@@ -127,10 +132,11 @@ class FakeRuntime:
         if self.drift_during_preflight and self.observe_count > 1:
             result['revision'] = 'b' * 64
         result['raw_tt'] = self.values['trusttunnel']
+        result.update({'raw_' + n: self.values[n] for n in ('cdn', 'amnezia')})
         return result
 
-    def tt_config(self, exit_id, s):
-        return 'new-trusttunnel'
+    def render(self, name, exit_id, s):
+        return 'new-' + name
 
     def prepare(self, plan, s):
         return {c['id']: {'before': self.values[c['id']], 'after': 'new-' + c['id'],
@@ -180,7 +186,7 @@ def journal():
 def test_two_service_commit(runtime):
     result = sr.apply(runtime, both())
     assert len(result['changes']) == 2
-    assert runtime.values == {'hysteria': 'new-hysteria', 'trusttunnel': 'new-trusttunnel'}
+    assert runtime.values == {'hysteria': 'new-hysteria', 'trusttunnel': 'new-trusttunnel', 'cdn': 'old-cdn', 'amnezia': 'old-awg'}
     assert journal()['status'] == 'committed'
     assert not sr.PENDING.exists()
     assert sr.POLICY.stat().st_mode & 0o777 == 0o600
@@ -192,7 +198,7 @@ def test_second_failure_rolls_back_both_in_reverse_order(runtime):
     runtime.fail = 'trusttunnel'
     with pytest.raises(PolicyError, match='восстановлены'):
         sr.apply(runtime, both())
-    assert runtime.values == {'hysteria': 'old-h', 'trusttunnel': 'old-t'}
+    assert runtime.values == {'hysteria': 'old-h', 'trusttunnel': 'old-t', 'cdn': 'old-cdn', 'amnezia': 'old-awg'}
     assert [c[1] for c in runtime.calls if c[0] == 'write'] == ['hysteria', 'trusttunnel', 'trusttunnel', 'hysteria']
     assert journal()['status'] == 'rolled_back'
     assert not sr.PENDING.exists() and not sr.POLICY.exists()
@@ -367,17 +373,17 @@ def test_prepare_trusttunnel_uses_live_acl():
 def test_sync_rewrites_only_trusttunnel_and_keeps_policy(runtime):
     runtime.s = state(t='reserve')
     sr.POLICY.write_text('{"kept": true}')
-    assert sr.sync_trusttunnel(runtime)
-    assert runtime.values == {'hysteria': 'old-h', 'trusttunnel': 'new-trusttunnel'}
+    assert sr.sync_exceptions(runtime)
+    assert runtime.values == {'hysteria': 'old-h', 'trusttunnel': 'new-trusttunnel', 'cdn': 'old-cdn', 'amnezia': 'old-awg'}
     assert sr.POLICY.read_text() == '{"kept": true}'
     assert not sr.PENDING.exists()
 
 
 def test_sync_is_noop_for_direct_or_unchanged(runtime):
-    assert sr.sync_trusttunnel(runtime) is None
+    assert sr.sync_exceptions(runtime) is None
     runtime.s = state(t='primary')
     runtime.values['trusttunnel'] = 'new-trusttunnel'
-    assert sr.sync_trusttunnel(runtime) is None
+    assert sr.sync_exceptions(runtime) is None
     assert not [c for c in runtime.calls if c[0] == 'write']
 
 
@@ -385,7 +391,7 @@ def test_sync_skips_exit_check_when_relay_is_current(runtime):
     runtime.s = state(t='primary')
     runtime.values['trusttunnel'] = 'new-trusttunnel'
     runtime.prepare = Mock(side_effect=AssertionError('exit checked'))
-    assert sr.sync_trusttunnel(runtime) is None
+    assert sr.sync_exceptions(runtime) is None
 
 
 def test_tt_config_without_hysteria_acl_keeps_builtin_policy():
@@ -407,13 +413,13 @@ def test_exception_edit_triggers_trusttunnel_sync(tmp_path, monkeypatch):
     import routing_agent
     monkeypatch.setattr(sr, 'PENDING', tmp_path / 'pending.json')
     monkeypatch.setattr(agent, 'dispatch', lambda op, data: {'message': 'Маршруты применены'})
-    monkeypatch.setattr(sr, 'sync_trusttunnel', lambda r: 'TT ok')
+    monkeypatch.setattr(sr, 'sync_exceptions', lambda r: 'TT ok')
     assert routing_agent.dispatch('routes.apply', {})['message'] == 'Маршруты применены TT ok'
     def broken(r):
         raise RuntimeError('secret detail')
-    monkeypatch.setattr(sr, 'sync_trusttunnel', broken)
+    monkeypatch.setattr(sr, 'sync_exceptions', broken)
     message = routing_agent.dispatch('routes.apply', {})['message']
-    assert 'не синхронизирован' in message and 'secret' not in message
+    assert 'не синхронизированы' in message and 'secret' not in message
 
 
 def test_relay_reaches_loopback_trusttunnel_socks_through_bridge_with_credentials():
@@ -568,3 +574,111 @@ def test_native_probe_uses_bridge_and_cleans_container(monkeypatch, tmp_path, su
     name = command[command.index('--name')+1]
     assert ['docker', 'rm', '-f', name] in calls
     process.terminate.assert_called_once()
+
+
+def test_cdn_translates_hysteria_acl_in_order_with_its_geoip():
+    p = exits()
+    value = cdn.routing_config('primary', p, LIVE_ACL, ['203.0.113.9'], '/var/lib/h-ui/geo/geoip.dat')
+    assert value['geoip'] == '/var/lib/h-ui/geo/geoip.dat' and value['blocked'] == ['203.0.113.9']
+    assert value['rules'] == [
+        {'type': 'field', 'ip': cdn.PRIVATE, 'outboundTag': 'block'},
+        {'type': 'field', 'domain': ['domain:hostkey.ru'], 'outboundTag': 'reserve'},
+        {'type': 'field', 'domain': ['domain:ru'], 'outboundTag': 'direct'},
+        {'type': 'field', 'domain': ['domain:xn--p1ai'], 'outboundTag': 'direct'},
+        {'type': 'field', 'domain': ['full:lemanapro.com'], 'outboundTag': 'direct'},
+        {'type': 'field', 'ip': ['198.51.100.0/24'], 'outboundTag': 'reserve'},
+        {'type': 'field', 'ip': ['geoip:ru'], 'outboundTag': 'direct'},
+        {'type': 'field', 'ip': ['geoip:kz'], 'outboundTag': 'direct'},
+        {'type': 'field', 'ip': ['geoip:by'], 'outboundTag': 'egress'},
+    ]
+    # Only the exits the exceptions use are added, with the relay's bridge address and credentials.
+    assert [o['tag'] for o in value['outbounds']] == ['egress', 'reserve']
+    assert value['outbounds'][0]['settings']['servers'][0]['users'] == [{'user': 'root-exit-user', 'pass': 'not-a-live-secret'}]
+    assert cdn.routing_config('direct') == {'schema': 1, 'exit': 'direct'}
+    with pytest.raises(PolicyError, match='geoip.dat'):
+        cdn.routing_config('primary', p, ['local(geoip:ru)'], [], None)
+
+
+def test_cdn_server_config_routes_clients_through_exit_with_exceptions_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(cdn, 'ROUTING', tmp_path / 'routing.json')
+    state = cdn.new_state('origin.example.invalid')
+    direct = json.loads(cdn.render_server(state))
+    assert [o['tag'] for o in direct['outbounds']] == ['direct', 'block'] and 'domainStrategy' not in direct['routing']
+    value = cdn.routing_config('reserve', exits(), ['local(suffix:ru)', 'reserve-out(all)'], ['203.0.113.9'])
+    c = json.loads(cdn.render_server(state, value))
+    rules = c['routing']['rules']
+    assert c['outbounds'][0]['tag'] == 'egress' and c['routing']['domainStrategy'] == 'IPOnDemand'
+    # The host's own public address is blocked with private networks, before any exception.
+    assert rules[0] == {'type': 'field', 'ip': cdn.PRIVATE + ['203.0.113.9'], 'outboundTag': 'block'}
+    assert rules[2] == {'type': 'field', 'domain': ['domain:ru'], 'outboundTag': 'direct'}
+    assert rules[-1] == {'type': 'field', 'network': 'tcp,udp', 'outboundTag': 'egress'}
+    probe = next(i for i in c['inbounds'] if i['tag'] == 'probe')
+    assert probe['listen'] == '127.0.0.1' and probe['port'] == cdn.PROBE_PORT and all('sniffing' in i for i in c['inbounds'])
+
+
+def test_cdn_actual_exit_counts_only_rendered_routing(tmp_path, monkeypatch):
+    monkeypatch.setattr(cdn, 'ROUTING', tmp_path / 'routing.json')
+    monkeypatch.setattr(cdn, 'RUNTIME', tmp_path / 'runtime')
+    cdn.RUNTIME.mkdir()
+    state = cdn.new_state('origin.example.invalid')
+    legacy = json.loads(cdn.render_server(state))
+    legacy['inbounds'] = legacy['inbounds'][:1]
+    (cdn.RUNTIME / 'config.json').write_text(json.dumps(legacy))
+    assert cdn.actual_exit(state) == 'direct'
+    cdn.ROUTING.write_text(json.dumps(cdn.routing_config('primary', exits(), ['primary-out(all)'], [])))
+    assert cdn.actual_exit(state) == 'custom'  # Saved but never rendered into the running config.
+    (cdn.RUNTIME / 'config.json').write_text(cdn.render_server(state))
+    assert cdn.actual_exit(state) == 'primary'
+
+
+def test_runtime_renders_cdn_with_live_acl_and_ingress_block():
+    p = exits()
+    r = sr.Runtime(SimpleNamespace())
+    r.expected_ip = Mock(return_value='203.0.113.9')
+    config = {'acl': {'geoip': '/geo.dat', 'inline': LIVE_ACL}}
+    value = json.loads(r.render('cdn', 'primary', {'config': config, 'profiles': p}))
+    assert value['exit'] == 'primary' and value['blocked'] == ['203.0.113.9'] and value['geoip'] == '/geo.dat'
+    r.expected_ip.assert_called_once_with('direct', p)
+    assert json.loads(r.render('cdn', 'direct', {'config': config, 'profiles': p})) == {'schema': 1, 'exit': 'direct'}
+
+
+def test_sync_follows_exceptions_on_every_relay(runtime):
+    runtime.s = state(t='primary', c='reserve', a='primary')
+    message = sr.sync_exceptions(runtime)
+    assert 'TrustTunnel' in message and 'CDN' in message and 'AmneziaWG' in message
+    assert runtime.values == {'hysteria': 'old-h', 'trusttunnel': 'new-trusttunnel', 'cdn': 'new-cdn', 'amnezia': 'new-amnezia'}
+    # A direct protocol needs no router and is left alone.
+    runtime.s = state(t='primary', c='direct')
+    runtime.values = {'hysteria': 'old-h', 'trusttunnel': 'new-trusttunnel', 'cdn': 'old-cdn', 'amnezia': 'old-awg'}
+    assert sr.sync_exceptions(runtime) is None
+
+
+def test_saved_policy_gains_new_services_from_live_state():
+    saved = {'schema': 1, 'group_exit': 'reserve', 'services': {'hysteria': {'mode': 'follow'}, 'trusttunnel': {'mode': 'direct'}}}
+    filled = validate_saved(saved, initial_policy({'hysteria': 'reserve', 'trusttunnel': 'direct', 'cdn': 'direct'}))
+    assert filled['services']['cdn'] == {'mode': 'direct'} and 'cdn' not in saved['services']
+    assert filled['services']['amnezia'] == {'mode': 'unmanaged'}  # Not installed: never enrolled implicitly.
+    with pytest.raises(PolicyError, match='Повреждена'):
+        validate_saved(saved)
+
+
+def test_amnezia_router_is_the_relay_with_a_tun_inbound_and_probe():
+    p = exits()
+    value = amnezia.routing_config('reserve', p, LIVE_ACL, ['203.0.113.9'])
+    config, relay = value['config'], tt.relay_config(p['reserve'], LIVE_ACL, p)
+    # Same exceptions, outbounds and catch-all as TrustTunnel: one bypass policy for every protocol.
+    assert config['route']['rules'] == relay['route']['rules'] and config['outbounds'] == relay['outbounds']
+    assert config['route']['final'] == 'egress' and value['blocked'] == ['203.0.113.9']
+    tun, probe = config['inbounds']
+    assert tun['type'] == 'tun' and tun['interface_name'] == amnezia.TUN and tun['auto_route'] is False
+    assert probe == {'type': 'socks', 'tag': 'probe', 'listen': '127.0.0.1', 'listen_port': amnezia.PROBE_PORT}
+    assert config['route']['rule_set'][0]['path'] == amnezia.MOUNT + '/cis.json'
+    assert amnezia.routing_config('direct') == {'schema': 1, 'exit': 'direct'}
+
+
+def test_runtime_renders_amnezia_from_live_acl():
+    p = exits()
+    r = sr.Runtime(SimpleNamespace())
+    r.expected_ip = Mock(return_value='203.0.113.9')
+    value = json.loads(r.render('amnezia', 'primary', {'config': {'acl': {'inline': LIVE_ACL}}, 'profiles': p}))
+    assert value['exit'] == 'primary' and value['blocked'] == ['203.0.113.9'] and 'geoip' not in value

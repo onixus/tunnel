@@ -37,8 +37,12 @@ def host(tmp_path, monkeypatch):
     home = tmp_path / 'amneziawg'
     monkeypatch.setattr(amnezia, 'STATE', home / 'state.json')
     monkeypatch.setattr(amnezia, 'RUNTIME', home / 'runtime')
+    monkeypatch.setattr(amnezia, 'ROUTING', home / 'routing.json')
+    monkeypatch.setattr(amnezia, 'CIS', tmp_path / 'cis.json')
+    (tmp_path / 'cis.json').write_text('{"version": 3, "rules": []}')
     monkeypatch.setattr(cdn, 'STATE', tmp_path / 'xray-cdn/state.json')
     monkeypatch.setattr(cdn, 'RUNTIME', tmp_path / 'xray-cdn/runtime')
+    monkeypatch.setattr(cdn, 'ROUTING', tmp_path / 'xray-cdn/routing.json')
     for name in ('CACHE', 'ROLLBACK', 'BUILD', 'ASSETS'):
         monkeypatch.setattr(protocols, name, tmp_path / name.lower())
     (tmp_path / 'assets/amnezia').mkdir(parents=True)
@@ -46,13 +50,35 @@ def host(tmp_path, monkeypatch):
         (tmp_path / 'assets/amnezia' / name).write_text('fixture')
     monkeypatch.setattr(protocols.service_routes, 'trusted', lambda path, executable=False: path.is_file())
     protocols._MEMO['value'] = None
-    box = {'calls': [], 'port': None, 'containers': set()}
+    box = {'calls': [], 'port': None, 'containers': set(), 'tun': True}
 
     def run(args, timeout=30, env=None):
         box['calls'].append(args)
         if args[:2] == ['docker', 'run']:
             box['containers'].add(args[args.index('--name') + 1])
+        if args[:2] == ['docker', 'exec'] and 'listen-port' in args:
+            return str(box['port'] or '')
+        if args[:2] == ['docker', 'exec'] and args[-1] == amnezia.TUN:
+            if not box['tun']:
+                raise PolicyError('no tun')
+            return '7: egress0: <POINTOPOINT,UP>'
         return ''
+
+    real_download = protocols.download
+
+    def download(url, dest, sha256):
+        if 'SagerNet' not in url:
+            return real_download(url, dest, sha256)
+        # The official sing-box archive layout: a versioned directory holding the binary.
+        assert url == 'https://github.com/SagerNet/sing-box/releases/download/v1.12.9/sing-box-1.12.9-linux-amd64.tar.gz'
+        assert sha256 == '3' * 64
+        import io, tarfile
+        with tarfile.open(dest, 'w:gz') as tar:
+            info = tarfile.TarInfo('sing-box-1.12.9-linux-amd64/sing-box')
+            info.size = 6
+            tar.addfile(info, io.BytesIO(b'binary'))
+    monkeypatch.setattr(protocols, 'download', download)
+    monkeypatch.setattr(protocols, 'require_x86', lambda: None)
 
     def quiet(args, timeout=8):
         box['calls'].append(args)
@@ -155,6 +181,10 @@ def test_discovery_keeps_only_stable_verifiable_releases(monkeypatch):
             release('v1.1.0', 'trusttunnel-v1.1.0-linux-x86_64.tar.gz'), release('v1.2.0', 'trusttunnel-v1.2.0-linux-x86_64.tar.gz', draft=True)],
         'amnezia-vpn/amneziawg-go/tags?per_page=50': GO,
         'amnezia-vpn/amneziawg-tools/tags?per_page=50': TOOLS,
+        'SagerNet/sing-box/releases?per_page=30': [
+            release('v1.13.0-rc.1', 'sing-box-1.13.0-rc.1-linux-amd64.tar.gz'), release('v2.0.0', 'sing-box-2.0.0-linux-amd64.tar.gz'),
+            release('v1.11.9', 'sing-box-1.11.9-linux-amd64.tar.gz'), release('v1.12.9', 'sing-box-1.12.9-linux-amd64.tar.gz'),
+            release('v1.12.8', 'sing-box-1.12.8-linux-amd64.tar.gz')],
     }
     monkeypatch.setattr(protocols, 'api', lambda path: replies[path])
     assert [r['version'] for r in protocols.discover('hysteria')] == ['2.12.4']
@@ -164,6 +194,8 @@ def test_discovery_keeps_only_stable_verifiable_releases(monkeypatch):
     assert [(r['version'], r['commit'], r['tools_tag'], r['tools_commit']) for r in awg] == [
         ('3.1.20260828', 'a' * 40, 'v3.1.20260812', 'e' * 40), ('3.1.20260812', 'b' * 40, 'v3.1.20260812', 'e' * 40)]
     assert awg[0]['published'] == '2026-08-28'
+    # Router: the newest stable 1.12+ release with a published digest, never a new major line.
+    assert {(r['box_version'], r['box_tag'], r['box_sha256']) for r in awg} == {('1.12.9', 'v1.12.9', '1' * 64)}
 
 
 SETUP = 'R-TrustTunnel-Windows-x64-Setup.exe'
@@ -319,7 +351,8 @@ def cache(**components):
         name: {'releases': releases} for name, releases in components.items()}}))
 
 
-AWG = {'version': '3.1.20260828', 'tag': 'v3.1.20260828', 'commit': 'a' * 40, 'tools_tag': 'v3.1.20260812', 'tools_commit': 'e' * 40}
+AWG = {'version': '3.1.20260828', 'tag': 'v3.1.20260828', 'commit': 'a' * 40, 'tools_tag': 'v3.1.20260812', 'tools_commit': 'e' * 40,
+       'box_version': '1.12.9', 'box_tag': 'v1.12.9', 'box_sha256': '3' * 64}
 
 
 def test_install_accepts_only_registry_components_and_discovered_versions(host, monkeypatch):
@@ -348,6 +381,7 @@ def test_amnezia_install_pins_commits_then_update_keeps_keys(host):
     start = next(c for c in host['calls'] if c[:2] == ['docker', 'run'])
     assert start[start.index('--cap-drop') + 1] == 'ALL' and '--privileged' not in start and '47443:47443/udp' in start
     assert [p.name for p in protocols.BUILD.iterdir() if p.name != '.docker'] == []
+    assert '--network' not in start and not (amnezia.RUNTIME / 'route.json').exists()
     state = amnezia.load()
     assert state['version'] == '3.1.20260828' and protocols.installed('amnezia')['installed']
     with pytest.raises(PolicyError, match='уже установлен'):
@@ -861,3 +895,76 @@ def test_swap_does_not_start_previous_container_when_file_restore_fails(host):
     with pytest.raises(PolicyError):
         protocols.swap_container('svc', ['image'], fail, restore=fail)
     assert ['docker', 'start', 'svc'] not in host['calls']
+
+
+def test_cdn_route_switch_recreates_xray_on_exit_network_and_rolls_back(host, monkeypatch, tmp_path):
+    cdn_state()
+    state = cdn.load()
+    state['image'] = 'vpn-xray:25.10.15'
+    cdn.save(state)
+    monkeypatch.setattr(cdn, 'verify', lambda port: None)
+    geoip = tmp_path / 'geoip.dat'
+    geoip.write_bytes(b'geo')
+    profile = {'outbound': {'name': 'onixus', 'type': 'socks5',
+               'socks5': {'addr': '127.0.0.1:10810', 'username': 'u', 'password': 'p'}}}
+    routed = json.dumps(cdn.routing_config('primary', {'primary': profile}, ['local(geoip:ru)', 'onixus(all)'],
+                                           ['203.0.113.9'], geoip))
+    cdn.apply_routing(routed)
+    start = next(c for c in host['calls'] if c[:2] == ['docker', 'run'])
+    assert start[start.index('--network') + 1] == 'trusttunnel-web_default' and 'XRAY_LOCATION_ASSET=/etc/xray' in start
+    assert (cdn.RUNTIME / 'geoip.dat').read_bytes() == b'geo' and cdn.current_routing() == routed
+    assert cdn.actual_exit(cdn.load()) == 'primary'
+
+    # A failed start restores the previous routing before the old container reads the mounted files.
+    host['calls'].clear()
+    monkeypatch.setattr(cdn, 'verify', lambda port: (_ for _ in ()).throw(PolicyError('down')))
+    with pytest.raises(PolicyError, match='не запустился'):
+        cdn.apply_routing(None)
+    assert cdn.current_routing() == routed and cdn.actual_exit(cdn.load()) == 'primary'
+    assert ['docker', 'rename', 'xray-cdn-previous', 'xray-cdn'] in host['calls']
+
+    monkeypatch.setattr(cdn, 'verify', lambda port: None)
+    host['calls'].clear()
+    cdn.apply_routing(None)
+    start = next(c for c in host['calls'] if c[:2] == ['docker', 'run'])
+    assert '--network' not in start and cdn.actual_exit(cdn.load()) == 'direct'
+
+
+def test_amnezia_route_switch_runs_router_on_exit_network_and_fails_closed(host, monkeypatch):
+    host['port'] = 47443
+    cache(amnezia=[AWG])
+    protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    assert amnezia.actual_exit() == 'direct'
+    profile = {'outbound': {'name': 'onixus', 'type': 'socks5',
+               'socks5': {'addr': '127.0.0.1:10810', 'username': 'u', 'password': 'p'}}}
+    routed = json.dumps(amnezia.routing_config('primary', {'primary': profile}, ['local(suffix:ru)', 'onixus(all)'],
+                                               ['203.0.113.9']))
+    host['calls'].clear()
+    amnezia.apply_routing(routed)
+    start = next(c for c in host['calls'] if c[:2] == ['docker', 'run'])
+    assert start[start.index('--network') + 1] == 'trusttunnel-web_default' and 'net.ipv4.conf.all.rp_filter=0' in start
+    assert (amnezia.RUNTIME / 'blocked').read_text() == '203.0.113.9\n' and (amnezia.RUNTIME / 'cis.json').exists()
+    route = json.loads((amnezia.RUNTIME / 'route.json').read_text())
+    assert route['outbounds'][0]['server'] == '172.18.0.1' and amnezia.actual_exit() == 'primary'
+    # Peer edits re-render only awg0.conf; the router keeps its exit.
+    amnezia.dispatch('amnezia.create', {'username': 'alice'}, 'h')
+    assert amnezia.actual_exit() == 'primary'
+
+    # Without its TUN the new container fails the check; the old one returns with the old files.
+    host['tun'] = False
+    host['calls'].clear()
+    with pytest.raises(PolicyError, match='не запустился'):
+        amnezia.apply_routing(json.dumps(amnezia.routing_config('primary', {'primary': profile}, ['onixus(all)'], [])))
+    assert amnezia.current_routing() == routed and amnezia.actual_exit() == 'primary'
+    assert ['docker', 'rename', 'amnezia-awg-previous', 'amnezia-awg'] in host['calls']
+
+    host['tun'] = True
+    amnezia.apply_routing(None)
+    assert not any((amnezia.RUNTIME / n).exists() for n in amnezia.ROUTE_FILES) and amnezia.actual_exit() == 'direct'
+
+
+def test_amnezia_install_requires_a_verified_router_release(host):
+    cache(amnezia=[{k: v for k, v in AWG.items() if not k.startswith('box_')}])
+    with pytest.raises(PolicyError, match='sing-box'):
+        protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    assert not any(c[:2] == ['docker', 'build'] for c in host['calls'])

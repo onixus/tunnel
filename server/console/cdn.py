@@ -5,9 +5,11 @@ forwards to this origin on a CDN-proxied port. Hysteria (UDP) and TrustTunnel ca
 """
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import time
@@ -15,11 +17,20 @@ import urllib.parse
 import uuid
 
 import amnezia
-from routing_policy import PolicyError
+from routing_policy import EXITS, PolicyError
+import trusttunnel_routing as acl_rules
 
 HOME = Path('/opt/xray-cdn')
 STATE = HOME / 'state.json'
 RUNTIME = HOME / 'runtime'
+# Selected exit and the translated Hysteria exceptions; root-only, holds upstream credentials.
+ROUTING = HOME / 'routing.json'
+# Docker network whose gateway reaches the host TrustTunnel SOCKS of the primary exit.
+EXIT_NETWORK = 'trusttunnel-web_default'
+# Unpublished SOCKS inbound inside the container: the real egress check uses the same rules as clients.
+PROBE_PORT = 10899
+SNIFFING = {'enabled': True, 'destOverride': ['http', 'tls', 'quic'], 'routeOnly': True}
+COUNTRY = re.compile(r'[a-z]{2}')
 CONTAINER = 'xray-cdn'
 LETSENCRYPT = '/etc/letsencrypt'
 MAX_USERS = 500
@@ -124,8 +135,88 @@ def validate(data, current):
     return result
 
 
-def render_server(state):
+def translate_acl(acl, names):
+    """Hysteria ACL exceptions as Xray routing rules, in order; same grammar as the TrustTunnel relay.
+
+    Returns (rules, skipped, uses_geoip). A trailing catch-all is left to the selected exit.
+    """
+    rules, skipped, uses_geoip = [], [], False
+    if acl and isinstance(acl[-1], str) and acl_rules._CATCH_ALL.match(acl[-1].strip()):
+        acl = acl[:-1]
+    for line in acl:
+        m = acl_rules._ACL_LINE.match(line.strip()) if isinstance(line, str) else None
+        tag = None if not m else 'block' if m.group(1) == 'reject' else names.get(m.group(1))
+        if tag is None:
+            skipped.append(line)
+            continue
+        match = m.group(2).lower()
+        if match.startswith('suffix:') and acl_rules._HOST.match(match[7:]):
+            rule = {'domain': ['domain:' + match[7:]]}
+        elif match == 'geoip:private':
+            rule = {'ip': PRIVATE}
+        elif match.startswith('geoip:') and COUNTRY.fullmatch(match[6:]):
+            # Hysteria's own geoip.dat is copied next to the config: identical country data.
+            rule, uses_geoip = {'ip': [match]}, True
+        elif acl_rules._HOST.match(match) and not match.replace('.', '').isdigit():
+            rule = {'domain': ['full:' + match]}
+        else:
+            try:
+                rule = {'ip': [str(ipaddress.ip_network(match, strict=False))]}
+            except ValueError:
+                skipped.append(line)
+                continue
+        rules.append({'type': 'field', **rule, 'outboundTag': tag})
+    return rules, skipped, uses_geoip
+
+
+def xray_socks(profile, tag):
+    """An exit's authenticated SOCKS as an Xray outbound, reached like the TrustTunnel relay does."""
+    o = acl_rules._socks(profile, tag)
+    return {'tag': tag, 'protocol': 'socks', 'settings': {'servers': [
+        {'address': o['server'], 'port': o['server_port'], 'users': [{'user': o['username'], 'pass': o['password']}]}]}}
+
+
+def routing_config(exit_id, profiles=None, acl=None, blocked=(), geoip=None):
+    """Routing for the selected exit; no network access. `blocked` are the host's own addresses."""
+    if exit_id == 'direct':
+        return {'schema': 1, 'exit': 'direct'}
+    profile = profiles[exit_id]
+    names, extra = acl_rules.exit_tags(profile, profiles, 'direct')
+    rules, _, uses_geoip = translate_acl(DEFAULT_ACL if acl is None else acl, names)
+    used = {r['outboundTag'] for r in rules}
+    value = {'schema': 1, 'exit': exit_id, 'blocked': sorted(blocked), 'rules': rules,
+             'outbounds': [xray_socks(profile, 'egress')] + [xray_socks(extra[t], t) for t in sorted(extra) if t in used]}
+    if uses_geoip:
+        if not geoip:
+            raise PolicyError('Для исключений GeoIP нужна база geoip.dat Hysteria')
+        value['geoip'] = str(geoip)
+    return value
+
+
+# Used when Hysteria has no ACL: the same RU/CIS policy as the TrustTunnel relay.
+DEFAULT_ACL = ['local(suffix:ru)', 'local(suffix:su)', 'local(suffix:xn--p1ai)'] + [
+    f'local(geoip:{c})' for c in acl_rules.CIS]
+
+
+def load_routing():
+    try:
+        if ROUTING.stat().st_size > 256 * 1024:
+            raise PolicyError('Маршрутизация CDN повреждена')
+        value = json.loads(ROUTING.read_text())
+    except FileNotFoundError:
+        return {'schema': 1, 'exit': 'direct'}
+    except ValueError:
+        raise PolicyError('Маршрутизация CDN повреждена') from None
+    if not isinstance(value, dict) or value.get('schema') != 1 or value.get('exit') not in ('direct',) + EXITS:
+        raise PolicyError('Маршрутизация CDN повреждена')
+    if value['exit'] != 'direct' and not all(isinstance(value.get(k), list) for k in ('outbounds', 'rules', 'blocked')):
+        raise PolicyError('Маршрутизация CDN повреждена')
+    return value
+
+
+def render_server(state, routing=None):
     s = state['settings']
+    routing = load_routing() if routing is None else routing
     stream = {'network': s['transport'], 'security': 'none',
               ('wsSettings' if s['transport'] == 'ws' else 'xhttpSettings'): {'path': s['path']}}
     if s['origin_tls']:
@@ -133,13 +224,44 @@ def render_server(state):
         stream.update(security='tls', tlsSettings={'minVersion': '1.2', 'certificates': [
             {'certificateFile': live + 'fullchain.pem', 'keyFile': live + 'privkey.pem'}]})
     clients = [{'id': u['uuid'], 'email': u['name']} for u in state['users'] if u['enabled']]
+    inbounds = [{'tag': 'cdn', 'listen': '0.0.0.0', 'port': s['origin_port'], 'protocol': 'vless',
+                 'settings': {'clients': clients, 'decryption': 'none'}, 'streamSettings': stream},
+                {'tag': 'probe', 'listen': '127.0.0.1', 'port': PROBE_PORT, 'protocol': 'socks',
+                 'settings': {'auth': 'noauth', 'udp': False}}]
+    outbounds = [{'tag': 'direct', 'protocol': 'freedom'}, {'tag': 'block', 'protocol': 'blackhole'}]
+    rules = [{'type': 'field', 'ip': PRIVATE, 'outboundTag': 'block'}]
+    route = {'rules': rules}
+    if routing['exit'] != 'direct':
+        for inbound in inbounds:
+            inbound['sniffing'] = SNIFFING
+        # The exit network also reaches the host's public address: never let clients hairpin to its panels.
+        rules[0] = {'type': 'field', 'ip': PRIVATE + routing['blocked'], 'outboundTag': 'block'}
+        rules += [{'type': 'field', 'port': '53', 'outboundTag': 'direct'}, *routing['rules'],
+                  {'type': 'field', 'network': 'tcp,udp', 'outboundTag': 'egress'}]
+        outbounds = routing['outbounds'] + outbounds
+        # Resolve at the first IP rule, as Hysteria does: rules keep the ACL's top-down order.
+        route['domainStrategy'] = 'IPOnDemand'
     return json.dumps({
         'log': {'loglevel': 'warning', 'access': 'none'},
-        'inbounds': [{'tag': 'cdn', 'listen': '0.0.0.0', 'port': s['origin_port'], 'protocol': 'vless',
-                      'settings': {'clients': clients, 'decryption': 'none'}, 'streamSettings': stream}],
-        'outbounds': [{'tag': 'direct', 'protocol': 'freedom'}, {'tag': 'block', 'protocol': 'blackhole'}],
-        'routing': {'rules': [{'type': 'field', 'ip': PRIVATE, 'outboundTag': 'block'}]},
+        'inbounds': inbounds,
+        'outbounds': outbounds,
+        'routing': route,
     }, indent=2, sort_keys=True) + '\n'
+
+
+def actual_exit(state):
+    """The exit the mounted config really uses: the routing file only counts when rendered into it."""
+    try:
+        live = json.loads((RUNTIME / 'config.json').read_text())
+        routing = load_routing()
+    except (OSError, ValueError, PolicyError):
+        return 'unknown'
+    expected = json.loads(render_server(state, routing))
+    if all(live.get(k) == expected[k] for k in ('outbounds', 'routing')):
+        return routing['exit']
+    if routing['exit'] == 'direct' and not any(o.get('tag') == 'egress' for o in live.get('outbounds', [])):
+        return 'direct'  # Rendered before routing support; nothing to migrate.
+    return 'custom'
 
 
 def render_client(state, user):
@@ -175,6 +297,9 @@ def container_args(state, image):
     if s['origin_tls']:
         # Live symlinks point into ../../archive: mount the whole tree read-only.
         args += ['--mount', f'type=bind,src={LETSENCRYPT},dst={LETSENCRYPT},readonly']
+    if load_routing()['exit'] != 'direct':
+        # The firewall admits only this network to the primary exit's SOCKS; geoip.dat sits beside the config.
+        args += ['--network', EXIT_NETWORK, '-e', 'XRAY_LOCATION_ASSET=/etc/xray']
     return args + [image]
 
 
@@ -203,6 +328,56 @@ def restart():
         except (PolicyError, subprocess.TimeoutExpired):
             raise PolicyError('Изменение сохранено, но не применено: прежние ключи CDN ещё действуют. '
                               'Перезапустите контейнер xray-cdn.') from None
+
+
+def copy_file(source, target):
+    temp = target.with_name('.' + target.name + '.' + secrets.token_hex(6))
+    try:
+        with open(source, 'rb') as src, open(temp, 'xb') as dst:
+            os.fchmod(dst.fileno(), 0o600)
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def current_routing():
+    return ROUTING.read_text() if ROUTING.exists() else None
+
+
+def apply_routing(text):
+    """Install a rendered routing file (None: direct) and recreate Xray with it.
+
+    On failure the previous container keeps running with the previous files.
+    """
+    import protocols
+    state = load()
+    if not state.get('image'):
+        raise PolicyError('VLESS через CDN не установлен')
+    before = current_routing()
+
+    def put(value):
+        if value is None:
+            ROUTING.unlink(missing_ok=True)
+        else:
+            amnezia.write(ROUTING, value)
+        geoip = load_routing().get('geoip')
+        if geoip:
+            # Hysteria's file is not readable from the container; a root-only copy is.
+            copy_file(Path(geoip), RUNTIME / 'geoip.dat')
+        save(state)
+    put(text)
+    try:
+        protocols.swap_container(CONTAINER, container_args(state, state['image']),
+                                 lambda: verify(state['settings']['origin_port']), restore=lambda: put(before))
+    except BaseException:
+        raise PolicyError('Xray не запустился с новым маршрутом. Предыдущий контейнер восстановлен.') from None
+
+
+def probe():
+    return amnezia.netns_probe(CONTAINER, PROBE_PORT)
 
 
 def configure(state, data):

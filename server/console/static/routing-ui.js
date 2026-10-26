@@ -3,6 +3,9 @@
 (() => {
   const legacyHandle = handle;
   const exitNames = { primary: "Основной", reserve: "Резервный", clean: "Чистый IP", direct: "Напрямую", custom: "Особый маршрут", unknown: "Нет данных" };
+  const kinds = { hysteria: { kicker: "01 / QUIC", tag: "Hysteria", tone: "" }, trusttunnel: { kicker: "02 / HTTP2 + QUIC", tag: "TrustTunnel", tone: "blue" },
+    cdn: { kicker: "03 / VLESS + CDN", tag: "CDN", tone: "amber" }, amnezia: { kicker: "04 / WIREGUARD", tag: "AmneziaWG", tone: "neutral" } };
+  const kind = id => kinds[id] || { kicker: "", tag: id, tone: "" };
   const modeNames = { follow: "Общий маршрут", pinned: "Свой маршрут", direct: "Напрямую", unmanaged: "Вне управления" };
   let displayed = null, submitting = false;
   const exitName = id => exitNames[id] || id;
@@ -28,7 +31,7 @@
       const x2 = b.left - box.left, y2 = b.top + b.height / 2 - box.top, bend = (x2 - x1) * .5;
       const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       path.setAttribute("d", `M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`);
-      path.setAttribute("class", `wire ${source.dataset.serviceNode === "trusttunnel" ? "wire-blue" : ""}`);
+      path.setAttribute("class", `wire ${kind(source.dataset.serviceNode).tone ? "wire-" + kind(source.dataset.serviceNode).tone : ""}`);
       svg.append(path);
     }
 
@@ -43,11 +46,11 @@
       <p class="subtitle" id="route-help">Нажмите на выход, чтобы переключить выбранные сервисы. На сервис, чтобы назначить ему свой маршрут.</p>
       ${busy() ? '<div class="note">Переключение или восстановление не завершено. Дождитесь результата в журнале.</div>' : ""}
       <div class="network-board"><svg class="route-wires" aria-hidden="true"></svg><div class="service-nodes"><div class="ingress-label"><span class="host-dot"></span> onixus-rf <small>Входной узел</small></div>
-      ${p.services.map(s => `<button type="button" class="service-node ${s.id === "trusttunnel" ? "service-blue" : ""}" data-action="route-service" data-service-node="${esc(s.id)}" data-route="${esc(s.actual_exit)}" data-service="${esc(s.id)}" ${!s.configurable || busy() ? "disabled" : ""} aria-label="Настроить маршрут ${esc(s.title)}"><span class="node-kicker">${s.id === "hysteria" ? "01 / QUIC" : "02 / HTTP2 + QUIC"}</span><strong>${esc(s.title)}</strong><span class="service-route">${esc(exitName(s.actual_exit))} <span aria-hidden="true">→</span></span><small>${esc(modeNames[s.mode])}${s.drift ? " · отличается от политики" : ""}</small>${!s.configurable ? `<small class="route-reason">${esc(s.reason)}</small>` : ""}</button>`).join("")}</div>
+      ${p.services.map(s => `<button type="button" class="service-node ${kind(s.id).tone ? "service-" + kind(s.id).tone : ""}" data-action="route-service" data-service-node="${esc(s.id)}" data-route="${esc(s.actual_exit)}" data-service="${esc(s.id)}" ${!s.configurable || busy() ? "disabled" : ""} aria-label="Настроить маршрут ${esc(s.title)}"><span class="node-kicker">${esc(kind(s.id).kicker)}</span><strong>${esc(s.title)}</strong><span class="service-route">${esc(exitName(s.actual_exit))} <span aria-hidden="true">→</span></span><small>${esc(modeNames[s.mode])}${s.drift ? " · отличается от политики" : ""}</small>${!s.configurable ? `<small class="route-reason">${esc(s.reason)}</small>` : ""}</button>`).join("")}</div>
       <div class="exit-nodes">${[...(r.exits || []).filter(e => e.id !== "clean"), { id: "direct", host: "Входной сервер", via: "Без выходного узла" }].map(e => {
         const assigned = p.services.filter(s => s.actual_exit === e.id);
-        return `<button type="button" class="exit-node ${assigned.length ? "exit-used" : ""}" data-action="route-exit" data-exit-node="${esc(e.id)}" data-exit="${esc(e.id)}" ${disabled()} aria-describedby="route-help"><span class="node-kicker">${esc(exitName(e.id))}${e.id === p.group_exit ? " · ОБЩИЙ" : ""}</span><strong>${esc(e.host)}</strong><small>${esc(e.via)}</small><span class="exit-members">${assigned.map(s => `<span class="route-tag ${s.id === "trusttunnel" ? "tag-blue" : ""}">${s.id === "hysteria" ? "Hysteria" : "TrustTunnel"}</span>`).join("") || '<span class="muted">Выбрать этот выход →</span>'}</span></button>`;
-      }).join("")}</div></div><div class="network-foot"><span><span class="legend-dot"></span> Hysteria <span class="legend-dot blue"></span> TrustTunnel / R-TrustTunnel</span><span>SSH, панель и трафик сервера: напрямую</span></div><p class="route-disclaimer">Линии показывают прочитанную конфигурацию, не онлайн-доступность. Реальное подключение проверяется при применении. Исключения Hysteria и локальный DNS сохраняются.</p></section>`;
+        return `<button type="button" class="exit-node ${assigned.length ? "exit-used" : ""}" data-action="route-exit" data-exit-node="${esc(e.id)}" data-exit="${esc(e.id)}" ${disabled()} aria-describedby="route-help"><span class="node-kicker">${esc(exitName(e.id))}${e.id === p.group_exit ? " · ОБЩИЙ" : ""}</span><strong>${esc(e.host)}</strong><small>${esc(e.via)}</small><span class="exit-members">${assigned.map(s => `<span class="route-tag ${kind(s.id).tone ? "tag-" + kind(s.id).tone : ""}">${esc(kind(s.id).tag)}</span>`).join("") || '<span class="muted">Выбрать этот выход →</span>'}</span></button>`;
+      }).join("")}</div></div><div class="network-foot"><span><span class="legend-dot"></span> Hysteria <span class="legend-dot blue"></span> TrustTunnel / R-TrustTunnel <span class="legend-dot amber"></span> VLESS через CDN <span class="legend-dot neutral"></span> AmneziaWG</span><span>SSH, панель и трафик сервера: напрямую</span></div><p class="route-disclaimer">Линии показывают прочитанную конфигурацию, не онлайн-доступность. Реальное подключение проверяется при применении. Исключения Hysteria (RU/СНГ напрямую и другие) действуют для всех сервисов и сохраняются.</p></section>`;
   }
 
   overview = function () {

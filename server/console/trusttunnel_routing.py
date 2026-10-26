@@ -106,6 +106,27 @@ def _socks(profile, tag):
     return outbound
 
 
+def exit_tags(profile, profiles, direct):
+    """Map Hysteria outbound names to relay tags: `local` → `direct`, the selected exit → `egress`.
+
+    Other exits keep their exit id as tag; returns (names, extra exits by tag).
+    """
+    names = {'local': direct}
+    extra = {}
+    for exit_id, item in sorted((profiles or {}).items()):
+        name = item['outbound'].get('name')
+        if not name or name in names:
+            continue
+        if item is profile or item['outbound'] == profile['outbound']:
+            names[name] = 'egress'
+        elif exit_id not in ('egress', direct):
+            names[name] = exit_id
+            extra[exit_id] = item
+    if profile['outbound'].get('name'):
+        names.setdefault(profile['outbound']['name'], 'egress')
+    return names, extra
+
+
 def relay_config(profile, acl=None, profiles=None):
     """Apply the Hysteria exception policy before the selected authenticated exit.
 
@@ -116,19 +137,7 @@ def relay_config(profile, acl=None, profiles=None):
     if acl is None:
         domain, network = _DEFAULT_DOMAIN, _DEFAULT_NETWORK
     else:
-        names = {'local': 'dns-direct'}
-        extra = {}
-        for exit_id, item in sorted((profiles or {}).items()):
-            name = item['outbound'].get('name')
-            if not name or name in names:
-                continue
-            if item is profile or item['outbound'] == profile['outbound']:
-                names[name] = 'egress'
-            elif exit_id not in ('egress', 'dns-direct'):
-                names[name] = exit_id
-                extra[exit_id] = item
-        if profile['outbound'].get('name'):
-            names.setdefault(profile['outbound']['name'], 'egress')
+        names, extra = exit_tags(profile, profiles, 'dns-direct')
         domain, network, _ = translate_acl(acl, names)
         used = {r.get('outbound') for r in domain + network}
         outbounds += [_socks(extra[t], t) for t in sorted(extra) if t in used]
