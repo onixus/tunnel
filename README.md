@@ -45,6 +45,7 @@ R-TrustTunnel, черновики e-mail/Telegram-рассылок, очеред
 - [Протоколы: AmneziaWG 3.1, VLESS через CDN, установка и обновление из консоли, мониторинг контейнеров](docs/protocols.md)
 - [Доступ к панелям и управление пользователями](docs/panels.md)
 - [Проверки и диагностика](docs/troubleshooting.md)
+- [Журнал закрытия сессий TrustTunnel endpoint (патч)](docs/endpoint-session-log.md)
 - [Антибот-защита, капча и «отключите VPN»](docs/antibot.md)
 - [Обновления, резервные копии, восстановление и откат](docs/operations.md)
 - [Секреты и ограничения безопасности](docs/security.md)
