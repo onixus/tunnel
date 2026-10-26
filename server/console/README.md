@@ -65,9 +65,12 @@ is merged by matching names.
 
 ## Routing
 
-The existing deployment has **Hysteria application-level egress** through primary
-and reserve SOCKS exits. TrustTunnel and host traffic use the host's direct route.
-The console does not claim switching Hysteria switches every service's egress.
+The routing map manages Hysteria, TrustTunnel, AmneziaWG and VLESS/CDN independently:
+each service can follow the shared exit, use a pinned primary/reserve exit, or go
+directly through the entry server. Host traffic keeps its system route. Fresh
+installations start with direct egress; external exits require separate preparation.
+See [service routing](../../docs/service-routing.md) for adapter requirements,
+protocol probes and rollback. The map shows configured routes, not proof of reachability.
 
 The editor supports ordered suffix/CIDR/selected CIS GeoIP rules and a catch-all
 primary/reserve choice. The first three protected rules (panel access, private-IP
