@@ -1,46 +1,55 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 8b29988..03ea836 100644
+index 8b29988..7b57bdd 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
  
  ### Added
  
-+- [Feature] Log an INFO record when a client session (HTTP/2 or HTTP/3) closes, with duration, close reason
-+  (peer close, idle/keepalive timeout, TLS or protocol error code, auth rejection, I/O error), byte and stream
-+  counters, and an anonymous session id; log the session timeouts at startup and a single summary on SIGINT/SIGTERM.
++- [Feature] Log an INFO record when an authenticated client session closes, with duration, close reason
++  (peer close, idle/keepalive/QUIC idle timeout, TLS or protocol error code, auth rejection, I/O error), byte and
++  stream counters, an anonymous session id and a per-process keyed user tag; summarize unauthenticated sessions once
++  a minute, log the session timeouts at startup and a single summary on SIGINT/SIGTERM.
++- [Changed] SIGTERM is handled on a dedicated thread: the endpoint logs the shutdown summary, flushes the log and
++  terminates by the default SIGTERM action.
 +
  ### Changed
  
  ### Deprecated
 diff --git a/endpoint/src/main.rs b/endpoint/src/main.rs
-index 477b7fb..25b7f58 100644
+index 477b7fb..88ed425 100644
 --- a/endpoint/src/main.rs
 +++ b/endpoint/src/main.rs
-@@ -518,7 +518,22 @@ fn main() {
+@@ -75,6 +75,8 @@ fn increase_fd_limit() {
+ fn increase_fd_limit() {}
+ 
+ fn main() {
++    trusttunnel::termination::block_sigterm().expect("Couldn't block SIGTERM");
++
+     let args = clap::Command::new("VPN endpoint")
+         .args(&[
+             // Built-in version parameter handling is deficient in that it
+@@ -518,7 +520,19 @@ fn main() {
          async move { core.listen().await }
      };
  
-+    let terminate_task = {
++    trusttunnel::termination::spawn_sigterm_handler({
 +        let core = core.clone();
-+        async move {
-+            signal::unix::signal(signal::unix::SignalKind::terminate())
-+                .expect("Couldn't start SIGTERM listener")
-+                .recv()
-+                .await;
-+            info!(
++        move || {
++            format!(
 +                "Shutdown (SIGTERM): {} sessions closed",
 +                core.active_sessions()
-+            );
++            )
 +        }
-+    };
++    })
++    .expect("Couldn't start SIGTERM handler");
 +
      let reload_tls_hosts_task = {
 +        let core = core.clone();
          let tls_hosts_settings_path = tls_hosts_settings_path.clone();
          async move {
              let mut sighup_listener = signal::unix::signal(signal::unix::SignalKind::hangup())
-@@ -544,6 +559,10 @@ fn main() {
+@@ -544,6 +558,10 @@ fn main() {
      #[allow(clippy::await_holding_lock)]
      let interrupt_task = async move {
          tokio::signal::ctrl_c().await.unwrap();
@@ -51,23 +60,30 @@ index 477b7fb..25b7f58 100644
          shutdown.lock().unwrap().submit();
          shutdown.lock().unwrap().completion().await
      };
-@@ -565,6 +584,7 @@ fn main() {
-                 info!("Interrupted by user");
-                 0
-             },
-+            _ = terminate_task => 128 + nix::libc::SIGTERM,
-         }
-     });
+diff --git a/lib/Cargo.toml b/lib/Cargo.toml
+index a88a0db..bb697ad 100644
+--- a/lib/Cargo.toml
++++ b/lib/Cargo.toml
+@@ -52,6 +52,10 @@ hyper = { version = "0.14.26", features = ["http1", "http2", "client", "server",
+ rustls = { version = "0.23.37", features = ["logging"] }
+ tempfile = "3"
  
++[[test]]
++name = "sigterm"
++harness = false
++
+ [features]
+ rt_doc = ["dep:macros"]
+ tracing = ["tokio/tracing"]
 diff --git a/lib/src/core.rs b/lib/src/core.rs
-index adeb055..70cc9e3 100644
+index adeb055..7ad8220 100644
 --- a/lib/src/core.rs
 +++ b/lib/src/core.rs
 @@ -10,6 +10,7 @@ use crate::icmp_forwarder::IcmpForwarder;
  use crate::metrics::Metrics;
  use crate::net_utils::PeerAddr;
  use crate::quic_multiplexer::{QuicMultiplexer, QuicSocket};
-+use crate::session_log::{CloseReason, SessionRecord};
++use crate::session_log::{CloseReason, SessionRecord, UnauthenticatedCloses};
  use crate::settings::{ForwardProtocolSettings, Settings};
  use crate::shutdown::Shutdown;
  use crate::socks5_forwarder::Socks5Forwarder;
@@ -80,19 +96,21 @@ index adeb055..70cc9e3 100644
  };
  use socket2::{Domain, Protocol as SockProtocol, SockRef, Socket, Type};
  use std::io;
-@@ -83,6 +84,7 @@ pub(crate) struct Context {
+@@ -83,6 +84,8 @@ pub(crate) struct Context {
      next_client_id: Arc<AtomicU64>,
      next_tunnel_id: Arc<AtomicU64>,
      pub connection_limiter: Option<Arc<ConnectionLimiter>>,
 +    active_sessions: Arc<AtomicU64>,
++    unauthenticated_closes: Arc<UnauthenticatedCloses>,
  }
  
  impl Context {
-@@ -160,12 +162,20 @@ impl Core {
+@@ -160,12 +163,21 @@ impl Core {
                  next_client_id: Default::default(),
                  next_tunnel_id: Default::default(),
                  connection_limiter,
 +                active_sessions: Default::default(),
++                unauthenticated_closes: Default::default(),
              }),
          })
      }
@@ -109,26 +127,63 @@ index adeb055..70cc9e3 100644
          let listen_tcp = async {
              self.listen_tcp()
                  .await
-@@ -712,6 +722,10 @@ impl Core {
+@@ -202,10 +214,21 @@ impl Core {
+ 
+         let mut fatal_error_rx = self.context.fatal_error.subscribe();
+ 
++        let report_unauthenticated_closes = async {
++            let mut interval = tokio::time::interval(session_log::UNAUTHENTICATED_REPORT_INTERVAL);
++            loop {
++                interval.tick().await;
++                if let Some(line) = self.context.unauthenticated_closes.take_summary() {
++                    info!("{}", line);
++                }
++            }
++        };
++
+         tokio::select! {
+             x = shutdown_notification.wait() => {
+                 x.map_err(|e| io::Error::other(format!("{}", e)))
+             },
++            _ = report_unauthenticated_closes => Ok(()),
+             x = fatal_error_rx.changed() => match x {
+                 Ok(()) => match fatal_error_rx.borrow().clone() {
+                     Some(e) => Err(e.into_io_error()),
+@@ -712,11 +735,18 @@ impl Core {
              }
              _ => None,
          };
-+        let mut session = SessionRecord::new(protocol, context.active_sessions.clone());
-+        if let Some(username) = &username_for_counter {
-+            session.set_user(username);
-+        }
++        let mut session = SessionRecord::new(
++            protocol,
++            context.authenticator.is_some(),
++            context.active_sessions.clone(),
++            context.unauthenticated_closes.clone(),
++            tunnel_id.clone(),
++        );
          let conn_key = tunnel_id.to_string();
          let _metrics_guard = Arc::clone(&context.metrics).client_sessions_counter(
              protocol,
-@@ -739,12 +753,23 @@ impl Core {
+             conn_key,
+-            username_for_counter,
++            username_for_counter.clone(),
+         );
+ 
+         let (authentication_policy, sni_connection_guard) =
+@@ -726,6 +756,9 @@ impl Core {
+                     let auth = authentication::Source::Sni(credentials.into());
+                     match authenticator.authenticate(&auth, &tunnel_id) {
+                         authentication::Status::Pass => {
++                            session
++                                .stats
++                                .on_authenticated(username_for_counter.as_deref());
+                             let guard = context.connection_limiter.as_ref().and_then(|limiter| {
+                                 let creds = match &auth {
+                                     authentication::Source::Sni(s) => s.as_ref(),
+@@ -739,12 +772,15 @@ impl Core {
                                      tunnel_id,
                                      "Connection limit exceeded for SNI-authenticated client"
                                  );
-+                                if let Some(line) = session
-+                                    .close_line(&CloseReason::AuthRejected("connection limit"))
-+                                {
-+                                    log_id!(info, tunnel_id, "{}", line);
-+                                }
++                                session.close(CloseReason::AuthRejected("connection limit"));
                                  return;
                              }
                              (tunnel::AuthenticationPolicy::Authenticated(auth), guard)
@@ -136,15 +191,11 @@ index adeb055..70cc9e3 100644
                          authentication::Status::Reject => {
                              log_id!(debug, tunnel_id, "SNI authentication failed");
 +                            session.stats.auth_failures.fetch_add(1, Ordering::Relaxed);
-+                            if let Some(line) = session
-+                                .close_line(&CloseReason::AuthRejected("credentials rejected"))
-+                            {
-+                                log_id!(info, tunnel_id, "{}", line);
-+                            }
++                            session.close(CloseReason::AuthRejected("credentials rejected"));
                              return;
                          }
                      }
-@@ -759,6 +784,7 @@ impl Core {
+@@ -759,6 +795,7 @@ impl Core {
              authentication_policy,
              sni_connection_guard,
              tunnel_id.clone(),
@@ -152,11 +203,12 @@ index adeb055..70cc9e3 100644
          );
  
          log_id!(trace, tunnel_id, "Listening for client tunnel");
-@@ -814,6 +840,7 @@ impl Default for Context {
+@@ -814,6 +851,8 @@ impl Default for Context {
              next_client_id: Default::default(),
              next_tunnel_id: Default::default(),
              connection_limiter: None,
 +            active_sessions: Default::default(),
++            unauthenticated_closes: Default::default(),
          }
      }
  }
@@ -205,10 +257,18 @@ index b4a68d1..f64e970 100644
      let reason = e.reason();
      if reason.as_ref().is_none_or(|r| *r == Reason::NO_ERROR) {
 diff --git a/lib/src/lib.rs b/lib/src/lib.rs
-index 0995e67..3be4ad5 100644
+index 0995e67..7da496c 100644
 --- a/lib/src/lib.rs
 +++ b/lib/src/lib.rs
-@@ -38,6 +38,7 @@ mod metrics;
+@@ -13,6 +13,7 @@ pub mod net_utils;
+ pub mod rules;
+ pub mod settings;
+ pub mod shutdown;
++pub mod termination;
+ pub mod utils;
+ 
+ mod connection_limiter;
+@@ -38,6 +39,7 @@ mod metrics;
  mod pipe;
  mod quic_multiplexer;
  mod reverse_proxy;
@@ -216,13 +276,28 @@ index 0995e67..3be4ad5 100644
  mod socks5_client;
  mod socks5_forwarder;
  mod tcp_forwarder;
+diff --git a/lib/src/log_utils.rs b/lib/src/log_utils.rs
+index 44967bd..2d91203 100644
+--- a/lib/src/log_utils.rs
++++ b/lib/src/log_utils.rs
+@@ -53,7 +53,9 @@ impl Log for StdoutLogger {
+         }
+     }
+ 
+-    fn flush(&self) {}
++    fn flush(&self) {
++        let _ = std::io::stdout().flush();
++    }
+ }
+ 
+ impl FileLogger {
 diff --git a/lib/src/quic_multiplexer.rs b/lib/src/quic_multiplexer.rs
-index 5181900..2c055ae 100644
+index 5181900..aeb4571 100644
 --- a/lib/src/quic_multiplexer.rs
 +++ b/lib/src/quic_multiplexer.rs
 @@ -1,4 +1,5 @@
  use crate::http_codec::{RequestHeaders, ResponseHeaders};
-+use crate::session_log::QuicCloseInfo;
++use crate::session_log::{self, QuicCloseInfo};
  use crate::settings::Settings;
  use crate::tls_demultiplexer::TlsDemux;
  use crate::utils::Either;
@@ -242,38 +317,89 @@ index 5181900..2c055ae 100644
          })
      }
  
-@@ -963,7 +966,13 @@ impl QuicSocket {
+@@ -916,6 +919,7 @@ impl QuicSocket {
+ 
+     pub async fn listen(&self) -> io::Result<QuicSocketEvent> {
+         loop {
++            let mut channel_closed = false;
+             let event = loop {
+                 match self.process_pending_h3_events()? {
+                     None => {
+@@ -943,16 +947,13 @@ impl QuicSocket {
+                     Some(event) => break Some(event),
+                 }
+ 
+-                match self
+-                    .conn_rx
+-                    .lock()
+-                    .await
+-                    .recv()
+-                    .await
+-                    .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?
+-                {
+-                    MultiplexerMessage::PollH3 => (),
+-                    MultiplexerMessage::Close => break None,
++                match self.conn_rx.lock().await.recv().await {
++                    Some(MultiplexerMessage::PollH3) => (),
++                    Some(MultiplexerMessage::Close) => break None,
++                    None => {
++                        channel_closed = true;
++                        break None;
++                    }
+                 }
+             };
+ 
+@@ -963,6 +964,20 @@ impl QuicSocket {
                      .lock()
                      .unwrap()
                      .try_send(SocketMessage::Close(quic_conn.source_id().into_owned()));
--                return Err(io::Error::from(ErrorKind::UnexpectedEof));
 +                return Err(QuicCloseInfo {
 +                    timed_out: quic_conn.is_timed_out(),
-+                    idle_timeout: self.idle_timeout,
++                    idle_timeout: session_log::effective_quic_idle_timeout(
++                        self.idle_timeout,
++                        quic_conn
++                            .peer_transport_params()
++                            .map_or(0, |p| p.max_idle_timeout),
++                    ),
 +                    peer_error: quic_conn.peer_error().map(|e| (e.is_app, e.error_code)),
 +                    local_error: quic_conn.local_error().map(|e| (e.is_app, e.error_code)),
 +                }
 +                .into_io_error());
++            }
++            if channel_closed {
+                 return Err(io::Error::from(ErrorKind::UnexpectedEof));
              }
  
-             match event {
 diff --git a/lib/src/session_log.rs b/lib/src/session_log.rs
 new file mode 100644
-index 0000000..202c582
+index 0000000..5f99390
 --- /dev/null
 +++ b/lib/src/session_log.rs
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,798 @@
 +use crate::settings::Settings;
 +use crate::tls_demultiplexer::Protocol;
++use crate::{log_id, log_utils};
++use once_cell::sync::Lazy;
++use std::collections::BTreeMap;
 +use std::fmt::{Display, Formatter};
 +use std::io;
 +use std::io::ErrorKind;
-+use std::sync::atomic::{AtomicU64, Ordering};
-+use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::sync::{Arc, Mutex, OnceLock};
 +use std::time::{Duration, Instant};
 +
 +const H3_NO_ERROR: u64 = 0x100;
 +const QUIC_CRYPTO_ERRORS: std::ops::RangeInclusive<u64> = 0x100..=0x1ff;
++
++/// Interval of the summary of closed sessions which never authenticated
++pub(crate) const UNAUTHENTICATED_REPORT_INTERVAL: Duration = Duration::from_secs(60);
++
++/// Key of the user tags. It is random per process, so tags cannot be reversed by hashing
++/// candidate usernames and are comparable only within one endpoint run.
++static USER_TAG_KEY: Lazy<ring::hmac::Key> = Lazy::new(|| {
++    ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &ring::rand::SystemRandom::new())
++        .expect("Couldn't generate the user tag key")
++});
 +
 +#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 +pub(crate) enum Side {
@@ -281,7 +407,7 @@ index 0000000..202c582
 +    Server,
 +}
 +
-+/// Why a client session (one HTTP/2 or HTTP/3 connection carrying a tunnel) ended
++/// Why a client session (one HTTP connection carrying a tunnel) ended
 +#[derive(Debug, Clone, PartialEq, Eq)]
 +pub(crate) enum CloseReason {
 +    /// Orderly close: EOF, GOAWAY or CONNECTION_CLOSE without an error code
@@ -290,11 +416,13 @@ index 0000000..202c582
 +    PeerReset,
 +    /// No new tunnel requests within `client_listener_timeout`
 +    IdleTimeout(Duration),
-+    /// QUIC idle timeout expired: no packets from the client within `max_idle_timeout`
++    /// QUIC idle timeout expired: no packets from the client within the effective
++    /// idle timeout (the smaller of the server and the client values)
 +    QuicIdleTimeout(Duration),
-+    /// TCP keepalive probes went unanswered
++    /// TCP keepalive probes or retransmissions went unanswered (ETIMEDOUT)
 +    KeepaliveTimeout,
-+    /// TLS / QUIC crypto error
++    /// TLS error: an alert received from the client (`by: Client`, `code` is the alert)
++    /// or a TLS / QUIC crypto error
 +    TlsError { by: Side, code: Option<u64> },
 +    /// HTTP/2 GOAWAY or QUIC CONNECTION_CLOSE with an error code
 +    ProtocolError { by: Side, code: u64, app: bool },
@@ -302,6 +430,10 @@ index 0000000..202c582
 +    Shutdown,
 +    /// The session was closed because its credentials were rejected
 +    AuthRejected(&'static str),
++    /// The HTTP library failed without a protocol code or an I/O error
++    Internal,
++    /// The session task ended without a close reason, e.g. it panicked or was cancelled
++    Aborted,
 +    /// Any other I/O error
 +    Io(ErrorKind),
 +}
@@ -356,6 +488,17 @@ index 0000000..202c582
 +    }
 +}
 +
++/// The QUIC idle timeout in effect: the smaller of the local and the peer
++/// `max_idle_timeout`, where zero means no limit (RFC 9000, section 10.1)
++pub(crate) fn effective_quic_idle_timeout(local: Duration, peer_ms: u64) -> Duration {
++    let peer = Duration::from_millis(peer_ms);
++    match (local.is_zero(), peer.is_zero()) {
++        (false, false) => local.min(peer),
++        (true, _) => peer,
++        (false, true) => local,
++    }
++}
++
 +impl CloseReason {
 +    /// Classify an error which ended the session listener
 +    pub fn from_io_error(e: &io::Error) -> Self {
@@ -366,13 +509,16 @@ index 0000000..202c582
 +            if let Some(h2) = inner.downcast_ref::<h2::Error>() {
 +                return Self::from_h2_error(h2);
 +            }
++            if let Some(tls) = inner.downcast_ref::<rustls::Error>() {
++                return Self::from_tls_error(tls);
++            }
 +        }
 +        Self::from_plain_io_error(e)
 +    }
 +
 +    fn from_h2_error(e: &h2::Error) -> Self {
 +        if let Some(io) = e.get_io() {
-+            return Self::from_plain_io_error(io);
++            return Self::from_io_error(io);
 +        }
 +        let by = if e.is_remote() {
 +            Side::Client
@@ -380,12 +526,25 @@ index 0000000..202c582
 +            Side::Server
 +        };
 +        match e.reason() {
-+            None => Self::PeerClosed { code: None },
++            None => Self::Internal,
 +            Some(r) if r == h2::Reason::NO_ERROR => Self::PeerClosed { code: Some(0) },
 +            Some(r) => Self::ProtocolError {
 +                by,
 +                code: u32::from(r) as u64,
 +                app: false,
++            },
++        }
++    }
++
++    fn from_tls_error(e: &rustls::Error) -> Self {
++        match e {
++            rustls::Error::AlertReceived(alert) => Self::TlsError {
++                by: Side::Client,
++                code: Some(u8::from(*alert) as u64),
++            },
++            _ => Self::TlsError {
++                by: Side::Server,
++                code: None,
 +            },
 +        }
 +    }
@@ -399,10 +558,6 @@ index 0000000..202c582
 +            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe => {
 +                Self::PeerReset
 +            }
-+            ErrorKind::InvalidData => Self::TlsError {
-+                by: Side::Server,
-+                code: None,
-+            },
 +            ErrorKind::PermissionDenied => Self::AuthRejected("connection limit"),
 +            kind => Self::Io(kind),
 +        }
@@ -419,6 +574,8 @@ index 0000000..202c582
 +            Self::ProtocolError { .. } => "protocol_error",
 +            Self::Shutdown => "server_shutdown",
 +            Self::AuthRejected(_) => "auth_rejected",
++            Self::Internal => "internal_error",
++            Self::Aborted => "aborted",
 +            Self::Io(_) => "io_error",
 +        }
 +    }
@@ -464,6 +621,55 @@ index 0000000..202c582
 +    pub bytes_down: AtomicU64,
 +    pub streams: AtomicU64,
 +    pub auth_failures: AtomicU64,
++    authenticated: AtomicBool,
++    user_tag: OnceLock<String>,
++}
++
++impl SessionStats {
++    /// Mark the session as authenticated. `username` must come from credentials
++    /// which passed the authentication.
++    pub fn on_authenticated(&self, username: Option<&str>) {
++        self.authenticated.store(true, Ordering::Relaxed);
++        if let Some(username) = username {
++            let _ = self.user_tag.set(user_tag(username));
++        }
++    }
++}
++
++/// Counts closed sessions which never authenticated, so that scanners and rejected
++/// clients produce one periodic summary instead of a line per connection
++#[derive(Default)]
++pub(crate) struct UnauthenticatedCloses {
++    by_reason: Mutex<BTreeMap<&'static str, u64>>,
++}
++
++impl UnauthenticatedCloses {
++    fn add(&self, reason: &CloseReason) {
++        *self
++            .by_reason
++            .lock()
++            .unwrap()
++            .entry(reason.name())
++            .or_default() += 1;
++    }
++
++    /// Take the summary of the sessions counted since the previous call
++    pub fn take_summary(&self) -> Option<String> {
++        let counts = std::mem::take(&mut *self.by_reason.lock().unwrap());
++        if counts.is_empty() {
++            return None;
++        }
++        let total: u64 = counts.values().sum();
++        let details = counts
++            .iter()
++            .map(|(name, n)| format!("{}={}", name, n))
++            .collect::<Vec<_>>()
++            .join(" ");
++        Some(format!(
++            "Unauthenticated sessions closed: {} ({})",
++            total, details
++        ))
++    }
 +}
 +
 +/// Tracks a client session from creation until it is closed and logs the close record
@@ -471,44 +677,63 @@ index 0000000..202c582
 +    sid: u32,
 +    protocol: Protocol,
 +    started: Instant,
-+    user_tag: Option<String>,
 +    pub stats: Arc<SessionStats>,
 +    active_sessions: Arc<AtomicU64>,
++    unauthenticated: Arc<UnauthenticatedCloses>,
++    log_id: log_utils::IdChain<u64>,
++    finished: bool,
 +}
 +
 +impl SessionRecord {
-+    pub fn new(protocol: Protocol, active_sessions: Arc<AtomicU64>) -> Self {
++    /// `auth_required` tells whether the endpoint has an authenticator; without one every
++    /// session counts as authenticated
++    pub fn new(
++        protocol: Protocol,
++        auth_required: bool,
++        active_sessions: Arc<AtomicU64>,
++        unauthenticated: Arc<UnauthenticatedCloses>,
++        log_id: log_utils::IdChain<u64>,
++    ) -> Self {
 +        active_sessions.fetch_add(1, Ordering::Relaxed);
++        let stats = SessionStats::default();
++        if !auth_required {
++            stats.authenticated.store(true, Ordering::Relaxed);
++        }
 +        Self {
 +            sid: rand::random(),
 +            protocol,
 +            started: Instant::now(),
-+            user_tag: None,
-+            stats: Default::default(),
++            stats: Arc::new(stats),
 +            active_sessions,
++            unauthenticated,
++            log_id,
++            finished: false,
 +        }
 +    }
 +
-+    pub fn has_user(&self) -> bool {
-+        self.user_tag.is_some()
++    /// Log the close record, once per session
++    pub fn close(&mut self, reason: CloseReason) {
++        if let Some(line) = self.finish(&reason) {
++            log_id!(info, self.log_id, "{}", line);
++        }
 +    }
 +
-+    /// Remember the session owner as a short digest of the username, never the name itself
-+    pub fn set_user(&mut self, username: &str) {
-+        self.user_tag = Some(user_tag(username));
-+    }
-+
-+    /// Format the close record. Returns `None` for sessions closed by an endpoint shutdown,
-+    /// which are reported once in a summary instead.
-+    pub fn close_line(&self, reason: &CloseReason) -> Option<String> {
-+        if *reason == CloseReason::Shutdown {
++    /// Finish the session and format its close record. Returns `None` if the session is
++    /// already finished, was closed by an endpoint shutdown (reported in a summary), or never
++    /// authenticated (counted in [`UnauthenticatedCloses`]).
++    fn finish(&mut self, reason: &CloseReason) -> Option<String> {
++        if std::mem::replace(&mut self.finished, true) || *reason == CloseReason::Shutdown {
++            return None;
++        }
++        if !self.stats.authenticated.load(Ordering::Relaxed) {
++            self.unauthenticated.add(reason);
 +            return None;
 +        }
 +        Some(format!(
 +            "Session closed: sid={:08x} proto={} user={} duration={:.1}s {} bytes_up={} bytes_down={} streams={} auth_failures={}",
 +            self.sid,
 +            proto_name(self.protocol),
-+            self.user_tag.as_deref().unwrap_or("-"),
++            self.stats.user_tag.get().map(String::as_str).unwrap_or("-"),
 +            self.started.elapsed().as_secs_f64(),
 +            reason,
 +            self.stats.bytes_up.load(Ordering::Relaxed),
@@ -521,6 +746,7 @@ index 0000000..202c582
 +
 +impl Drop for SessionRecord {
 +    fn drop(&mut self) {
++        self.close(CloseReason::Aborted);
 +        self.active_sessions.fetch_sub(1, Ordering::Relaxed);
 +    }
 +}
@@ -534,14 +760,19 @@ index 0000000..202c582
 +}
 +
 +fn user_tag(username: &str) -> String {
-+    let digest = ring::digest::digest(&ring::digest::SHA256, username.as_bytes());
-+    format!("u:{}", hex::encode(&digest.as_ref()[..4]))
++    user_tag_with_key(&USER_TAG_KEY, username)
++}
++
++fn user_tag_with_key(key: &ring::hmac::Key, username: &str) -> String {
++    let tag = ring::hmac::sign(key, username.as_bytes());
++    format!("u:{}", hex::encode(&tag.as_ref()[..4]))
 +}
 +
 +/// Describe the timeouts which may close an idle client session
 +pub(crate) fn timeouts_line(settings: &Settings) -> String {
 +    format!(
-+        "Session timeouts: client_listener_timeout={}s (closes h2/h3 sessions without new tunnel requests; also QUIC max_idle_timeout, closes h3 sessions without packets), tls_handshake_timeout={}s, tcp_connections_timeout={}s, udp_connections_timeout={}s, tcp_keepalive=on ({})",
++        "Session timeouts: client_listener_timeout={}s (closes h2/h3 sessions without new tunnel requests), quic_max_idle_timeout={}s (h3 sessions without packets are closed after the smaller of this and the client's value), tls_handshake_timeout={}s, tcp_connections_timeout={}s, udp_connections_timeout={}s, tcp_keepalive=on ({})",
++        settings.client_listener_timeout.as_secs(),
 +        settings.client_listener_timeout.as_secs(),
 +        settings.tls_handshake_timeout.as_secs(),
 +        settings.tcp_connections_timeout.as_secs(),
@@ -572,8 +803,20 @@ index 0000000..202c582
 +mod tests {
 +    use super::*;
 +
++    fn record_with(auth_required: bool, unauth: Arc<UnauthenticatedCloses>) -> SessionRecord {
++        SessionRecord::new(
++            Protocol::Http3,
++            auth_required,
++            Default::default(),
++            unauth,
++            log_utils::IdChain::empty(),
++        )
++    }
++
 +    fn record() -> SessionRecord {
-+        SessionRecord::new(Protocol::Http3, Default::default())
++        let r = record_with(true, Default::default());
++        r.stats.on_authenticated(None);
++        r
 +    }
 +
 +    #[test]
@@ -639,14 +882,35 @@ index 0000000..202c582
 +    }
 +
 +    #[test]
-+    fn tls_error() {
-+        let e = io::Error::new(ErrorKind::InvalidData, "bad record mac");
++    fn tls_alert_from_client() {
++        let e = io::Error::new(
++            ErrorKind::InvalidData,
++            rustls::Error::AlertReceived(rustls::AlertDescription::BadCertificate),
++        );
++        assert_eq!(
++            CloseReason::from_io_error(&e).to_string(),
++            "reason=tls_error by=client code=0x2a"
++        );
++    }
++
++    #[test]
++    fn tls_error_detected_by_server() {
++        let e = io::Error::new(ErrorKind::InvalidData, rustls::Error::DecryptError);
 +        assert_eq!(
 +            CloseReason::from_io_error(&e),
 +            CloseReason::TlsError {
 +                by: Side::Server,
 +                code: None
 +            }
++        );
++    }
++
++    #[test]
++    fn invalid_data_without_tls_error_is_io_error() {
++        let e = io::Error::new(ErrorKind::InvalidData, "bad frame");
++        assert_eq!(
++            CloseReason::from_io_error(&e).to_string(),
++            "reason=io_error kind=InvalidData"
 +        );
 +    }
 +
@@ -672,16 +936,31 @@ index 0000000..202c582
 +    fn quic_idle_timeout() {
 +        let e = QuicCloseInfo {
 +            timed_out: true,
-+            idle_timeout: Duration::from_secs(600),
++            idle_timeout: effective_quic_idle_timeout(Duration::from_secs(600), 30_000),
 +            ..Default::default()
 +        }
 +        .into_io_error();
 +        let reason = CloseReason::from_io_error(&e);
 +        assert_eq!(
 +            reason,
-+            CloseReason::QuicIdleTimeout(Duration::from_secs(600))
++            CloseReason::QuicIdleTimeout(Duration::from_secs(30))
 +        );
-+        assert_eq!(reason.to_string(), "reason=quic_idle_timeout after=600s");
++        assert_eq!(reason.to_string(), "reason=quic_idle_timeout after=30s");
++    }
++
++    #[test]
++    fn effective_idle_timeout() {
++        let local = Duration::from_secs(600);
++        assert_eq!(
++            effective_quic_idle_timeout(local, 30_000),
++            Duration::from_secs(30)
++        );
++        assert_eq!(effective_quic_idle_timeout(local, 900_000), local);
++        assert_eq!(effective_quic_idle_timeout(local, 0), local);
++        assert_eq!(
++            effective_quic_idle_timeout(Duration::ZERO, 30_000),
++            Duration::from_secs(30)
++        );
 +    }
 +
 +    #[test]
@@ -744,13 +1023,13 @@ index 0000000..202c582
 +
 +    #[test]
 +    fn idle_timeout_line() {
-+        let mut r = record();
++        let mut r = record_with(true, Default::default());
 +        r.stats.bytes_up.store(1234, Ordering::Relaxed);
 +        r.stats.bytes_down.store(56789, Ordering::Relaxed);
 +        r.stats.streams.store(7, Ordering::Relaxed);
-+        r.set_user("alice@example.com");
++        r.stats.on_authenticated(Some("alice@example.com"));
 +        let line = r
-+            .close_line(&CloseReason::IdleTimeout(Duration::from_secs(600)))
++            .finish(&CloseReason::IdleTimeout(Duration::from_secs(600)))
 +            .unwrap();
 +        assert!(line.starts_with("Session closed: sid="), "{}", line);
 +        assert!(line.contains(" proto=h3 "), "{}", line);
@@ -769,13 +1048,58 @@ index 0000000..202c582
 +    }
 +
 +    #[test]
++    fn user_tag_is_keyed() {
++        let name = "alice@example.com";
++        let digest = ring::digest::digest(&ring::digest::SHA256, name.as_bytes());
++        let unkeyed = format!("u:{}", hex::encode(&digest.as_ref()[..4]));
++        assert_ne!(user_tag(name), unkeyed);
++        assert_eq!(user_tag(name), user_tag(name));
++
++        let key = |k: &[u8]| ring::hmac::Key::new(ring::hmac::HMAC_SHA256, k);
++        assert_ne!(
++            user_tag_with_key(&key(b"key-1"), name),
++            user_tag_with_key(&key(b"key-2"), name)
++        );
++        assert!(user_tag(name).starts_with("u:") && user_tag(name).len() == 10);
++    }
++
++    #[test]
++    fn user_is_set_only_by_authentication() {
++        let mut r = record_with(false, Default::default());
++        let line = r.finish(&CloseReason::PeerClosed { code: None }).unwrap();
++        assert!(line.contains(" user=- "), "{}", line);
++    }
++
++    #[test]
++    fn unauthenticated_sessions_are_aggregated() {
++        let unauth = Arc::new(UnauthenticatedCloses::default());
++        let mut lines = 0;
++        for i in 0..1000 {
++            let mut r = record_with(true, unauth.clone());
++            r.stats.auth_failures.fetch_add(1, Ordering::Relaxed);
++            let reason = if i % 4 == 0 {
++                CloseReason::PeerClosed { code: None }
++            } else {
++                CloseReason::AuthRejected("credentials rejected")
++            };
++            lines += r.finish(&reason).is_some() as usize;
++        }
++        assert_eq!(lines, 0);
++        assert_eq!(
++            unauth.take_summary().unwrap(),
++            "Unauthenticated sessions closed: 1000 (auth_rejected=750 closed_by_peer=250)"
++        );
++        assert!(unauth.take_summary().is_none());
++    }
++
++    #[test]
 +    fn close_line_has_no_ip_address() {
 +        let ips = ["192.0.2.17", "2001:db8::1", "::ffff:192.0.2.17"];
 +        let reasons = [
 +            CloseReason::PeerClosed { code: Some(0) },
 +            CloseReason::PeerReset,
 +            CloseReason::IdleTimeout(Duration::from_secs(600)),
-+            CloseReason::QuicIdleTimeout(Duration::from_secs(600)),
++            CloseReason::QuicIdleTimeout(Duration::from_secs(30)),
 +            CloseReason::KeepaliveTimeout,
 +            CloseReason::TlsError {
 +                by: Side::Client,
@@ -787,12 +1111,14 @@ index 0000000..202c582
 +                app: false,
 +            },
 +            CloseReason::AuthRejected("connection limit"),
++            CloseReason::Internal,
++            CloseReason::Aborted,
 +            CloseReason::Io(ErrorKind::Other),
 +        ];
-+        let mut r = record();
-+        r.set_user("192.0.2.17");
 +        for reason in reasons {
-+            let line = r.close_line(&reason).unwrap();
++            let mut r = record_with(true, Default::default());
++            r.stats.on_authenticated(Some("192.0.2.17"));
++            let line = r.finish(&reason).unwrap();
 +            for ip in ips {
 +                assert!(!line.contains(ip), "{}", line);
 +            }
@@ -805,14 +1131,37 @@ index 0000000..202c582
 +
 +    #[test]
 +    fn shutdown_is_not_logged_per_session() {
-+        assert!(record().close_line(&CloseReason::Shutdown).is_none());
++        assert!(record().finish(&CloseReason::Shutdown).is_none());
++    }
++
++    #[test]
++    fn session_is_finished_once() {
++        let mut r = record();
++        assert!(r.finish(&CloseReason::PeerClosed { code: None }).is_some());
++        assert!(r.finish(&CloseReason::Aborted).is_none());
++    }
++
++    #[test]
++    fn dropped_session_is_reported_as_aborted() {
++        let mut r = record();
++        let line = r.finish(&CloseReason::Aborted).unwrap();
++        assert!(line.contains(" reason=aborted "), "{}", line);
 +    }
 +
 +    #[test]
 +    fn active_sessions_counter() {
 +        let active = Arc::new(AtomicU64::new(0));
-+        let a = SessionRecord::new(Protocol::Http2, active.clone());
-+        let b = SessionRecord::new(Protocol::Http3, active.clone());
++        let new = || {
++            SessionRecord::new(
++                Protocol::Http2,
++                false,
++                active.clone(),
++                Default::default(),
++                log_utils::IdChain::empty(),
++            )
++        };
++        let a = new();
++        let b = new();
 +        assert_eq!(active.load(Ordering::Relaxed), 2);
 +        drop(a);
 +        assert_eq!(active.load(Ordering::Relaxed), 1);
@@ -825,8 +1174,73 @@ index 0000000..202c582
 +        assert_ne!(record().sid, record().sid);
 +    }
 +}
+diff --git a/lib/src/termination.rs b/lib/src/termination.rs
+new file mode 100644
+index 0000000..77e0f12
+--- /dev/null
++++ b/lib/src/termination.rs
+@@ -0,0 +1,59 @@
++use std::io;
++use std::thread::JoinHandle;
++
++fn sigterm_set() -> libc::sigset_t {
++    // SAFETY: `sigemptyset` initializes the set before `sigaddset` uses it
++    unsafe {
++        let mut set = std::mem::zeroed();
++        libc::sigemptyset(&mut set);
++        libc::sigaddset(&mut set, libc::SIGTERM);
++        set
++    }
++}
++
++fn set_sigterm_mask(how: libc::c_int) -> io::Result<()> {
++    let set = sigterm_set();
++    // SAFETY: `set` is a valid initialized signal set
++    match unsafe { libc::pthread_sigmask(how, &set, std::ptr::null_mut()) } {
++        0 => Ok(()),
++        e => Err(io::Error::from_raw_os_error(e)),
++    }
++}
++
++/// Block SIGTERM in the calling thread. Threads spawned afterwards inherit the mask,
++/// so this must be called before any other thread is started.
++pub fn block_sigterm() -> io::Result<()> {
++    set_sigterm_mask(libc::SIG_BLOCK)
++}
++
++/// Wait for SIGTERM on a dedicated thread, which does not depend on the async runtime.
++/// On the signal, log the line returned by `summary`, flush the logger and terminate
++/// the process by the default SIGTERM action, so the parent still sees the signal status.
++/// Requires [`block_sigterm`] to have been called first.
++pub fn spawn_sigterm_handler<F>(summary: F) -> io::Result<JoinHandle<()>>
++where
++    F: FnOnce() -> String + Send + 'static,
++{
++    std::thread::Builder::new()
++        .name("sigterm".to_string())
++        .spawn(move || {
++            let set = sigterm_set();
++            let mut signal = 0;
++            // SAFETY: `set` is a valid initialized signal set, `signal` is a valid output
++            if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
++                error!("Waiting for SIGTERM failed");
++                return;
++            }
++            info!("{}", summary());
++            log::logger().flush();
++            // SAFETY: restoring the default disposition and re-raising the signal
++            // on this thread terminates the process as an unhandled SIGTERM would
++            unsafe {
++                libc::signal(libc::SIGTERM, libc::SIG_DFL);
++            }
++            let _ = set_sigterm_mask(libc::SIG_UNBLOCK);
++            unsafe {
++                libc::raise(libc::SIGTERM);
++            }
++        })
++}
 diff --git a/lib/src/tunnel.rs b/lib/src/tunnel.rs
-index a6c2aaa..1c19a01 100644
+index a6c2aaa..ca0ae7e 100644
 --- a/lib/src/tunnel.rs
 +++ b/lib/src/tunnel.rs
 @@ -6,6 +6,7 @@ use crate::downstream::{
@@ -871,7 +1285,7 @@ index a6c2aaa..1c19a01 100644
          }
      }
  
-@@ -95,15 +102,24 @@ impl Tunnel {
+@@ -95,15 +102,22 @@ impl Tunnel {
              let shutdown = self.context.shutdown.lock().unwrap();
              (shutdown.notification_handler(), shutdown.completion_guard())
          };
@@ -885,19 +1299,18 @@ index a6c2aaa..1c19a01 100644
                  }
              }
              x = self.listen_inner() => x,
+-        }
 +        };
 +        let reason = self.close_reason.take().unwrap_or_else(|| match &result {
 +            Ok(()) => CloseReason::PeerClosed { code: None },
 +            Err(e) => CloseReason::from_io_error(e),
 +        });
-+        if let Some(line) = self.session.close_line(&reason) {
-+            log_id!(info, self.id, "{}", line);
-         }
++        self.session.close(reason);
 +        result
      }
  
      fn resolve_username(
-@@ -135,6 +151,7 @@ impl Tunnel {
+@@ -135,6 +149,7 @@ impl Tunnel {
              {
                  Ok(Ok(None)) => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
@@ -905,7 +1318,7 @@ index a6c2aaa..1c19a01 100644
                      return Ok(());
                  }
                  Ok(Ok(Some(r))) => {
-@@ -143,18 +160,30 @@ impl Tunnel {
+@@ -143,18 +158,25 @@ impl Tunnel {
                  }
                  Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
@@ -927,16 +1340,11 @@ index a6c2aaa..1c19a01 100644
              };
  
 +            self.session.stats.streams.fetch_add(1, Ordering::Relaxed);
-+            if !self.session.has_user() {
-+                if let Some(username) = self.resolve_username(request.as_ref()) {
-+                    self.session.set_user(&username);
-+                }
-+            }
 +
              let context = self.context.clone();
              let forwarder = self.forwarder.clone();
              let tls_domain = self.downstream.tls_domain().to_string();
-@@ -166,13 +195,21 @@ impl Tunnel {
+@@ -166,13 +188,21 @@ impl Tunnel {
              } else {
                  None
              };
@@ -958,7 +1366,7 @@ index a6c2aaa..1c19a01 100644
                          metrics.add_outbound_bytes(protocol, username.as_deref(), n)
                      }
                  }
-@@ -213,6 +250,8 @@ impl Tunnel {
+@@ -213,6 +243,8 @@ impl Tunnel {
                                      request.fail_request(ConnectionError::Authentication(
                                          "Connection limit exceeded".to_string(),
                                      ));
@@ -967,11 +1375,141 @@ index a6c2aaa..1c19a01 100644
                                      return Err(io::Error::new(
                                          ErrorKind::PermissionDenied,
                                          "Connection limit exceeded",
-@@ -250,6 +289,7 @@ impl Tunnel {
+@@ -248,8 +280,18 @@ impl Tunnel {
+                 ) {
+                     (Ok(Some(source)), _, Some(authenticator)) => {
                          match authenticator.authenticate(&source, &log_id) {
-                             Status::Pass => Some(source),
+-                            Status::Pass => Some(source),
++                            Status::Pass => {
++                                let username = match &source {
++                                    authentication::Source::ProxyBasic(s) => {
++                                        decode_username(s.as_ref())
++                                    }
++                                    authentication::Source::Sni(s) => decode_username(s.as_ref()),
++                                };
++                                session_stats.on_authenticated(username.as_deref());
++                                Some(source)
++                            }
                              Status::Reject => {
 +                                session_stats.auth_failures.fetch_add(1, Ordering::Relaxed);
                                  let err = ConnectionError::Authentication(
                                      "Authentication failed".to_string(),
                                  );
+diff --git a/lib/tests/sigterm.rs b/lib/tests/sigterm.rs
+new file mode 100644
+index 0000000..9c928a2
+--- /dev/null
++++ b/lib/tests/sigterm.rs
+@@ -0,0 +1,112 @@
++//! Runs without the libtest harness: the harness starts threads before a test body runs,
++//! and SIGTERM must be blocked before any thread exists. The binary re-executes itself
++//! as the child process under test.
++
++use std::io::{BufRead, BufReader, Read};
++use std::os::unix::process::ExitStatusExt;
++use std::process::{Command, Stdio};
++use std::time::Duration;
++use trusttunnel::{log_utils, termination};
++
++const CHILD_ENV: &str = "TT_SIGTERM_CHILD";
++const LOG_FILE_ENV: &str = "TT_SIGTERM_LOG_FILE";
++const SUMMARY: &str = "Shutdown (SIGTERM): 3 sessions closed";
++
++fn main() {
++    match std::env::var(CHILD_ENV) {
++        Ok(mode) => child(&mode),
++        Err(_) => parent(),
++    }
++}
++
++fn child(mode: &str) {
++    termination::block_sigterm().unwrap();
++    let log_file = std::env::var(LOG_FILE_ENV).ok();
++    log::set_logger(match &log_file {
++        None => log_utils::make_stdout_logger(),
++        Some(path) => log_utils::make_file_logger(path).unwrap(),
++    })
++    .unwrap();
++    log::set_max_level(log::LevelFilter::Info);
++    termination::spawn_sigterm_handler(|| SUMMARY.to_string()).unwrap();
++
++    let rt = tokio::runtime::Builder::new_multi_thread()
++        .worker_threads(2)
++        .enable_all()
++        .build()
++        .unwrap();
++    rt.block_on(async {
++        if mode == "busy" {
++            for _ in 0..2 {
++                tokio::spawn(async {
++                    loop {
++                        std::thread::sleep(Duration::from_secs(1));
++                    }
++                });
++            }
++        }
++        println!("READY");
++        if mode == "busy" {
++            loop {
++                std::thread::sleep(Duration::from_secs(1));
++            }
++        }
++        std::future::pending::<()>().await
++    });
++}
++
++fn run_child(mode: &str, log_file: Option<&std::path::Path>) -> (std::process::ExitStatus, String) {
++    let mut cmd = Command::new(std::env::current_exe().unwrap());
++    cmd.env(CHILD_ENV, mode).stdout(Stdio::piped());
++    if let Some(path) = log_file {
++        cmd.env(LOG_FILE_ENV, path);
++    }
++    let mut child = cmd.spawn().unwrap();
++    let mut stdout = BufReader::new(child.stdout.take().unwrap());
++    let mut line = String::new();
++    loop {
++        line.clear();
++        assert_ne!(
++            stdout.read_line(&mut line).unwrap(),
++            0,
++            "child exited early"
++        );
++        if line.trim() == "READY" {
++            break;
++        }
++    }
++    // SAFETY: plain kill(2) on the child we spawned
++    assert_eq!(
++        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
++        0
++    );
++    let mut rest = String::new();
++    stdout.read_to_string(&mut rest).unwrap();
++    (child.wait().unwrap(), rest)
++}
++
++fn check(name: &str, mode: &str, use_log_file: bool) {
++    let dir = tempfile::tempdir().unwrap();
++    let path = dir.path().join("endpoint.log");
++    let (status, stdout) = run_child(mode, use_log_file.then_some(path.as_path()));
++    assert_eq!(
++        status.signal(),
++        Some(libc::SIGTERM),
++        "{}: unexpected status {:?}",
++        name,
++        status
++    );
++    let output = if use_log_file {
++        std::fs::read_to_string(&path).unwrap()
++    } else {
++        stdout
++    };
++    assert!(output.contains(SUMMARY), "{}: output {:?}", name, output);
++    println!("test {} ... ok", name);
++}
++
++fn parent() {
++    check("sigterm_idle_runtime_stdout", "idle", false);
++    check("sigterm_busy_runtime_stdout", "busy", false);
++    check("sigterm_busy_runtime_log_file", "busy", true);
++}
