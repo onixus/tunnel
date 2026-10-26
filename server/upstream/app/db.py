@@ -329,14 +329,24 @@ def rotate_standby(target: int, conn: sqlite3.Connection | None = None) -> None:
     with _maybe(conn) as c:
         if conn is None:
             c.execute("BEGIN IMMEDIATE")
-        c.execute("DELETE FROM endpoint_standby")
-        have = 0
-        while have < target:
-            name = "t" + secrets.token_hex(8)
-            if c.execute("SELECT 1 FROM configs WHERE tt_username = ?", (name,)).fetchone():
-                continue
-            have += c.execute("INSERT OR IGNORE INTO endpoint_standby(username, password) VALUES (?, ?)",
-                              (name, secrets.token_urlsafe(32))).rowcount
+        # Ошибка на полпути не должна закоммититься вместе с транзакцией
+        # вызывающего: иначе в БД будет частичный резерв, а в загруженном
+        # endpoint'ом файле — прежний.
+        c.execute("SAVEPOINT standby_rotation")
+        try:
+            c.execute("DELETE FROM endpoint_standby")
+            have = 0
+            while have < target:
+                name = "t" + secrets.token_hex(8)
+                if c.execute("SELECT 1 FROM configs WHERE tt_username = ?", (name,)).fetchone():
+                    continue
+                have += c.execute("INSERT OR IGNORE INTO endpoint_standby(username, password) VALUES (?, ?)",
+                                  (name, secrets.token_urlsafe(32))).rowcount
+        except BaseException:
+            c.execute("ROLLBACK TO standby_rotation")
+            c.execute("RELEASE standby_rotation")
+            raise
+        c.execute("RELEASE standby_rotation")
 
 
 def create_config(user_id: int, tt_username: str, tt_password: str, label: str | None) -> int:

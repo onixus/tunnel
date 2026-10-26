@@ -158,12 +158,14 @@ class PublicationTests(unittest.TestCase):
     def test_overlay_refuses_base_without_supervisor_contract(self):
         import shutil
         source = ROOT / 'server/upstream/app'
-        for name, marker in design.SUPERVISOR_MARKERS:
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
+        old_bases = (('endpoint.py', 'SUPERVISOR_CONTRACT = 2', ''), ('endpoint.py', 'SUPERVISOR_CONTRACT = 2', 'SUPERVISOR_CONTRACT = 1'),
+                     ('db.py', 'def claim_credential(', 'def unrelated('))
+        for name, marker, replacement in old_bases:
+            with self.subTest(name=name, replacement=replacement), tempfile.TemporaryDirectory() as folder:
                 target = Path(folder) / 'app'
                 shutil.copytree(source, target)
                 installed = target / name
-                installed.write_text(installed.read_text(encoding='utf-8').replace(marker, ''), encoding='utf-8')
+                installed.write_text(installed.read_text(encoding='utf-8').replace(marker, replacement), encoding='utf-8')
                 before = (target / 'templates/base_client.html').read_bytes()
                 with self.assertRaisesRegex(RuntimeError, 'supervisor contract'):
                     design.apply(source, target)
@@ -172,6 +174,10 @@ class PublicationTests(unittest.TestCase):
             target = Path(folder) / 'app'
             shutil.copytree(source, target)
             design.apply(source, target)
+            # A later contract version is accepted.
+            installed = target / 'endpoint.py'
+            installed.write_text(installed.read_text(encoding='utf-8').replace('SUPERVISOR_CONTRACT = 2', 'SUPERVISOR_CONTRACT = 3'), encoding='utf-8')
+            design.check_supervisor(target)
 
 
 if __name__ == '__main__':

@@ -28,6 +28,18 @@ def wait_listening(port, timeout=10):
     raise AssertionError('endpoint did not start listening')
 
 
+def failing_after(calls):
+    """secrets.token_urlsafe that raises on its calls-th use (mid standby rotation)."""
+    import secrets
+    real, count = secrets.token_urlsafe, [0]
+    def token(*args):
+        count[0] += 1
+        if count[0] == calls:
+            raise RuntimeError('synthetic failure inside standby rotation')
+        return real(*args)
+    return token
+
+
 class Tunnel:
     """One authenticated client connection to the fake endpoint."""
 
@@ -84,6 +96,10 @@ class FakeEndpoint:
 
     def wait(self, port=None):
         wait_listening(port or self.port)
+
+    def loaded_usernames(self):
+        import tomllib
+        return {c['username'] for c in tomllib.loads((self.workdir/'credentials.toml').read_text()).get('client', [])}
 
     def connect(self, username, password, port=None):
         tunnel = Tunnel(port or self.port, username, password)

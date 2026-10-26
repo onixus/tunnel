@@ -234,6 +234,8 @@ class EndpointManager:
         self._watcher_stop = threading.Event()
         # Содержимое _RESTART_FILES, с которым стартовал текущий процесс.
         self._loaded: tuple | None = None
+        # Последний запуск не удался: periodic drift-check повторит его.
+        self._spawn_failed = False
         self._last_spawn = float("-inf")
         self._cv = threading.Condition()
         self._restart_requested = 0
@@ -272,10 +274,14 @@ class EndpointManager:
             )
             self._loaded = loaded
             self._last_spawn = time.monotonic()
+            self._spawn_failed = False
             print(f"[endpoint] started (pid={self._proc.pid})")
         except OSError as e:
             print(f"[endpoint] failed to start: {e}")
             self._proc = None
+            self._spawn_failed = True
+            # Ожидающий вызов получает ошибку, а не ложный успех.
+            raise RuntimeError("endpoint failed to start") from e
 
     def _kill(self) -> None:
         if self._is_running():
@@ -287,6 +293,7 @@ class EndpointManager:
                 self._proc.kill()
         self._proc = None
         self._loaded = None
+        self._spawn_failed = False
 
     def _write_credentials(self, conn=None) -> None:
         # Сначала резерв, потом выданные: выдача переносит строку из резерва в
@@ -492,7 +499,7 @@ class EndpointManager:
     def _check_drift(self) -> None:
         """Периодическая сверка: упавший процесс или файлы, не применённые из-за ошибки."""
         with self._lock:
-            if self._proc is None:
+            if self._proc is None and not self._spawn_failed:
                 return
             if not self._is_running() or self._restart_inputs() != self._loaded:
                 print("[endpoint] running process differs from configuration — reconciling")

@@ -19,7 +19,7 @@ os.environ.update(DATA_DIR=SANDBOX.name, SECRET_KEY=secrets.token_urlsafe(48), A
 sys.path.insert(0, str(ROOT/'server/upstream'))
 sys.path.insert(0, str(ROOT/'server/tests'))
 from app import config, db, endpoint
-from endpoint_harness import FakeEndpoint, free_port
+from endpoint_harness import FakeEndpoint, failing_after, free_port
 
 
 class EndpointReloadTests(unittest.TestCase):
@@ -178,6 +178,40 @@ class EndpointReloadTests(unittest.TestCase):
         self.assertEqual(len(self.spawns), 2)
         self.assertFalse(held.alive())
         self.assertEqual(self.connect(revoked).status, 'DENY')
+
+    def test_failed_standby_rotation_rolls_back_and_still_restarts(self):
+        kept, revoked = self.issue(), self.issue()
+        held = self.connect(revoked)
+        before = db.standby_credentials()
+        db.delete_config(revoked['id'])
+        with patch.object(secrets, 'token_urlsafe', side_effect=failing_after(3)):
+            self.manager.apply_credentials()
+        self.fake.wait()
+        self.assertEqual(len(self.spawns), 2)
+        self.assertEqual(db.standby_credentials(), before)
+        active = {c['username'] for c in db.active_credentials()}
+        self.assertEqual(self.fake.loaded_usernames(), active | {c['username'] for c in before})
+        self.assertFalse(held.alive())
+        self.assertEqual(self.connect(revoked).status, 'DENY')
+        self.assertEqual(self.connect(kept).status, 'OK')
+        claimed = self.issue()
+        self.assertEqual(len(self.spawns), 2)
+        self.assertEqual(self.connect(claimed).status, 'OK')
+
+    def test_failed_spawn_reaches_caller_and_drift_check_recovers(self):
+        cfg = self.issue()
+        db.delete_config(self.issue()['id'])
+        with patch.object(endpoint.subprocess, 'Popen', side_effect=OSError('synthetic exec failure')):
+            with self.assertRaisesRegex(RuntimeError, 'restart failed'):
+                self.manager.apply_credentials()
+            self.manager._watcher_stop.set()  # stop the worker's own retries; test drift-check alone
+            time.sleep(self.manager.restart_min_interval + .3)
+            self.manager._watcher_stop.clear()
+        self.assertIsNone(self.manager._proc)
+        self.manager._check_drift()
+        self.fake.wait()
+        self.assertEqual(len(self.spawns), 2)
+        self.assertEqual(self.connect(cfg).status, 'OK')
 
     def test_standby_is_replaced_on_restart_and_disabled_by_zero(self):
         before = {c['username'] for c in db.standby_credentials()}

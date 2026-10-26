@@ -14,7 +14,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_exchange as base
 from app import config, db, endpoint, rtrust_credentials as managed
-from endpoint_harness import FakeEndpoint
+import secrets
+from endpoint_harness import FakeEndpoint, failing_after
 
 BOUND = 15
 
@@ -61,6 +62,23 @@ class OverlayEndpointTests(unittest.TestCase):
         self.assertEqual(response.json()['credentials']['operations'][0]['state'], 'applied')
         self.assertLess(time.monotonic() - started, BOUND)
         self.assertEqual(len(self.fake.spawns), 2)
+        self.assertFalse(held.alive())
+        self.assertEqual(self.connect(revoked).status, 'DENY')
+        self.assertEqual(self.connect(kept).status, 'OK')
+
+    def test_failed_standby_rotation_under_fence_rolls_back(self):
+        lost, _ = self.enrolled('lost'); neighbor, _ = self.enrolled('neighbor')
+        revoked, kept = self.change(lost, 'provision'), self.change(neighbor, 'provision')
+        held = self.connect(revoked)
+        before = db.standby_credentials()
+        with patch.object(secrets, 'token_urlsafe', side_effect=failing_after(3)):
+            response = self.client.delete(f'/portal/v2/devices/{lost}', headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['credentials']['operations'][0]['state'], 'applied')
+        self.assertEqual(len(self.fake.spawns), 2)
+        self.assertEqual(db.standby_credentials(), before)
+        active = {c['username'] for c in db.active_credentials()}
+        self.assertEqual(self.fake.loaded_usernames(), active | {c['username'] for c in before})
         self.assertFalse(held.alive())
         self.assertEqual(self.connect(revoked).status, 'DENY')
         self.assertEqual(self.connect(kept).status, 'OK')
