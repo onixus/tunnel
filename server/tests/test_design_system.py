@@ -64,7 +64,7 @@ def render_portal(name, templates=None):
         users=[user], admins=[user], configs=[config], devices=[], counts={'users': 12, 'configs': 24, 'blocked': 0},
         status={'running': True, 'cert_present': True, 'domain': 'vpn.example.invalid', 'port': 443},
         s={'brand_name': 'ONIXUS', 'cert_mode': 'external', 'conn_port': '443'}, cert_domains=[], cert_dir='/certs',
-        registration_enabled=True, smtp_enabled=True, msg='', err='', token='synthetic', qr_svg='', ttl=180, link='https://design.example.invalid/enroll#synthetic', app_link='trusttunnel://synthetic', endpoint_ready=True,
+        registration_enabled=True, smtp_enabled=True, msg='', err='', token='synthetic', qr_svg='', ttl=180, origin='https://design.example.invalid', code='synthetic', endpoint_ready=True,
         windows_available=True, android_available=True, android_sha256='a'*64, windows_version='0.6.2', android_version='0.6.2').encode()
 
 
