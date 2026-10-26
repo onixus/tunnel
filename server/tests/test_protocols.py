@@ -34,6 +34,7 @@ def release(tag, asset, **extra):
 @pytest.fixture
 def host(tmp_path, monkeypatch):
     """Temporary agent paths and a recording Docker stand-in."""
+    monkeypatch.setattr(protocols, 'BASE', tmp_path / 'console')
     home = tmp_path / 'amneziawg'
     monkeypatch.setattr(amnezia, 'STATE', home / 'state.json')
     monkeypatch.setattr(amnezia, 'RUNTIME', home / 'runtime')
@@ -61,6 +62,10 @@ def host(tmp_path, monkeypatch):
             box['containers'].add(args[args.index('--name') + 1])
         if args[:2] == ['docker', 'exec'] and 'listen-port' in args:
             return str(box['port'] or '')
+        if args[:2] == ['docker', 'exec'] and args[-2:] == ['sing-box', 'version']:
+            if box.get('router_broken'):
+                raise PolicyError('Router executable is incompatible with the runtime')
+            return 'sing-box version ' + box.get('router_version', amnezia.load().get('router_version', '1.12.9'))
         if args[:2] == ['docker', 'exec'] and args[-1] == '--version':
             state = amnezia.load()
             if args[-2] == 'amneziawg-go':
@@ -1119,3 +1124,83 @@ def test_amnezia_versions_are_read_once_per_container(host, monkeypatch):
     assert reads() == 2
     ids['id'] = 'b' * 64
     assert protocols.installed('amnezia')['tools_version'] == '3.1.20260812' and reads() == 4
+
+
+def test_amnezia_accepts_verified_sing_box_binary_above_compressed_download_limit(host, monkeypatch):
+    """sing-box 1.14 has a ~78 MiB binary in a ~32 MiB official archive."""
+    import tarfile
+    payload = b'0' * (protocols.LIMIT + 1024)
+
+    def download(url, dest, digest):
+        with tarfile.open(dest, 'w:gz') as archive:
+            entry = tarfile.TarInfo('sing-box-1.12.9-linux-amd64/sing-box')
+            entry.size = len(payload)
+            archive.addfile(entry, io.BytesIO(payload))
+            library = tarfile.TarInfo('sing-box-1.12.9-linux-amd64/libcronet.so')
+            library.size = 7
+            archive.addfile(library, io.BytesIO(b'library'))
+        assert dest.stat().st_size < protocols.LIMIT
+
+    monkeypatch.setattr(protocols, 'download', download)
+    original_build = protocols.build
+    def build(args, timeout):
+        work = Path(args[-1])
+        assert (work / 'router/sing-box').stat().st_size == len(payload)
+        assert (work / 'router/libcronet.so').read_bytes() == b'library'
+        return original_build(args, timeout)
+    monkeypatch.setattr(protocols, 'build', build)
+    cache(amnezia=[AWG])
+    host['port'] = 47443
+    result = protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    assert 'UDP 47443' in result['message']
+    assert protocols.installed('amnezia')['installed']
+
+
+def test_amnezia_first_install_refuses_an_unusable_bundled_router(host):
+    cache(amnezia=[AWG])
+    host['port'] = 47443
+    host['router_broken'] = True
+    with pytest.raises(PolicyError, match='не прошёл проверку'):
+        protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    assert not amnezia.STATE.exists()
+    assert amnezia.CONTAINER not in host['containers']
+
+
+def test_failed_build_keeps_private_diagnostics_without_exposing_them(tmp_path, monkeypatch):
+    monkeypatch.setattr(protocols, 'BASE', tmp_path)
+    monkeypatch.setattr(protocols.subprocess, 'run', lambda *args, **kwargs:
+                        types.SimpleNamespace(returncode=1, stdout='build output', stderr='synthetic-private-diagnostic'))
+    with pytest.raises(PolicyError) as error:
+        protocols.run(['docker', 'build', '-t', 'fixture', '.'])
+    assert 'synthetic-private-diagnostic' not in str(error.value)
+    log = tmp_path / 'protocols/last-build.log'
+    assert 'synthetic-private-diagnostic' in log.read_text()
+    assert log.stat().st_mode & 0o777 == 0o600
+
+
+def test_startup_failure_keeps_private_diagnostics_before_removal(tmp_path, monkeypatch):
+    monkeypatch.setattr(protocols, 'BASE', tmp_path)
+    calls = []
+    def quiet(args, timeout=8):
+        calls.append(args)
+        if args[:2] == ['docker', 'logs']:
+            return 0, 'synthetic daemon startup failure'
+        if args[:2] == ['docker', 'inspect'] and '--format' in args:
+            return 0, '{"ExitCode":1,"OOMKilled":false}'
+        return 1, ''
+    monkeypatch.setattr(protocols, 'quiet', quiet)
+    monkeypatch.setattr(protocols, 'run', lambda *args, **kwargs: '')
+    def verify():
+        raise PolicyError('synthetic verification failure')
+    with pytest.raises(PolicyError):
+        protocols.swap_container('candidate', ['image'], verify)
+    log = tmp_path / 'protocols/last-startup.log'
+    assert 'synthetic daemon startup failure' in log.read_text() and 'ExitCode' in log.read_text()
+    assert log.stat().st_mode & 0o777 == 0o600
+    assert calls.index(['docker','logs','--tail','250','candidate']) < calls.index(['docker','rm','-f','candidate'])
+
+
+def test_startup_diagnostics_include_stderr_without_exposing_status_stderr(monkeypatch):
+    monkeypatch.setattr(protocols.subprocess, 'run', lambda *args, **kwargs: types.SimpleNamespace(returncode=0,stdout='',stderr='synthetic daemon error'))
+    assert protocols.quiet(['docker','logs','candidate'])[1] == 'synthetic daemon error'
+    assert protocols.quiet(['systemctl','is-active','h-ui'])[1] == ''

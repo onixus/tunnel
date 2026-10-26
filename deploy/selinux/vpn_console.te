@@ -1,0 +1,25 @@
+policy_module(vpn_console, 1.1.0)
+
+gen_require(`
+    type container_file_t, unconfined_service_t;
+    attribute container_net_domain, container_user_domain;
+')
+
+# A confined container domain with the standard container file/MCS restrictions.
+# Only the console receives this process label; ordinary containers keep container_t.
+container_domain_template(vpn_console, container)
+typeattribute vpn_console_t container_net_domain;
+typeattribute vpn_console_t container_user_domain;
+
+# The fixed root agent remains a host service. Its socket is mounted read-only
+# only into the console and protected by root:10001 / 0660 DAC permissions.
+allow vpn_console_t unconfined_service_t:unix_stream_socket connectto;
+
+# AmneziaWG monitors its userspace control socket with inotify. Keep this
+# permission scoped to the VPN container, with its existing network capabilities.
+container_domain_template(vpn_amnezia, container)
+typeattribute vpn_amnezia_t container_net_domain;
+typeattribute vpn_amnezia_t container_user_domain;
+allow vpn_amnezia_t self:capability { net_admin net_raw };
+allow vpn_amnezia_t self:netlink_netfilter_socket create_socket_perms;
+allow vpn_amnezia_t container_file_t:sock_file watch;

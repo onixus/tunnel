@@ -18,6 +18,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -40,6 +41,10 @@ BUILD = BASE / 'build'
 ASSETS = BASE / 'assets'
 API = 'https://api.github.com/repos/'
 LIMIT = 64 * 1024 * 1024
+# Official sing-box 1.14 archives are ~32 MiB compressed, with an ~78 MiB binary.
+# Bound downloads separately from this single verified archive member.
+SING_BOX_BINARY_LIMIT = 128 * 1024 * 1024
+SING_BOX_LIBRARY_LIMIT = 32 * 1024 * 1024
 AUTO_CHECK = 6 * 3600
 CHECK_LOCK = threading.RLock()
 HYSTERIA_BIN = Path('/var/lib/h-ui/bin/hysteria-linux-amd64')
@@ -86,8 +91,14 @@ _AWG_VERSIONS = {}
 
 def run(args, timeout=30, env=None):
     p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+    building = args[:2] == ['docker', 'build']
+    if building:
+        # Build inputs contain verified public artifacts, never runtime state.
+        # Keep full compiler diagnostics root-only instead of discarding them.
+        amnezia.write(BASE / 'protocols/last-build.log', p.stdout + '\n' + p.stderr)
     if p.returncode:
-        raise PolicyError('Операция не завершена: ' + Path(args[0]).name)
+        detail = '; журнал сборки: /opt/vpn-console/protocols/last-build.log' if building else ''
+        raise PolicyError('Операция не завершена: ' + Path(args[0]).name + detail)
     return p.stdout.strip()
 
 
@@ -95,7 +106,8 @@ def quiet(args, timeout=8):
     """Status probes: a stopped service or missing container is an answer, not an error."""
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout.strip()
+        output = p.stdout + ('\n' + p.stderr if args[:2] == ['docker', 'logs'] else '')
+        return p.returncode, output.strip()
     except (OSError, subprocess.TimeoutExpired):
         return 1, ''
 
@@ -550,6 +562,12 @@ def swap_container(name, args, verify, restore=None):
     except BaseException:
         if renamed or not exists:
             # Only then does `name` refer to the new container.
+            try:
+                code, logs = quiet(['docker', 'logs', '--tail', '250', name], 15)
+                _, state = quiet(['docker', 'inspect', name, '--format', '{{json .State}}'])
+                amnezia.write(BASE / 'protocols/last-startup.log', name + '\n' + logs + '\n' + state)
+            except Exception:
+                pass  # Diagnostics must never prevent rollback.
             quiet(['docker', 'rm', '-f', name], 30)
         if renamed:
             quiet(['docker', 'rename', backup, name])
@@ -583,19 +601,29 @@ def install_amnezia(op, data, release, work, agent):
     archive = work / 'sing-box.tar.gz'
     download(asset_url(box['repo'], release['box_tag'], box['asset'].format(version=release['box_version'])),
              archive, release['box_sha256'])
+    router = work / 'router'
+    router.mkdir(mode=0o755)
     with tarfile.open(archive) as tar:
         member = next((m for m in tar if m.isfile() and Path(m.name).name == 'sing-box'), None)
-        if member is None or member.size > LIMIT:
+        if member is None:
             raise PolicyError('В архиве разработчика нет sing-box')
-        with tar.extractfile(member) as source, open(work / 'sing-box', 'wb') as target:
+        if member.size > SING_BOX_BINARY_LIMIT:
+            raise PolicyError('Бинарник sing-box превышает допустимый размер 128 МиБ')
+        with tar.extractfile(member) as source, open(router / 'sing-box', 'wb') as target:
             shutil.copyfileobj(source, target)
+        library = next((m for m in tar.getmembers() if m.isfile() and Path(m.name).name == 'libcronet.so'), None)
+        if library is not None:
+            if library.size > SING_BOX_LIBRARY_LIMIT:
+                raise PolicyError('Библиотека sing-box превышает допустимый размер 32 МиБ')
+            with tar.extractfile(library) as source, open(router / 'libcronet.so', 'wb') as target:
+                shutil.copyfileobj(source, target)
     archive.unlink()
     image = 'vpn-amneziawg:' + release['version'] + '-tools-' + release['tools_version']
     build(['--pull', '--build-arg', 'AWG_GO_REF=' + release['tag'],
          '--build-arg', 'AWG_GO_COMMIT=' + release['commit'], '--build-arg', 'AWG_TOOLS_REF=' + release['tools_tag'],
          '--build-arg', 'AWG_TOOLS_COMMIT=' + release['tools_commit'], '-t', image, str(work)], 1500)
     before = None if fresh else json.dumps(state, sort_keys=True)
-    state.update(version=release['version'], tag=release['tag'], image=image,
+    state.update(version=release['version'], tag=release['tag'], image=image, router_version=release['box_version'],
                  tools_version=release['tools_version'], commit=release['commit'], tools_commit=release['tools_commit'])
     amnezia.save(state, sync=False)
     port = state['port']
@@ -611,7 +639,8 @@ def install_amnezia(op, data, release, work, agent):
         swap_container(amnezia.CONTAINER, amnezia.container_args(state, image), lambda: amnezia.verify(state),
                        restore=restore)
     except BaseException:
-        raise PolicyError('AmneziaWG не прошёл проверку запуска. Проверьте состояние предыдущего контейнера.') from None
+        raise PolicyError('AmneziaWG не прошёл проверку запуска. Проверьте состояние предыдущего контейнера; '
+                          'журнал: /opt/vpn-console/protocols/last-startup.log') from None
     return (f'AmneziaWG {release["version"]} работает на UDP {port}. '
             + ('Откройте этот порт в firewall и создайте пользователей.' if fresh else 'Ключи пользователей сохранены.'))
 
@@ -637,7 +666,10 @@ def install_trusttunnel(op, data, release, work, agent):
     archive.unlink()
     shutil.copy2(asset('trusttunnel', 'Dockerfile'), work / 'Dockerfile')
     tag = 'trusttunnel-web:endpoint-' + release['version']
-    build(['--build-arg', 'BASE_IMAGE=' + base, '-t', tag, str(work)], 300)
+    # BuildKit resolves a bare sha256 ID in FROM as a registry image name.
+    pinned = 'trusttunnel-web-base:' + base.removeprefix('sha256:')
+    run(['docker', 'tag', base, pinned])
+    build(['--build-arg', 'BASE_IMAGE=' + pinned, '-t', tag, str(work)], 300)
     image = run(['docker', 'image', 'inspect', tag, '--format', '{{.Id}}'])
     if not IMAGE_ID.fullmatch(image):
         raise PolicyError('Сборка образа не подтверждена')
@@ -690,7 +722,7 @@ def install_hysteria(op, data, release, work, agent):
         # Host users, units and /usr/local/bin are outside the agent sandbox: run the fixed
         # root-owned installer as its own transient unit. Its arguments are agent-built paths.
         code = quiet(['systemd-run', '--wait', '--collect', '--quiet', '--unit=vpn-console-hysteria-install-' + secrets.token_hex(4),
-                      '/usr/bin/python3', str(asset('install-hysteria-host.py')), str(binary), str(panel), str(result)], 240)[0]
+                      sys.executable, str(asset('install-hysteria-host.py')), str(binary), str(panel), str(result)], 240)[0]
         try:
             outcome = json.loads(result.read_text())
         except (OSError, ValueError):

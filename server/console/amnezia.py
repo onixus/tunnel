@@ -2,6 +2,7 @@
 import base64
 import ipaddress
 import json
+import host_platform
 import os
 from pathlib import Path
 import re
@@ -174,6 +175,7 @@ def save(state, sync=True):
     """State first: a failed live reload leaves the desired configuration for the next start."""
     write(STATE, json.dumps(state, sort_keys=True))
     write(RUNTIME / (INTERFACE + '.conf'), render_server(state))
+    host_platform.restore_labels(RUNTIME)
     if sync and running():
         try:
             # Fixed command: reload peers without dropping established sessions.
@@ -351,7 +353,7 @@ def container_args(state, image):
         # Replies from the router TUN arrive on another interface than the route to their source.
         args += ['--network', EXIT_NETWORK, '--sysctl', 'net.ipv4.conf.all.rp_filter=0',
                  '--sysctl', 'net.ipv4.conf.default.rp_filter=0']
-    return args + [image]
+    return args + host_platform.amnezia_security_options() + [image]
 
 
 def verify(state, attempts=20):
@@ -365,6 +367,11 @@ def verify(state, attempts=20):
                     raise PolicyError('Серверная версия AmneziaWG не совпадает с выбранной')
                 # A host kernel module must not silently replace the pinned userspace server.
                 run(['docker', 'exec', CONTAINER, 'test', '-S', f'/var/run/amneziawg/{INTERFACE}.sock'], 8)
+            if state.get('router_version'):
+                router = run(['docker', 'exec', CONTAINER, 'sing-box', 'version'], 15)
+                version = re.search(r'^sing-box version (\d+\.\d+\.\d+)', router, re.M)
+                if not version or version[1] != state['router_version']:
+                    raise PolicyError('Версия маршрутизатора sing-box не подтверждена')
             if (run(['docker', 'exec', CONTAINER, 'awg', 'show', INTERFACE, 'listen-port'], 8) == str(state['port'])
                     and (not routed or run(['docker', 'exec', CONTAINER, 'ip', '-o', 'link', 'show', TUN], 8))):
                 return

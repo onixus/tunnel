@@ -1,0 +1,172 @@
+{
+  "installer": {
+    "file": "/Users/onixus/Git/tunnel/dist/tunnel-installer-centos-stream-amd64.run",
+    "sha256": "f194f4dcd8ae7859893edae593eea2771e17aa91e3060842465d93df8d6a8bf5",
+    "bytes": 7310193,
+    "target": "CentOS Stream 9/10 x86_64",
+    "server_head": "a0cf449469cdcf1ff9dede749052cb40be396790",
+    "working_tree_sources": true,
+    "client_source": "4400ca12938619df92326c4abe21818bf39915e9"
+  },
+  "environment": {
+    "os": "CentOS Stream 10 (Coughlan)",
+    "isolation": "Disposable QEMU TCG VM; separate Docker daemon; no live mounts",
+    "configured_memory_mib": 4096,
+    "cloud_image_sha256": "f79f96b884b94e89b97386173fc1ebf8d20842a65f55da0f365a5dddf5c72e6e"
+  },
+  "validation": {
+    "kernel": "6.12.0-279.el10.x86_64",
+    "arch": "x86_64",
+    "vcpus": 4,
+    "docker_version": "29.9.2",
+    "resume_preserves_settings_key_certificate": true,
+    "registration_closed": true,
+    "containers": {
+      "trusttunnel-web": {
+        "state": "running",
+        "health": null,
+        "user": "10001:10001",
+        "process_label": "system_u:system_r:container_t:s0:c544,c669"
+      },
+      "vpn-console": {
+        "state": "running",
+        "health": "healthy",
+        "user": "10001:10001",
+        "process_label": "system_u:system_r:vpn_console_t:s0:c575,c590"
+      },
+      "rtrust-portal-https": {
+        "state": "running",
+        "health": null,
+        "user": "",
+        "process_label": "system_u:system_r:container_t:s0:c182,c238"
+      },
+      "amnezia-awg": {
+        "state": "running",
+        "health": null,
+        "user": "",
+        "process_label": "system_u:system_r:vpn_amnezia_t:s0:c280,c806"
+      },
+      "xray-cdn": {
+        "state": "running",
+        "health": null,
+        "user": "",
+        "process_label": "system_u:system_r:container_t:s0:c539,c1023"
+      }
+    },
+    "amnezia_daemon": "amneziawg-go 3.1.20260828",
+    "amnezia_tools": "amneziawg-tools v3.1.20260812 - https://amnezia.org",
+    "router": "sing-box version 1.14.4"
+  },
+  "selinux_firewall_verification": {
+    "os": "CentOS Stream 10 (Coughlan)",
+    "selinux": "Enforcing",
+    "docker_security": [
+      "name=seccomp,profile=builtin",
+      "name=selinux",
+      "name=cgroupns"
+    ],
+    "hui_firewall": "runtime+permanent IPv4+IPv6 ANY->HOST before zones",
+    "console_process_label": "system_u:system_r:vpn_console_t:s0:c575,c590",
+    "amnezia_process_label": "system_u:system_r:vpn_amnezia_t:s0:c280,c806",
+    "hui_docker_network_probe": "blocked",
+    "labels": {
+      "/opt/trusttunnel-web/data": "system_u:object_r:container_file_t:s0",
+      "/opt/trusttunnel-web/nginx.conf": "system_u:object_r:container_file_t:s0",
+      "/opt/vpn-console/data": "system_u:object_r:container_file_t:s0",
+      "/run/vpn-console/agent.sock": "system_u:object_r:container_file_t:s0",
+      "/opt/amneziawg/runtime/awg0.conf": "system_u:object_r:container_file_t:s0",
+      "/opt/xray-cdn/runtime/config.json": "system_u:object_r:container_file_t:s0"
+    },
+    "protocols": {
+      "trusttunnel": {
+        "message": "TrustTunnel endpoint 1.1.0 установлен и проверен"
+      },
+      "hysteria": {
+        "message": "Hysteria 2.13.0 и H UI v0.0.25 установлены, ядро выключено. Разрешите UDP 443, затем настройте ядро в H UI; пароль администратора — в /root/h-ui-bootstrap.json."
+      },
+      "cdn": {
+        "message": "Xray 26.10.21 работает на TCP 2053. Откройте порт для адресов CDN, затем укажите домен CDN кнопкой «Настроить CDN»."
+      },
+      "amnezia": {
+        "message": "AmneziaWG 3.1.20260828 работает на UDP 47443. Откройте этот порт в firewall и создайте пользователей."
+      }
+    },
+    "client_traffic_tested": false
+  },
+  "protocol_installs": [
+    {
+      "component": "trusttunnel",
+      "ok": true,
+      "seconds": 66.5,
+      "result": {
+        "message": "TrustTunnel endpoint 1.1.0 установлен и проверен"
+      }
+    },
+    {
+      "component": "hysteria",
+      "ok": true,
+      "seconds": 33.5,
+      "result": {
+        "message": "Hysteria 2.13.0 и H UI v0.0.25 установлены, ядро выключено. Разрешите UDP 443, затем настройте ядро в H UI; пароль администратора — в /root/h-ui-bootstrap.json."
+      }
+    },
+    {
+      "component": "cdn",
+      "ok": true,
+      "seconds": 57.6,
+      "result": {
+        "message": "Xray 26.10.21 работает на TCP 2053. Откройте порт для адресов CDN, затем укажите домен CDN кнопкой «Настроить CDN»."
+      }
+    },
+    {
+      "component": "amnezia",
+      "ok": true,
+      "seconds": 96.6,
+      "result": {
+        "message": "AmneziaWG 3.1.20260828 работает на UDP 47443. Откройте этот порт в firewall и создайте пользователей."
+      }
+    }
+  ],
+  "focused_tests": {
+    "passed": 112,
+    "failed": 0,
+    "log": "unit-tests.log"
+  },
+  "procedure": "Started from bare CentOS GenericCloud without Docker; failures were corrected and installation resumed, including a guest-kernel reboot. Final installer and AmneziaWG were validated after the fixes; this was an iterative clean-VM test, not a single uninterrupted cold run of the final bytes.",
+  "resolved_causes": [
+    {
+      "cause": "firewalld 2.4 annotates active zone names with (default)",
+      "fix": "Parse and validate the actual zone name"
+    },
+    {
+      "cause": "Incorrect policy query flags and runtime-only priority restriction",
+      "fix": "Verify active policies and runtime/permanent --info-policy with exact IPv4/IPv6 rules"
+    },
+    {
+      "cause": "Cloud image running kernel 278 lacked xt_addrtype while dnf installed modules for kernel 279",
+      "fix": "Try matching modules for running kernel; install full new kernel and request explicit reboot/resume if retired"
+    },
+    {
+      "cause": "Standard SELinux container_t cannot connect to the host-agent Unix socket",
+      "fix": "Dedicated confined vpn_console_t with the Unix connect permission; ordinary container negative control stayed denied"
+    },
+    {
+      "cause": "amneziawg-go failed UAPI socket inotify watch with permission denied under default container policy",
+      "fix": "Dedicated vpn_amnezia_t with socket watch and existing namespace network permissions; actual daemon/tools/listen socket/router checks passed"
+    }
+  ],
+  "boundaries": {
+    "centos_stream_9_full_vm_tested": false,
+    "centos_stream_9_selector_dependencies_and_python39_bootstrap_syntax_tested": true,
+    "centos_7_8_supported": false,
+    "vpn_client_traffic_tested": false,
+    "external_cdn_tested": false,
+    "hysteria_core": "disabled pending operator configuration",
+    "production_modified": false
+  },
+  "cleanup": {
+    "vm_removed": true,
+    "transferred_temporary_sources_removed": true,
+    "public_vm_helper_image_retained": "tunnel-installer-vm:20261026"
+  }
+}

@@ -17,6 +17,9 @@ import time
 
 BUILD = Path('/opt/vpn-console/build')
 HERE = Path(__file__).resolve().parent
+if not (HERE / 'host_platform.py').exists():
+    sys.path.insert(0, str(HERE.parents[1] / 'server/console'))
+import host_platform
 HOME = Path('/var/lib/h-ui')
 UNIT = Path('/etc/systemd/system/h-ui.service')
 CORE = Path('/usr/local/bin/hysteria')
@@ -42,13 +45,9 @@ def source(value):
 def install(core, panel):
     if (HOME / 'data/h_ui.db').exists() or UNIT.exists() or PANEL.exists():
         raise Refused('H UI уже установлен на этом сервере; установка с нуля отклонена')
-    # H UI listens on every interface. The operator closes the panel port first.
-    try:
-        rules = subprocess.run(['ufw', 'status'], capture_output=True, text=True, timeout=15).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        rules = ''
-    if not any('8081/tcp' in line and 'DENY' in line for line in rules.splitlines()):
-        raise Refused('Сначала закройте панель H UI снаружи: ufw insert 1 deny 8081/tcp')
+    # H UI listens on every interface: verify the actual UFW or firewalld guard.
+    if not host_platform.hui_firewall_closed():
+        raise Refused('TCP 8081 должен быть закрыт извне: UFW deny либо policy ' + host_platform.HUI_POLICY + ' в firewalld')
     try:
         pwd.getpwnam('hysteria')
     except KeyError:
@@ -70,6 +69,8 @@ def install(core, panel):
     managed.chmod(0o755)
     shutil.copyfile(HERE / 'h-ui.service', UNIT)
     UNIT.chmod(0o644)
+    for target in (CORE, PANEL, UNIT, HOME):
+        host_platform.restore_labels(target)
     run(['systemctl', 'daemon-reload'])
     try:
         # First start creates the default database; bootstrap replaces its default secrets.
