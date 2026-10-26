@@ -6,16 +6,22 @@ ARG AWG_GO_COMMIT
 RUN git clone --depth 1 --branch "${AWG_GO_REF}" https://github.com/amnezia-vpn/amneziawg-go.git /awg && \
     test "$(git -C /awg rev-parse HEAD)" = "${AWG_GO_COMMIT}"
 WORKDIR /awg
-RUN go mod download && go mod verify && \
+# Upstream version.go still contains a legacy 0.0 date. Report the verified source tag.
+RUN printf 'package main\n\nconst Version = "%s"\n' "${AWG_GO_REF#v}" > version.go && \
+    go mod download && go mod verify && \
     CGO_ENABLED=0 go build -trimpath -o /out/amneziawg-go .
 
 FROM alpine:3.19 AS tools
 ARG AWG_TOOLS_REF
 ARG AWG_TOOLS_COMMIT
+# Force the pinned daemon: upstream awg-quick otherwise prefers the host kernel module.
 RUN apk add --no-cache git build-base linux-headers && \
     git clone --depth 1 --branch "${AWG_TOOLS_REF}" https://github.com/amnezia-vpn/amneziawg-tools.git /tools && \
     test "$(git -C /tools rev-parse HEAD)" = "${AWG_TOOLS_COMMIT}" && \
-    make -C /tools/src
+    make -C /tools/src && \
+    sed -i '/^add_if() {$/,/^}$/c\add_if() {\n\tcmd amneziawg-go "$INTERFACE"\n}' /tools/src/wg-quick/linux.bash && \
+    grep -qx "$(printf '\tcmd amneziawg-go "$INTERFACE"')" /tools/src/wg-quick/linux.bash && \
+    ! grep -q 'type amneziawg' /tools/src/wg-quick/linux.bash
 
 FROM alpine:3.19
 RUN apk add --no-cache bash iproute2 iptables

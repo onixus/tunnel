@@ -153,6 +153,23 @@ def running():
         return False
 
 
+def versions(execute=None):
+    """Read the server binaries, never deployment labels or saved version fields."""
+    execute = execute or run
+    result = {}
+    # Only the supported 3.1 line: images built before provenance report a legacy 0.0 date.
+    for name, binary, pattern in (
+        ('version', 'amneziawg-go', r'amneziawg-go v?(3\.1\.\d{8})\b'),
+        ('tools_version', 'awg', r'amneziawg-tools v?(3\.1\.\d{8})\b'),
+    ):
+        out = execute(['docker', 'exec', CONTAINER, binary, '--version'], 8)
+        match = re.search(pattern, out)
+        if not match:
+            raise PolicyError('Не удалось определить серверную версию AmneziaWG')
+        result[name] = match[1]
+    return result
+
+
 def save(state, sync=True):
     """State first: a failed live reload leaves the desired configuration for the next start."""
     write(STATE, json.dumps(state, sort_keys=True))
@@ -341,6 +358,13 @@ def verify(state, attempts=20):
     routed = load_routing()['exit'] != 'direct'
     for _ in range(attempts):
         try:
+            # Old deployments predate binary provenance; keep their route switching usable.
+            if state.get('tools_version'):
+                actual = versions(execute=run)
+                if actual != {'version': state['version'], 'tools_version': state['tools_version']}:
+                    raise PolicyError('Серверная версия AmneziaWG не совпадает с выбранной')
+                # A host kernel module must not silently replace the pinned userspace server.
+                run(['docker', 'exec', CONTAINER, 'test', '-S', f'/var/run/amneziawg/{INTERFACE}.sock'], 8)
             if (run(['docker', 'exec', CONTAINER, 'awg', 'show', INTERFACE, 'listen-port'], 8) == str(state['port'])
                     and (not routed or run(['docker', 'exec', CONTAINER, 'ip', '-o', 'link', 'show', TUN], 8))):
                 return
