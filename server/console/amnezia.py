@@ -12,7 +12,8 @@ import time
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from routing_policy import PolicyError
+from routing_policy import EXITS, PolicyError
+import trusttunnel_routing as acl_rules
 
 HOME = Path('/opt/amneziawg')
 STATE = HOME / 'state.json'
@@ -22,6 +23,19 @@ INTERFACE = 'awg0'
 SUBNET = ipaddress.ip_network('10.8.1.0/24')
 MTU = 1280
 MAX_PEERS = 250
+# Selected exit and the sing-box router mirroring the Hysteria exceptions; root-only, holds upstream credentials.
+ROUTING = HOME / 'routing.json'
+# Rendered into the mounted directory only when clients leave through an exit.
+ROUTE_FILES = ('route.json', 'cis.json', 'blocked')
+CIS = Path('/opt/vpn-console/trusttunnel-routing/cis.json')
+MOUNT = '/etc/amnezia/amneziawg'
+# Docker network whose gateway reaches the host TrustTunnel SOCKS of the primary exit.
+EXIT_NETWORK = 'trusttunnel-web_default'
+TUN = 'egress0'
+TUN_ADDRESS = '198.18.0.1/30'
+# Unpublished SOCKS inbound inside the container: the real egress check uses the same rules as clients.
+PROBE_PORT = 10899
+PROBE_URL = 'https://api.ipify.org'
 RESERVED_PORTS = (443, 8443, 51831)
 NAME = re.compile(r'[A-Za-z0-9_-]{3,32}')
 # Obfuscation values that must match on both sides, in config order.
@@ -228,3 +242,138 @@ def dispatch(op, data, host):
         raise PolicyError('Операция запрещена')
     save(state)
     return {'message': 'Изменение AmneziaWG применено'}
+
+
+def netns_probe(container, port):
+    """Real egress IP through a container's own rules, from the host inside its network namespace."""
+    pid = run(['docker', 'inspect', '--format', '{{.State.Pid}}', container], 8)
+    if not pid.isdigit() or pid == '0':
+        raise PolicyError('Контейнер ' + container + ' не запущен')
+    return run(['nsenter', '-t', pid, '-n', 'curl', '-s', '-4', '--max-time', '20',
+                '--socks5-hostname', f'127.0.0.1:{port}', PROBE_URL], 40)
+
+
+def routing_config(exit_id, profiles=None, acl=None, blocked=()):
+    """sing-box router for client traffic; the relay's rules with a TUN inbound. No network access."""
+    if exit_id == 'direct':
+        return {'schema': 1, 'exit': 'direct'}
+    config = acl_rules.relay_config(profiles[exit_id], acl, profiles)
+    config['inbounds'] = [
+        # Policy routing sends everything from awg0 here; gVisor terminates any client source address.
+        {'type': 'tun', 'tag': 'clients', 'interface_name': TUN, 'address': [TUN_ADDRESS], 'mtu': MTU,
+         'stack': 'gvisor', 'auto_route': False},
+        {'type': 'socks', 'tag': 'probe', 'listen': '127.0.0.1', 'listen_port': PROBE_PORT}]
+    config['route']['rule_set'][0]['path'] = MOUNT + '/cis.json'
+    for address in blocked:
+        ipaddress.IPv4Address(address)
+    return {'schema': 1, 'exit': exit_id, 'config': config, 'blocked': sorted(blocked)}
+
+
+def load_routing():
+    try:
+        if ROUTING.stat().st_size > 256 * 1024:
+            raise PolicyError('Маршрутизация AmneziaWG повреждена')
+        value = json.loads(ROUTING.read_text())
+    except FileNotFoundError:
+        return {'schema': 1, 'exit': 'direct'}
+    except ValueError:
+        raise PolicyError('Маршрутизация AmneziaWG повреждена') from None
+    if not isinstance(value, dict) or value.get('schema') != 1 or value.get('exit') not in ('direct',) + EXITS:
+        raise PolicyError('Маршрутизация AmneziaWG повреждена')
+    if value['exit'] != 'direct' and not (isinstance(value.get('config'), dict) and isinstance(value.get('blocked'), list)):
+        raise PolicyError('Маршрутизация AmneziaWG повреждена')
+    return value
+
+
+def route_json(routing):
+    return json.dumps(routing['config'], indent=2, sort_keys=True) + '\n'
+
+
+def actual_exit(state=None):
+    """The exit the mounted files really select: the routing file only counts when rendered into them.
+
+    `state` is accepted for parity with the CDN router; peers do not affect routing.
+    """
+    try:
+        routing = load_routing()
+    except PolicyError:
+        return 'unknown'
+    live = RUNTIME / 'route.json'
+    if routing['exit'] == 'direct':
+        return 'custom' if live.exists() else 'direct'
+    try:
+        return routing['exit'] if live.read_text() == route_json(routing) else 'custom'
+    except OSError:
+        return 'custom'
+
+
+def current_routing():
+    return ROUTING.read_text() if ROUTING.exists() else None
+
+
+def render_routing():
+    """Mounted router files from the routing file; the entrypoint reads them at container start."""
+    routing = load_routing()
+    if routing['exit'] == 'direct':
+        for name in ROUTE_FILES:
+            (RUNTIME / name).unlink(missing_ok=True)
+        return
+    # TrustTunnel's CIS rule set, so both relays resolve "СНГ" from the same data.
+    write(RUNTIME / 'cis.json', CIS.read_text())
+    write(RUNTIME / 'blocked', ''.join(a + '\n' for a in routing['blocked']))
+    write(RUNTIME / 'route.json', route_json(routing))
+
+
+def container_args(state, image):
+    port = str(state['port'])
+    args = ['--restart', 'unless-stopped', '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--cap-add', 'NET_RAW',
+            '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--security-opt', 'no-new-privileges',
+            '-p', f'{port}:{port}/udp', '--mount', f'type=bind,src={RUNTIME},dst={MOUNT},readonly',
+            '--label', 'vpn.console.version=' + state.get('version', ''), '--log-opt', 'max-size=5m', '--log-opt', 'max-file=2']
+    if load_routing()['exit'] != 'direct':
+        # Replies from the router TUN arrive on another interface than the route to their source.
+        args += ['--network', EXIT_NETWORK, '--sysctl', 'net.ipv4.conf.all.rp_filter=0',
+                 '--sysctl', 'net.ipv4.conf.default.rp_filter=0']
+    return args + [image]
+
+
+def verify(state, attempts=20):
+    routed = load_routing()['exit'] != 'direct'
+    for _ in range(attempts):
+        try:
+            if (run(['docker', 'exec', CONTAINER, 'awg', 'show', INTERFACE, 'listen-port'], 8) == str(state['port'])
+                    and (not routed or run(['docker', 'exec', CONTAINER, 'ip', '-o', 'link', 'show', TUN], 8))):
+                return
+        except (PolicyError, subprocess.TimeoutExpired):
+            pass
+        time.sleep(1)
+    raise PolicyError('AmneziaWG не запустился в новом контейнере')
+
+
+def apply_routing(text):
+    """Install a rendered routing file (None: direct) and recreate the container with it.
+
+    On failure the previous container keeps running with the previous files.
+    """
+    import protocols  # Circular at import time: protocols registers this module.
+    state = load()
+    if not state.get('image'):
+        raise PolicyError('AmneziaWG не установлен')
+    before = current_routing()
+
+    def put(value):
+        if value is None:
+            ROUTING.unlink(missing_ok=True)
+        else:
+            write(ROUTING, value)
+        render_routing()
+    put(text)
+    try:
+        protocols.swap_container(CONTAINER, container_args(state, state['image']), lambda: verify(state),
+                                 restore=lambda: put(before))
+    except BaseException:
+        raise PolicyError('AmneziaWG не запустился с новым маршрутом. Предыдущий контейнер восстановлен.') from None
+
+
+def probe():
+    return netns_probe(CONTAINER, PROBE_PORT)

@@ -8,16 +8,21 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
 import time
 import yaml
 
-from routing_policy import SERVICES, PolicyError, initial_policy, make_plan, target, validate_saved
+import amnezia
+import cdn
+from routing_policy import EXITS, RELAYS, SERVICES, PolicyError, initial_policy, make_plan, target, validate_saved
 from trusttunnel_routing import relay_config
 
 POLICY = Path('/opt/vpn-console/routing-policy.json')
+# Protocols whose own router (Xray, sing-box) is rendered from the Hysteria ACL by the console.
+ROUTERS = {'cdn': cdn, 'amnezia': amnezia}
 TT_CONFIG = Path('/opt/vpn-console/trusttunnel-routing/trusttunnel.json')
 TT_PROBE = Path('/opt/vpn-console/probes/trusttunnel')
 BACKUPS = Path('/root/hysteria-route-backups/services')
@@ -103,6 +108,29 @@ print(json.dumps(result))'''
         return {'version': 0, 'actual_exit': 'unknown', 'error': 'Не удалось прочитать конфигурацию TrustTunnel'}
 
 
+def observed(state, name):
+    """A relay's configuration text as read by observe()."""
+    return state['raw_tt'] if name == 'trusttunnel' else state['raw_' + name]
+
+
+def router_status(name):
+    module = ROUTERS[name]
+    try:
+        state = module.load()
+    except PolicyError:
+        return {'actual_exit': 'unknown', 'reason': SERVICES[name] + ': протокол не установлен'}
+    actual = module.actual_exit(state)
+    if not state.get('image') or not module.running():
+        reason = 'Контейнер не запущен; проверьте протокол в разделе «Протоколы»'
+    elif not (shutil.which('nsenter') and shutil.which('curl')):
+        reason = 'Для проверки выхода на сервере нужны nsenter и curl'
+    elif actual not in ('direct',) + EXITS:
+        reason = 'Нестандартная маршрутизация; требуется проверка оператора'
+    else:
+        reason = ''
+    return {'actual_exit': actual, 'reason': reason}
+
+
 class Runtime:
     def __init__(self, agent):
         self.agent = agent
@@ -118,9 +146,13 @@ class Runtime:
         actual_h = names.get(rules[-1], 'custom') if rules else 'custom'
         tt = tt_status(a)
         tt_raw = text_or_none(TT_CONFIG)
-        actual = {'hysteria': actual_h, 'trusttunnel': tt.get('actual_exit', 'unknown')}
+        routers = {name: router_status(name) for name in ROUTERS}
+        raw_routers = {name: module.current_routing() for name, module in ROUTERS.items()}
+        actual = {'hysteria': actual_h, 'trusttunnel': tt.get('actual_exit', 'unknown'),
+                  **{name: r['actual_exit'] for name, r in routers.items()}}
         saved_raw = text_or_none(POLICY)
-        saved = validate_saved(json.loads(saved_raw)) if saved_raw else initial_policy(actual)
+        initial = initial_policy(actual)
+        saved = validate_saved(json.loads(saved_raw), initial) if saved_raw else initial
         h_ready = actual_h in ('primary', 'reserve', 'direct')
         tt_ready = tt.get('version') == 1 and trusted(TT_PROBE, True) and TT_CONFIG.parent.is_dir()
         has_direct = any(o.get('name') == 'local' and o.get('type') == 'direct' for o in config.get('outbounds', []))
@@ -131,11 +163,15 @@ class Runtime:
             'trusttunnel': {'actual_exit': actual['trusttunnel'], 'configurable': tt_ready and actual['trusttunnel'] in ('direct', 'primary', 'reserve'),
                            'reason': ('Нестандартный маршрут TrustTunnel; требуется проверка оператора' if tt_ready and actual['trusttunnel'] not in ('direct', 'primary', 'reserve') else '') if tt_ready else 'Установите модуль маршрутизации TrustTunnel и нативную проверку подключения',
                            'available_exits': ['direct'] + ([p for p in ('primary', 'reserve') if p in profiles] if tt_ready else [])},
+            **{name: {'actual_exit': r['actual_exit'], 'configurable': not r['reason'], 'reason': r['reason'],
+                      'available_exits': ['direct'] + [p for p in ('primary', 'reserve') if p in profiles]}
+               for name, r in routers.items()},
         }
         revision = digest({'hysteria': raw, 'profiles': profiles, 'trusttunnel': tt,
-                           'tt_config': tt_raw, 'saved': saved, 'capabilities': services})
+                           'tt_config': tt_raw, 'routers': raw_routers, 'saved': saved, 'capabilities': services})
         return {'revision': revision, 'saved': saved, 'services': services,
-                'raw_h': raw, 'config': config, 'profiles': profiles, 'raw_tt': tt_raw, 'raw_policy': saved_raw}
+                'raw_h': raw, 'config': config, 'profiles': profiles, 'raw_tt': tt_raw,
+                **{'raw_' + name: value for name, value in raw_routers.items()}, 'raw_policy': saved_raw}
 
     def snapshot(self):
         s = self.observe()
@@ -186,8 +222,8 @@ class Runtime:
                 new = yaml.safe_dump(config, sort_keys=False)
                 old = state['raw_h']
             else:
-                new = self.tt_config(exit_id, state, profiles)
-                old = state['raw_tt']
+                new = self.render(name, exit_id, state, profiles)
+                old = observed(state, name)
             prepared[name] = {'before': old, 'after': new, 'expected_ip': expected,
                               'before_ip': self.expected_ip(change['before'], profiles)}
         return prepared
@@ -203,8 +239,25 @@ class Runtime:
             value['relay'] = relay_config(profiles[exit_id], acl, profiles)
         return json.dumps(value, sort_keys=True)
 
+    def router_config(self, name, exit_id, state, profiles=None):
+        """Render a protocol router from the live ACL; resolves only the ingress name, never contacts an exit."""
+        profiles = profiles or state['profiles']
+        acl = state['config'].get('acl') or {}
+        # Clients must not hairpin to the host's own panels through the exit network.
+        blocked = [] if exit_id == 'direct' else [self.expected_ip('direct', profiles)]
+        extra = {'geoip': acl.get('geoip')} if name == 'cdn' else {}
+        value = ROUTERS[name].routing_config(exit_id, profiles, acl.get('inline') or None, blocked, **extra)
+        return json.dumps(value, sort_keys=True)
+
+    def render(self, name, exit_id, state, profiles=None):
+        if name == 'trusttunnel':
+            return self.tt_config(exit_id, state, profiles)
+        return self.router_config(name, exit_id, state, profiles)
+
     def current(self, name):
-        return self.agent.module_switch().get_config() if name == 'hysteria' else text_or_none(TT_CONFIG)
+        if name == 'hysteria':
+            return self.agent.module_switch().get_config()
+        return text_or_none(TT_CONFIG) if name == 'trusttunnel' else ROUTERS[name].current_routing()
 
     def write(self, name, value, expected_current):
         if name == 'hysteria':
@@ -215,6 +268,10 @@ class Runtime:
                 self.agent.module_switch().write_config(value)
             finally:
                 self.agent.run(['systemctl', 'start', 'h-ui'])
+        elif name in ROUTERS:
+            if self.current(name) != expected_current:
+                raise PolicyError(SERVICES[name] + ': маршрутизация изменена другим оператором')
+            ROUTERS[name].apply_routing(value)
         else:
             if self.current(name) != expected_current:
                 raise PolicyError('Конфигурация TrustTunnel изменена другим оператором')
@@ -227,6 +284,8 @@ class Runtime:
     def probe(self, name, expected):
         if name == 'hysteria':
             got = self.agent.module_switch().probe_hysteria(expected)
+        elif name in ROUTERS:
+            got = ROUTERS[name].probe()
         else:
             got = self.agent.run([str(TT_PROBE)], 60).strip()
         if str(ipaddress.IPv4Address(got)) != expected:
@@ -326,28 +385,31 @@ def apply(runtime, data):
                 'changes': plan['changes'], 'untouched': plan['untouched'], 'backup': backup}
 
 
-def sync_trusttunnel(runtime):
-    """Re-render the TrustTunnel relay from the current Hysteria ACL, keeping its exit.
+def sync_exceptions(runtime):
+    """Re-render every relay routed via an exit from the current Hysteria ACL, keeping its exit.
 
-    Returns a user-facing message, or None when TrustTunnel exits directly or is already in sync.
+    Returns a user-facing message, or None when no relay exits via an exit or all are in sync.
     """
     with route_lock():
         if PENDING.exists():
             raise PolicyError('Предыдущее переключение не завершено. Сначала проверьте журнал восстановления.')
         state = runtime.observe()
-        service = state['services']['trusttunnel']
-        exit_id = service['actual_exit']
-        if exit_id not in ('primary', 'reserve') or not service['configurable']:
+        changes = []
+        for name in RELAYS:
+            service = state['services'][name]
+            exit_id = service['actual_exit']
+            if exit_id not in EXITS or not service['configurable']:
+                continue
+            # Compare before prepare(): it resolves and checks the exit over the network.
+            if runtime.render(name, exit_id, state) != observed(state, name):
+                changes.append({'id': name, 'before': exit_id, 'after': exit_id, 'restart': True})
+        if not changes:
             return None
-        # Compare before prepare(): it resolves and checks the exit over the network.
-        if runtime.tt_config(exit_id, state) == state['raw_tt']:
-            return None
-        change = {'id': 'trusttunnel', 'before': exit_id, 'after': exit_id, 'restart': True}
-        prepared = runtime.prepare({'changes': [change]}, state)
+        prepared = runtime.prepare({'changes': changes}, state)
         if runtime.observe()['revision'] != state['revision']:
             raise PolicyError('Конфигурация изменилась во время проверки. Обновите страницу.')
         commit(runtime, prepared, state['raw_policy'])
-        return 'Исключения TrustTunnel синхронизированы с Hysteria и проверены.'
+        return 'Исключения синхронизированы с Hysteria и проверены: ' + ', '.join(SERVICES[c['id']] for c in changes) + '.'
 
 
 def watchdog_restore(path):

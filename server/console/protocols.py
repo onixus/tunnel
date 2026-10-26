@@ -57,7 +57,10 @@ SOURCES = {
     'trusttunnel': {'title': 'TrustTunnel', 'repo': 'TrustTunnel/TrustTunnel', 'tag': r'v(\d+\.\d+\.\d+)',
                     'asset': 'trusttunnel-{tag}-linux-x86_64.tar.gz', 'runtime': 'docker · ' + TT_CONTAINER},
     'amnezia': {'title': 'AmneziaWG 3.1', 'repo': 'amnezia-vpn/amneziawg-go', 'tools': 'amnezia-vpn/amneziawg-tools',
-                'tag': r'v(3\.1\.\d{8})', 'runtime': 'docker · ' + amnezia.CONTAINER},
+                'tag': r'v(3\.1\.\d{8})', 'runtime': 'docker · ' + amnezia.CONTAINER,
+                # Router for exit routing; the 1.x line matching the TrustTunnel relay's config format.
+                'box': {'repo': 'SagerNet/sing-box', 'tag': r'v(1\.(?:1[2-9]|[2-9]\d)\.\d+)',
+                        'asset': 'sing-box-{version}-linux-amd64.tar.gz'}},
     'cdn': {'title': 'VLESS через CDN', 'repo': 'XTLS/Xray-core', 'tag': r'v(\d+\.\d+\.\d+)',
             'asset': 'Xray-linux-64.zip', 'runtime': 'docker · ' + cdn.CONTAINER},
 }
@@ -171,6 +174,23 @@ def client_build(tag):
     return {'sequence': int(sequence[1]), 'ipc': int(ipc[1]), 'root': root.hex()}
 
 
+def releases(src):
+    """Stable releases whose asset carries a digest GitHub published, newest first."""
+    found = []
+    for release in api(src['repo'] + '/releases?per_page=30'):
+        match = re.fullmatch(src['tag'], str(release.get('tag_name', '')))
+        if not match or release.get('draft') or release.get('prerelease'):
+            continue
+        wanted = src['asset'].format(tag=release['tag_name'], version=match[1])
+        asset = next((a for a in release.get('assets', []) if a.get('name') == wanted), None)
+        digest = str((asset or {}).get('digest') or '')
+        if not asset or not re.fullmatch('sha256:[0-9a-f]{64}', digest) or not 0 < asset.get('size', 0) <= LIMIT:
+            continue
+        found.append({'version': match[1], 'tag': release['tag_name'], 'sha256': digest[7:],
+                      'published': str(release.get('published_at', ''))[:10]})
+    return sorted(found, key=lambda r: key(r['version']), reverse=True)
+
+
 def discover(name):
     if name == 'client':
         found = []
@@ -214,18 +234,12 @@ def discover(name):
                 date = version.rsplit('.', 1)[1]
                 found.append({'version': version, 'tag': tag, 'commit': commit, 'tools_tag': tools_tag,
                               'tools_commit': tools_commit, 'published': f'{date[:4]}-{date[4:6]}-{date[6:]}'})
+        box = releases(src['box'])
+        for release in found:
+            if box:
+                release.update(box_version=box[0]['version'], box_tag=box[0]['tag'], box_sha256=box[0]['sha256'])
     else:
-        for release in api(src['repo'] + '/releases?per_page=30'):
-            match = re.fullmatch(src['tag'], str(release.get('tag_name', '')))
-            if not match or release.get('draft') or release.get('prerelease'):
-                continue
-            wanted = src['asset'].format(tag=release['tag_name'])
-            asset = next((a for a in release.get('assets', []) if a.get('name') == wanted), None)
-            digest = str((asset or {}).get('digest') or '')
-            if not asset or not re.fullmatch('sha256:[0-9a-f]{64}', digest) or not 0 < asset.get('size', 0) <= LIMIT:
-                continue
-            found.append({'version': match[1], 'tag': release['tag_name'], 'sha256': digest[7:],
-                          'published': str(release.get('published_at', ''))[:10]})
+        found = releases(src)
     return sorted(found, key=lambda r: key(r['version']), reverse=True)[:5]
 
 
@@ -530,11 +544,26 @@ def install_amnezia(op, data, release, work, agent):
             raise PolicyError('Некорректные данные релиза. Проверьте обновления.')
     if not SHA.fullmatch(str(release.get('commit', ''))) or not SHA.fullmatch(str(release.get('tools_commit', ''))):
         raise PolicyError('Некорректные данные релиза. Проверьте обновления.')
+    box = SOURCES['amnezia']['box']
+    match = re.fullmatch(box['tag'], str(release.get('box_tag', '')))
+    if not match or match[1] != release.get('box_version') or not re.fullmatch('[0-9a-f]{64}', str(release.get('box_sha256', ''))):
+        raise PolicyError('Нет проверенного релиза sing-box для маршрутизации AmneziaWG. Проверьте обновления.')
+    require_x86()
     fresh = not amnezia.STATE.exists()
     # Validate the port before a build that takes minutes.
     state = amnezia.new_state(data.get('port')) if fresh else amnezia.load()
     for name in ('Dockerfile', 'entrypoint.sh'):
         shutil.copy2(asset('amnezia', name), work / name)
+    archive = work / 'sing-box.tar.gz'
+    download(asset_url(box['repo'], release['box_tag'], box['asset'].format(version=release['box_version'])),
+             archive, release['box_sha256'])
+    with tarfile.open(archive) as tar:
+        member = next((m for m in tar if m.isfile() and Path(m.name).name == 'sing-box'), None)
+        if member is None or member.size > LIMIT:
+            raise PolicyError('В архиве разработчика нет sing-box')
+        with tar.extractfile(member) as source, open(work / 'sing-box', 'wb') as target:
+            shutil.copyfileobj(source, target)
+    archive.unlink()
     image = 'vpn-amneziawg:' + release['version']
     build(['--pull', '--build-arg', 'AWG_GO_REF=' + release['tag'],
          '--build-arg', 'AWG_GO_COMMIT=' + release['commit'], '--build-arg', 'AWG_TOOLS_REF=' + release['tools_tag'],
@@ -542,14 +571,8 @@ def install_amnezia(op, data, release, work, agent):
     before = None if fresh else json.dumps(state, sort_keys=True)
     state.update(version=release['version'], tag=release['tag'], image=image)
     amnezia.save(state, sync=False)
-    port = str(state['port'])
+    port = state['port']
 
-    def verify():
-        for _ in range(20):
-            if quiet(['docker', 'exec', amnezia.CONTAINER, 'awg', 'show', amnezia.INTERFACE, 'listen-port'])[1] == port:
-                return
-            time.sleep(1)
-        raise PolicyError('AmneziaWG не запустился в новом контейнере')
     def restore():
         if before is None:
             amnezia.STATE.unlink(missing_ok=True)
@@ -557,12 +580,9 @@ def install_amnezia(op, data, release, work, agent):
         else:
             amnezia.save(json.loads(before), sync=False)
     try:
-        swap_container(amnezia.CONTAINER, [
-            '--restart', 'unless-stopped', '--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--cap-add', 'NET_RAW',
-            '--device', '/dev/net/tun', '--sysctl', 'net.ipv4.ip_forward=1', '--security-opt', 'no-new-privileges',
-            '-p', f'{port}:{port}/udp', '--mount', f'type=bind,src={amnezia.RUNTIME},dst=/etc/amnezia/amneziawg,readonly',
-            '--label', 'vpn.console.version=' + release['version'], '--log-opt', 'max-size=5m', '--log-opt', 'max-file=2',
-            image], verify, restore=restore)
+        # Routing files stay as they are: an update keeps the selected exit.
+        swap_container(amnezia.CONTAINER, amnezia.container_args(state, image), lambda: amnezia.verify(state),
+                       restore=restore)
     except BaseException:
         raise PolicyError('AmneziaWG не прошёл проверку запуска. Проверьте состояние предыдущего контейнера.') from None
     return (f'AmneziaWG {release["version"]} работает на UDP {port}. '

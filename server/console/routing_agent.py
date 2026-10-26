@@ -57,13 +57,13 @@ def dispatch(op, data):
         if service_routes.PENDING.exists():
             raise PolicyError('Сначала завершите восстановление предыдущего переключения')
         result = agent.dispatch(op, data)
-        # Exception edits target Hysteria ACL; TrustTunnel relay must follow them.
+        # Exception edits target Hysteria ACL; TrustTunnel and CDN routers must follow them.
         try:
-            synced = service_routes.sync_trusttunnel(runtime)
+            synced = service_routes.sync_exceptions(runtime)
         except PolicyError as exc:
-            synced = 'TrustTunnel не синхронизирован: ' + str(exc)
+            synced = 'Исключения не синхронизированы: ' + str(exc)
         except Exception:
-            synced = 'TrustTunnel не синхронизирован; повторите сохранение исключений или проверьте журнал'
+            synced = 'Исключения не синхронизированы; повторите сохранение исключений или проверьте журнал'
         if synced:
             result['message'] = result.get('message', '') + ' ' + synced
         return result

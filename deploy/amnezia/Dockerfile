@@ -1,4 +1,4 @@
-# AmneziaWG server built from the developers' repositories at pinned tags.
+# AmneziaWG server built from the developers' repositories at pinned tags, plus the exit router.
 # The agent passes tags and the commits GitHub reported for them; a moved tag fails the build.
 FROM golang:1.25 AS awg
 ARG AWG_GO_REF
@@ -22,6 +22,8 @@ RUN apk add --no-cache bash iproute2 iptables
 COPY --from=tools /tools/src/wg /usr/bin/awg
 COPY --from=tools /tools/src/wg-quick/linux.bash /usr/bin/awg-quick
 COPY --from=awg /out/amneziawg-go /usr/bin/amneziawg-go
+# Official sing-box release; the agent checked the SHA-256 GitHub published for the archive.
+COPY sing-box /usr/bin/sing-box
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod 0755 /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go /entrypoint.sh
+RUN chmod 0755 /usr/bin/awg /usr/bin/awg-quick /usr/bin/amneziawg-go /usr/bin/sing-box /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

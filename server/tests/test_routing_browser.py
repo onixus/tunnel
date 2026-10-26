@@ -17,10 +17,11 @@ REV = 'a' * 64
 
 
 def fixture_state():
-    modes = initial_policy({'hysteria': 'primary', 'trusttunnel': 'direct'})
+    modes = initial_policy({'hysteria': 'primary', 'trusttunnel': 'direct', 'cdn': 'direct', 'amnezia': 'direct'})
     services = [dict(id=k, title=t, actual_exit=e, desired_exit=e, configurable=True, reason='',
                      available_exits=['primary', 'reserve', 'direct'], drift=False, **modes['services'][k])
-                for k, t, e in [('hysteria', 'Hysteria 2', 'primary'), ('trusttunnel', 'TrustTunnel / R-TrustTunnel', 'direct')]]
+                for k, t, e in [('hysteria', 'Hysteria 2', 'primary'), ('trusttunnel', 'TrustTunnel / R-TrustTunnel', 'direct'),
+                                ('cdn', 'VLESS через CDN', 'direct'), ('amnezia', 'AmneziaWG', 'direct')]]
     return {'observed_at': '2026-10-01T16:22:00Z', 'jobs': [], 'audit': [], 'users': [{}, {}], 'keys': [{}, {}, {}, {}],
             'hysteria_users': [{}, {}], 'devices': [], 'smtp': True, 'services': {'hysteria': 'active', 'trusttunnel': 'running'},
             'updates': {'active_sequence': 6}, 'telegram': {'running': True}, 'adblock': {'running': True, 'dns_interception': True},
