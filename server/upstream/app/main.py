@@ -19,9 +19,11 @@ async def lifespan(app: FastAPI):
     # Свести файлы endpoint'а к текущим настройкам и запустить (если есть домен+серт).
     try:
         endpoint.manager.reconcile()
-        endpoint.manager.start_cert_watcher()
     except Exception as e:  # проблема с endpoint не должна ронять панель
         print(f"[startup] endpoint reconcile failed: {e}")
+    # Вотчер запускаем при любом исходе reconcile: его drift-check поднимает
+    # endpoint после неудачного старта, он же продлевает сертификат.
+    endpoint.manager.start_cert_watcher()
     yield
     endpoint.manager.stop()
 

@@ -3,8 +3,10 @@
 Панель сама:
   • генерирует vpn.toml / hosts.toml / credentials.toml / rules.toml;
   • запускает trusttunnel_endpoint как дочерний процесс;
-  • при смене кредов делает ПОЛНЫЙ рестарт (endpoint по SIGHUP креды не
-    перечитывает — только TLS-hosts; проверено на бою в исходном проекте);
+  • новые конфиги выдаёт из резерва кредов, уже загруженных в endpoint, —
+    без рестарта (endpoint по SIGHUP креды не перечитывает — только TLS-hosts);
+  • рестартует только при изменении файлов, читаемых при старте (порт, отзыв/
+    блокировка кредов — fail-closed), и схлопывает серию таких изменений;
   • при смене домена/продлении сертификата делает SIGHUP (без разрыва сессий);
   • читает сертификаты из CERT_DIR/live/<domain>/ (режим external, за nginx)
     либо из выпущенных certbot'ом (режим letsencrypt) — путь один и тот же.
@@ -200,16 +202,64 @@ def write_credentials_toml(creds: list[dict]) -> bool:
 
 
 # ── Менеджер процесса endpoint'а ─────────────────────────────────────────────
+# Версия контракта супервизора: оверлей отказывается работать со старым базовым
+# образом, где reconcile() не рестартует при отзыве и нет резерва кредов.
+SUPERVISOR_CONTRACT = 2
+
+# Файлы, которые endpoint читает только при старте: их изменение требует рестарта.
+_RESTART_FILES = ("vpn.toml", "rules.toml", "credentials.toml")
+
+
+def standby_target() -> int:
+    """Сколько резервных кредов держать загруженными в endpoint (0 — выключить резерв)."""
+    try:
+        return max(0, int(os.environ.get("ENDPOINT_STANDBY_CREDENTIALS", "16")))
+    except ValueError:
+        return 16
+
+
 class EndpointManager:
+    # Схлопывание рестартов: ждём тишины quiet секунд, не чаще раза в min_interval,
+    # но не дольше max_delay от первого запроса (отзыв не должен висеть долго).
+    restart_quiet = 1.0
+    restart_min_interval = 5.0
+    restart_max_delay = 8.0
+    # Сколько ждёт вызов apply_credentials, прежде чем вернуть ошибку.
+    restart_wait_timeout = 60.0
+
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.RLock()
         self._cert_mtime: float | None = None
         self._watcher_stop = threading.Event()
+        # Содержимое _RESTART_FILES, с которым стартовал текущий процесс.
+        self._loaded: tuple | None = None
+        # Последний запуск не удался: periodic drift-check повторит его.
+        self._spawn_failed = False
+        self._last_spawn = float("-inf")
+        self._cv = threading.Condition()
+        self._restart_requested = 0
+        self._restart_done = 0
+        self._first_request: float | None = None
+        self._last_request = 0.0
+        self._last_failure = float("-inf")
+        # (номер последнего запроса в пачке, ошибка или None) — для ожидающих.
+        self._batches: list[tuple[int, Exception | None]] = []
+        self._worker: threading.Thread | None = None
 
     # -- низкоуровневое управление процессом --
     def _is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    def _restart_inputs(self) -> tuple:
+        workdir = Path(config.ENDPOINT_WORKDIR)
+        out = []
+        for name in _RESTART_FILES:
+            try:
+                out.append((workdir / name).read_bytes())
+            except OSError:
+                out.append(None)
+        return tuple(out)
 
     def _spawn(self) -> None:
         bin_path = Path(config.ENDPOINT_BIN)
@@ -217,14 +267,21 @@ class EndpointManager:
             print(f"[endpoint] binary not found at {bin_path}; endpoint disabled")
             return
         try:
+            loaded = self._restart_inputs()
             self._proc = subprocess.Popen(
                 [str(bin_path), "vpn.toml", "hosts.toml"],
                 cwd=config.ENDPOINT_WORKDIR,
             )
+            self._loaded = loaded
+            self._last_spawn = time.monotonic()
+            self._spawn_failed = False
             print(f"[endpoint] started (pid={self._proc.pid})")
         except OSError as e:
             print(f"[endpoint] failed to start: {e}")
             self._proc = None
+            self._spawn_failed = True
+            # Ожидающий вызов получает ошибку, а не ложный успех.
+            raise RuntimeError("endpoint failed to start") from e
 
     def _kill(self) -> None:
         if self._is_running():
@@ -235,15 +292,37 @@ class EndpointManager:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
         self._proc = None
+        self._loaded = None
+        self._spawn_failed = False
+
+    def _write_credentials(self, conn=None) -> None:
+        # Сначала резерв, потом выданные: выдача переносит строку из резерва в
+        # configs, поэтому при таком порядке параллельная выдача не теряет cred.
+        merged: dict[str, dict] = {}
+        for c in db.standby_credentials(conn) + db.active_credentials():
+            merged[c["username"]] = c
+        write_credentials_toml([merged[k] for k in sorted(merged)])
 
     # -- публичные операции --
-    def reconcile(self, restart_for_creds: bool = False) -> None:
-        """Свести файлы endpoint'а к текущим настройкам/кредам и (пере)запустить.
+    def reconcile(self, restart_for_creds: bool = True, defer_restart: bool = False, conn=None) -> str:
+        """Свести файлы endpoint'а к текущим настройкам/кредам.
 
-        restart_for_creds=True → форсируем рестарт (смена кредов).
-        Иначе: старт, если не запущен; SIGHUP, если менялся hosts.toml/серт.
+        Endpoint перечитывает по SIGHUP только hosts.toml (TLS-хосты, сертификат);
+        vpn.toml/rules.toml/credentials.toml — только при старте. Поэтому:
+          • файлы не изменились относительно запущенного процесса → ничего;
+          • изменился hosts.toml или серт → SIGHUP, сессии живут;
+          • изменились файлы старта (порт, удалённый/отозванный cred) → рестарт,
+            при defer_restart=True — схлопнутый (см. apply_credentials).
+        Новые конфиги забирают резервный cred (db.claim_credential), содержимое
+        credentials.toml при этом не меняется и рестарта нет.
+        restart_for_creds оставлен для совместимости: отзыв всегда fail-closed.
+        conn — пишущая транзакция вызывающего, если он её держит (fence в
+        apply_pending): резерв обновляется в ней, а не во втором соединении.
+        Возвращает "started" | "restarted" | "restart_pending" | "sighup" | "unchanged" | "stopped".
         """
         with self._lock:
+            if self._watcher_stop.is_set():  # после stop() endpoint не поднимаем
+                return "stopped"
             settings = db.get_settings()
             port = int(settings.get("conn_port", "8443") or "8443")
             domain = effective_domain(settings)
@@ -251,7 +330,7 @@ class EndpointManager:
 
             ensure_rules_toml()
             write_vpn_toml(port)
-            creds_changed = write_credentials_toml(db.active_credentials())
+            self._write_credentials(conn)
 
             # Режим letsencrypt: пытаемся выпустить серт, если его ещё нет.
             if domain and settings.get("cert_mode") == "letsencrypt" and not cert_present(domain):
@@ -265,34 +344,116 @@ class EndpointManager:
                     print(f"[endpoint] certificate for {domain} not found in {config.CERT_DIR}")
                 self._kill()
                 self._cert_mtime = None
-                return
+                return "stopped"
 
             hosts_changed = write_hosts_toml(domain, sni)
             fc, _ = cert_paths(domain)
             self._cert_mtime = fc.stat().st_mtime
 
-            if not self._is_running():
-                self._spawn()
-                return
-            if restart_for_creds and creds_changed:
-                print("[endpoint] credentials changed — restarting")
+            running = self._is_running()
+            if running and self._restart_inputs() == self._loaded:
+                if hosts_changed:
+                    print("[endpoint] TLS host changed — SIGHUP")
+                    self._sighup()
+                    return "sighup"
+                return "unchanged"
+            if running and defer_restart:
+                return "restart_pending"
+            # Рестарт неизбежен: заодно заменяем резерв свежим, чтобы следующие
+            # выдачи обходились без рестарта. Сбой здесь не должен отменять
+            # рестарт: файл без отозванных кредов уже записан выше.
+            try:
+                db.rotate_standby(standby_target(), conn)
+                self._write_credentials(conn)
+            except Exception as e:
+                print(f"[endpoint] standby credentials not rotated: {type(e).__name__}")
+            if running:
+                print("[endpoint] startup config changed — restarting")
                 self._kill()
-                self._spawn()
-                return
-            if hosts_changed:
-                print("[endpoint] TLS host changed — SIGHUP")
-                self._sighup()
+            self._spawn()
+            return "restarted" if running else "started"
 
     def apply_credentials(self) -> None:
-        """Вызывать после создания/удаления конфига или блокировки юзера."""
-        self.reconcile(restart_for_creds=True)
+        """Вызывать после создания/удаления конфига или блокировки юзера.
+
+        Выдача из резерва и повтор без изменений применяются сразу и без рестарта.
+        Если нужен рестарт (отзыв, исчерпан резерв), несколько запросов подряд
+        схлопываются в один; вызов возвращается после применения.
+        """
+        if self._lock._is_owned():
+            # Вызывающий держит супервизор: ждать воркер нельзя (взаимоблокировка).
+            self.reconcile()
+            return
+        if self.reconcile(defer_restart=True) == "restart_pending":
+            self._schedule_restart(wait=True)
 
     def apply_settings(self) -> None:
-        """Вызывать после сохранения настроек (домен/порт/серт/SNI)."""
-        # Смена порта требует нового listen — надёжнее полный рестарт.
-        with self._lock:
-            self._kill()
-        self.reconcile()
+        """Вызывать после сохранения настроек (домен/порт/серт/SNI).
+
+        Порт → рестарт; домен/SNI/серт → SIGHUP; без изменений → ничего.
+        """
+        self.apply_credentials()
+
+    # -- схлопывание рестартов --
+    def _schedule_restart(self, wait: bool) -> None:
+        with self._cv:
+            self._restart_requested += 1
+            target = self._restart_requested
+            now = time.monotonic()
+            self._last_request = now
+            if self._first_request is None:
+                self._first_request = now
+            if self._worker is None:
+                self._worker = threading.Thread(target=self._restart_loop, name="endpoint-restart", daemon=True)
+                self._worker.start()
+            self._cv.notify_all()
+            if not wait:
+                return
+            deadline = time.monotonic() + self.restart_wait_timeout
+            while self._restart_done < target:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("endpoint restart did not complete")
+                self._cv.wait(left)
+            error = next((e for t, e in self._batches if t >= target), None)
+        if error is not None:
+            raise RuntimeError("endpoint restart failed") from error
+
+    def _restart_loop(self) -> None:
+        while True:
+            with self._cv:
+                while True:
+                    if self._restart_done >= self._restart_requested:
+                        self._worker = None
+                        self._first_request = None
+                        return
+                    assert self._first_request is not None
+                    due = max(self._last_request + self.restart_quiet,
+                              self._last_spawn + self.restart_min_interval,
+                              self._last_failure + self.restart_min_interval)
+                    due = min(due, self._first_request + self.restart_max_delay)
+                    delay = due - time.monotonic()
+                    if delay <= 0:
+                        break
+                    self._cv.wait(delay)
+                target = self._restart_requested
+                self._first_request = None
+            error = None
+            try:
+                if not self._watcher_stop.is_set():  # после stop() не поднимаем endpoint заново
+                    self.reconcile()
+            except Exception as e:  # ошибку получают ожидающие, рестарт повторяется
+                error = e
+                print(f"[endpoint] restart failed: {type(e).__name__}; retrying")
+            with self._cv:
+                self._batches = [b for b in self._batches if b[0] > self._restart_done - 1024] + [(target, error)]
+                self._restart_done = max(self._restart_done, target)
+                if error is not None and not self._watcher_stop.is_set():
+                    # Повтор: отзыв не должен теряться молча.
+                    self._last_failure = time.monotonic()
+                    self._restart_requested += 1
+                    self._first_request = self._last_request = self._last_failure
+                self._cv.notify_all()
 
     def _sighup(self) -> None:
         if self._is_running():
@@ -325,14 +486,26 @@ class EndpointManager:
             renew_every = max(1, 12 * 3600 // interval)  # certbot renew ~2 раза в сутки
             while not self._watcher_stop.wait(interval):
                 ticks += 1
-                try:
+                # Каждая задача в своём try: сбой одной не отменяет остальные.
+                def renew() -> None:
                     if db.get_setting("cert_mode") == "letsencrypt" and ticks % renew_every == 0:
                         renew_letsencrypt()
-                    self._check_cert_renewed()
-                except Exception as e:  # вотчер не должен падать
-                    print(f"[endpoint] cert watcher error: {e}")
+                for task in (renew, self._check_cert_renewed, self._check_drift):
+                    try:
+                        task()
+                    except Exception as e:  # вотчер не должен падать
+                        print(f"[endpoint] cert watcher error: {e}")
 
         threading.Thread(target=loop, name="cert-watcher", daemon=True).start()
+
+    def _check_drift(self) -> None:
+        """Периодическая сверка: упавший процесс или файлы, не применённые из-за ошибки."""
+        with self._lock:
+            if self._proc is None and not self._spawn_failed:
+                return
+            if not self._is_running() or self._restart_inputs() != self._loaded:
+                print("[endpoint] running process differs from configuration — reconciling")
+                self.reconcile()
 
     def _check_cert_renewed(self) -> None:
         with self._lock:

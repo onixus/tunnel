@@ -97,9 +97,11 @@ def install(application):
                     while not stop.wait(5):
                         try: credentials.apply_pending()
                         except Exception: pass
-                credentials.apply_pending()
                 worker = threading.Thread(target=retry, name='device-credential-retry', daemon=True)
                 worker.start()
+                # A failed first attempt must neither stop startup nor the retries.
+                try: credentials.apply_pending()
+                except Exception: pass
                 try: yield state
                 finally:
                     stop.set()

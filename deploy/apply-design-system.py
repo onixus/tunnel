@@ -1,5 +1,6 @@
 """Install portal UI assets into an additive image, preserving overlay navigation."""
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -16,8 +17,24 @@ def check_portal_version(source, target):
             raise RuntimeError(f'Portal {name} differs from server/upstream; rebuild the base image from this checkout')
 
 
+# Supervisor contract the overlay relies on (fail-closed revocation, standby
+# credentials). Checked by marker because endpoint.py is patched in deployed images.
+REQUIRED_SUPERVISOR_CONTRACT = 2
+SUPERVISOR_MARKERS = (('endpoint.py', re.compile(r'^SUPERVISOR_CONTRACT = (\d+)$', re.M)),
+                      ('db.py', re.compile(r'^def claim_credential\(', re.M)))
+
+
+def check_supervisor(target):
+    for name, marker in SUPERVISOR_MARKERS:
+        installed = target / name
+        found = marker.search(installed.read_text(encoding='utf-8')) if installed.is_file() else None
+        if found is None or (found.groups() and int(found.group(1)) < REQUIRED_SUPERVISOR_CONTRACT):
+            raise RuntimeError(f'Portal {name} predates the endpoint supervisor contract; rebuild the base image from this checkout')
+
+
 def apply(source, target):
     check_portal_version(source, target)
+    check_supervisor(target)
     client = target / 'templates/base_client.html'
     admin = target / 'templates/base_admin.html'
     profiles = client.exists() and 'href="/profiles"' in client.read_text(encoding='utf-8')

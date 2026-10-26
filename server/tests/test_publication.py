@@ -17,6 +17,7 @@ def module(name, path):
 
 patcher = module('portal_patch', ROOT / 'deploy/portal_patch.py')
 builder = module('portal_build', ROOT / 'deploy/prepare-portal-update.py')
+design = module('apply_design_system', ROOT / 'deploy/apply-design-system.py')
 
 
 class PublicationTests(unittest.TestCase):
@@ -153,6 +154,30 @@ class PublicationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 builder.prepare('missing', 'routes:new')
             self.assertEqual(run.call_count, 1)
+
+    def test_overlay_refuses_base_without_supervisor_contract(self):
+        import shutil
+        source = ROOT / 'server/upstream/app'
+        old_bases = (('endpoint.py', 'SUPERVISOR_CONTRACT = 2', ''), ('endpoint.py', 'SUPERVISOR_CONTRACT = 2', 'SUPERVISOR_CONTRACT = 1'),
+                     ('db.py', 'def claim_credential(', 'def unrelated('))
+        for name, marker, replacement in old_bases:
+            with self.subTest(name=name, replacement=replacement), tempfile.TemporaryDirectory() as folder:
+                target = Path(folder) / 'app'
+                shutil.copytree(source, target)
+                installed = target / name
+                installed.write_text(installed.read_text(encoding='utf-8').replace(marker, replacement), encoding='utf-8')
+                before = (target / 'templates/base_client.html').read_bytes()
+                with self.assertRaisesRegex(RuntimeError, 'supervisor contract'):
+                    design.apply(source, target)
+                self.assertEqual((target / 'templates/base_client.html').read_bytes(), before)
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'app'
+            shutil.copytree(source, target)
+            design.apply(source, target)
+            # A later contract version is accepted.
+            installed = target / 'endpoint.py'
+            installed.write_text(installed.read_text(encoding='utf-8').replace('SUPERVISOR_CONTRACT = 2', 'SUPERVISOR_CONTRACT = 3'), encoding='utf-8')
+            design.check_supervisor(target)
 
 
 if __name__ == '__main__':

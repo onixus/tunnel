@@ -102,6 +102,14 @@ CREATE TABLE IF NOT EXISTS enroll_codes (
     device_id  INTEGER REFERENCES app_devices(id) ON DELETE SET NULL
 );
 
+-- Резерв кредов, уже загруженных в работающий endpoint, но никому не выданных.
+-- Новый конфиг забирает строку отсюда, и endpoint принимает его без рестарта
+-- (credentials.toml — объединение выданных и резервных, содержимое не меняется).
+CREATE TABLE IF NOT EXISTS endpoint_standby (
+    username TEXT PRIMARY KEY,
+    password TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_configs_user   ON configs(user_id);
 CREATE INDEX IF NOT EXISTS idx_configs_active ON configs(revoked_at);
 CREATE INDEX IF NOT EXISTS idx_devices_user   ON app_devices(user_id);
@@ -284,8 +292,67 @@ def delete_user(user_id: int) -> None:
 
 
 # ── Конфиги ──────────────────────────────────────────────────────────────────
+def claim_credential(conn: sqlite3.Connection, tt_username: str, tt_password: str) -> tuple[str, str]:
+    """Забрать резервный cred в транзакции conn; без резерва — переданный (нужен рестарт)."""
+    row = conn.execute("SELECT username, password FROM endpoint_standby ORDER BY rowid LIMIT 1").fetchone()
+    if row is None:
+        return tt_username, tt_password
+    conn.execute("DELETE FROM endpoint_standby WHERE username = ?", (row["username"],))
+    return row["username"], row["password"]
+
+
+@contextmanager
+def _maybe(conn: sqlite3.Connection | None):
+    """Переданное соединение (транзакция вызывающего) или своё."""
+    if conn is not None:
+        yield conn
+        return
+    with connect() as own:
+        yield own
+
+
+def standby_credentials(conn: sqlite3.Connection | None = None) -> list[dict]:
+    with _maybe(conn) as c:
+        rows = c.execute("SELECT username, password FROM endpoint_standby ORDER BY username").fetchall()
+    return [{"username": r["username"], "password": r["password"]} for r in rows]
+
+
+def rotate_standby(target: int, conn: sqlite3.Connection | None = None) -> None:
+    """Заменить весь невыданный резерв на target новых случайных кредов.
+
+    Вызывается только перед рестартом endpoint'а: старый резерв живёт не дольше
+    одного процесса, target=0 очищает его. conn — уже открытая пишущая транзакция
+    вызывающего (например, fence в apply_pending): второе пишущее соединение из
+    того же потока ждало бы его и упиралось в таймаут блокировки.
+    """
+    import secrets
+    with _maybe(conn) as c:
+        if conn is None:
+            c.execute("BEGIN IMMEDIATE")
+        # Ошибка на полпути не должна закоммититься вместе с транзакцией
+        # вызывающего: иначе в БД будет частичный резерв, а в загруженном
+        # endpoint'ом файле — прежний.
+        c.execute("SAVEPOINT standby_rotation")
+        try:
+            c.execute("DELETE FROM endpoint_standby")
+            have = 0
+            while have < target:
+                name = "t" + secrets.token_hex(8)
+                if c.execute("SELECT 1 FROM configs WHERE tt_username = ?", (name,)).fetchone():
+                    continue
+                have += c.execute("INSERT OR IGNORE INTO endpoint_standby(username, password) VALUES (?, ?)",
+                                  (name, secrets.token_urlsafe(32))).rowcount
+        except BaseException:
+            c.execute("ROLLBACK TO standby_rotation")
+            c.execute("RELEASE standby_rotation")
+            raise
+        c.execute("RELEASE standby_rotation")
+
+
 def create_config(user_id: int, tt_username: str, tt_password: str, label: str | None) -> int:
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        tt_username, tt_password = claim_credential(conn, tt_username, tt_password)
         cur = conn.execute(
             "INSERT INTO configs(user_id, tt_username, tt_password, label) VALUES (?, ?, ?, ?)",
             (user_id, tt_username, tt_password, label),
@@ -387,6 +454,8 @@ def create_device_config(
     user_id: int, device_id: int, tt_username: str, tt_password: str, label: str | None
 ) -> int:
     with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        tt_username, tt_password = claim_credential(conn, tt_username, tt_password)
         cur = conn.execute(
             "INSERT INTO configs(user_id, device_id, tt_username, tt_password, label) "
             "VALUES (?, ?, ?, ?, ?)",
