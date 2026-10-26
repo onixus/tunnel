@@ -19,7 +19,9 @@ RUN apk add --no-cache git build-base linux-headers && \
     git clone --depth 1 --branch "${AWG_TOOLS_REF}" https://github.com/amnezia-vpn/amneziawg-tools.git /tools && \
     test "$(git -C /tools rev-parse HEAD)" = "${AWG_TOOLS_COMMIT}" && \
     make -C /tools/src && \
-    sed -i '/^add_if() {$/,/^}$/c\add_if() {\n\tcmd amneziawg-go "$INTERFACE"\n}' /tools/src/wg-quick/linux.bash
+    sed -i '/^add_if() {$/,/^}$/c\add_if() {\n\tcmd amneziawg-go "$INTERFACE"\n}' /tools/src/wg-quick/linux.bash && \
+    grep -qx "$(printf '\tcmd amneziawg-go "$INTERFACE"')" /tools/src/wg-quick/linux.bash && \
+    ! grep -q 'type amneziawg' /tools/src/wg-quick/linux.bash
 
 FROM alpine:3.19
 RUN apk add --no-cache bash iproute2 iptables

@@ -25,15 +25,19 @@
     const action = !p.installed
       ? `<button data-action="protocol-install" data-id="${esc(p.id)}" ${off}>Установить${p.latest ? " " + esc(p.latest) : ""}</button>`
       : p.update
-        ? `<button data-action="protocol-update" data-id="${esc(p.id)}" ${off}>Обновить до ${esc(p.latest)}</button>`
+        ? `<button data-action="protocol-update" data-id="${esc(p.id)}" ${off}>${p.latest === p.version && p.tools_latest ? "Обновить tools до " + esc(p.tools_latest) : "Обновить до " + esc(p.latest)}</button>`
         : `<span class="muted">${p.latest ? "Установлена актуальная версия" : "Версии ещё не проверялись"}</span>`;
     const c = p.id === "cdn" && p.installed && p.settings;
     const cdnRows = c
       ? `<dt>Домен CDN</dt><dd>${c.domain ? esc(c.domain) : '<span class="error">не задан</span>'}</dd><dt>Подключение</dt><dd>${esc(c.address || c.domain || "—")}:${esc(c.client_port)}</dd><dt>Транспорт</dt><dd>${c.transport === "ws" ? "WebSocket" : "XHTTP"} · <code>${esc(c.path)}</code></dd><dt>Origin</dt><dd>${c.origin_tls ? "HTTPS" : "HTTP"} · TCP ${esc(c.origin_port)}</dd>`
       : "";
+    // AmneziaWG tools are released independently of the daemon and can be updated on their own.
+    const toolsRows = p.id === "amnezia" && (p.installed || p.tools_latest)
+      ? `<dt>Tools</dt><dd>${esc(p.tools_version || (p.installed ? "версия не определена" : "—"))}${p.tools_latest ? ` <small>в репозитории ${esc(p.tools_latest)}</small>` : ""}</dd>`
+      : "";
     const configure = c ? `<button data-action="protocol-cdn-configure" ${off}>Настроить CDN</button>` : "";
     return `<section class="card protocol-card" data-protocol-card="${esc(p.id)}"><div class="service"><div><strong>${esc(p.title)}</strong><small>${esc(p.runtime)}${p.port ? " · UDP " + esc(p.port) : ""}</small></div>${p.installed ? status(p.state) : gray("Не установлен")}</div>
-      <dl><dt>Установлена</dt><dd>${esc(p.version || (p.installed ? "версия не определена" : "—"))}</dd><dt>В репозитории</dt><dd>${p.latest ? esc(p.latest) + (p.releases[0].published ? ` <small>от ${esc(p.releases[0].published)}</small>` : "") : "—"}</dd>${cdnRows}<dt>Источник</dt><dd><a href="${esc(p.repo)}" target="_blank" rel="noopener noreferrer">${esc(p.repo.replace("https://github.com/", ""))} ↗</a></dd></dl>
+      <dl><dt>Установлена</dt><dd>${esc(p.version || (p.installed ? "версия не определена" : "—"))}</dd><dt>В репозитории</dt><dd>${p.latest ? esc(p.latest) + (p.releases[0].published ? ` <small>от ${esc(p.releases[0].published)}</small>` : "") : "—"}</dd>${toolsRows}${cdnRows}<dt>Источник</dt><dd><a href="${esc(p.repo)}" target="_blank" rel="noopener noreferrer">${esc(p.repo.replace("https://github.com/", ""))} ↗</a></dd></dl>
       ${p.error ? `<p class="error">${esc(p.error)}</p>` : ""}<div class="actions">${action}${configure}</div></section>`;
   }
 

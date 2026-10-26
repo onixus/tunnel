@@ -80,6 +80,8 @@ ROLES = {TT_CONTAINER: 'TrustTunnel и портал', amnezia.CONTAINER: 'Amnezi
 UNITS = (('h-ui', 'Hysteria 2 / H UI'), ('vpn-console-agent', 'Агент консоли'), ('vpn-telegram', 'Telegram-бот'),
          ('vpn-adblock-dns', 'Перехват DNS'), ('docker', 'Docker Engine'))
 _MEMO = {'at': 0.0, 'value': None}
+# Binaries change only with a new container: AmneziaWG versions read once per container id.
+_AWG_VERSIONS = {}
 
 
 def run(args, timeout=30, env=None):
@@ -232,10 +234,12 @@ def discover(name):
             # Tools and daemon have independent release dates within the supported protocol line.
             fit = [v for v in tools if key(v)[:2] == key(version)[:2]]
             if fit:
-                tools_tag, tools_commit = tools[max(fit, key=key)]
+                tools_version = max(fit, key=key)
+                tools_tag, tools_commit = tools[tools_version]
                 date = version.rsplit('.', 1)[1]
                 found.append({'version': version, 'tag': tag, 'commit': commit, 'tools_tag': tools_tag,
-                              'tools_commit': tools_commit, 'published': f'{date[:4]}-{date[4:6]}-{date[6:]}'})
+                              'tools_version': tools_version, 'tools_commit': tools_commit,
+                              'published': f'{date[:4]}-{date[4:6]}-{date[6:]}'})
         box = releases(src['box'], latest=True)
         for release in found:
             if box:
@@ -438,17 +442,24 @@ def installed(name):
             saved = None
         return {'installed': code == 0 and saved is not None, 'version': (saved or {}).get('version'),
                 'state': state if code == 0 else 'absent', 'settings': cdn.public_settings(saved) if saved else None}
-    code, state = quiet(['docker', 'inspect', amnezia.CONTAINER, '--format', '{{.State.Status}}'])
+    code, out = quiet(['docker', 'inspect', amnezia.CONTAINER, '--format', '{{.State.Status}} {{.Id}}'])
+    state, _, container = out.partition(' ')
     try:
         saved = amnezia.load()
     except PolicyError:
         saved = None
     actual = {'version': None, 'tools_version': None}
     if code == 0 and state == 'running':
-        try:
-            actual = amnezia.versions(execute=run)
-        except (PolicyError, OSError, subprocess.TimeoutExpired):
-            pass
+        if container in _AWG_VERSIONS:
+            actual = _AWG_VERSIONS[container]
+        else:
+            try:
+                actual = amnezia.versions(execute=run)
+                if container:
+                    _AWG_VERSIONS.clear()
+                    _AWG_VERSIONS[container] = actual
+            except (PolicyError, OSError, subprocess.TimeoutExpired):
+                pass
     return {'installed': code == 0 or saved is not None, **actual,
             'state': state if code == 0 else 'absent', 'port': (saved or {}).get('port')}
 
@@ -487,12 +498,15 @@ def status():
         releases = [{'version': r['version'], 'published': r.get('published', '')} for r in known.get('releases', [])]
         latest = releases[0]['version'] if releases else None
         newer = bool(latest and info['installed'] and (not info['version'] or key(latest) > key(info['version'])))
-        if name == 'amnezia' and latest and info['installed'] and latest == info['version']:
-            tools_tag = known['releases'][0].get('tools_tag', '')
-            newer = bool(tools_tag and (not info['tools_version'] or key(tools_tag[1:]) > key(info['tools_version'])))
+        extra = {}
+        if name == 'amnezia':
+            tools_latest = known['releases'][0].get('tools_version') if releases else None
+            extra['tools_latest'] = tools_latest
+            if latest and info['installed'] and latest == info['version']:
+                newer = bool(tools_latest and (not info['tools_version'] or key(tools_latest) > key(info['tools_version'])))
         items.append(dict(info, id=name, title=src['title'], repo='https://github.com/' + src['repo'],
                           runtime=src['runtime'], releases=releases, latest=latest, update=newer,
-                          error=known.get('error', '')))
+                          error=known.get('error', ''), **extra))
     try:
         listing, docker_error = containers(), ''
     except Exception:
@@ -550,8 +564,9 @@ def swap_container(name, args, verify, restore=None):
 
 
 def install_amnezia(op, data, release, work, agent):
-    for field, pattern in (('tag', SOURCES['amnezia']['tag']), ('tools_tag', SOURCES['amnezia']['tag'])):
-        if not re.fullmatch(pattern, str(release.get(field, ''))):
+    for field, version in (('tag', 'version'), ('tools_tag', 'tools_version')):
+        match = re.fullmatch(SOURCES['amnezia']['tag'], str(release.get(field, '')))
+        if not match or match[1] != release.get(version):
             raise PolicyError('Некорректные данные релиза. Проверьте обновления.')
     if not SHA.fullmatch(str(release.get('commit', ''))) or not SHA.fullmatch(str(release.get('tools_commit', ''))):
         raise PolicyError('Некорректные данные релиза. Проверьте обновления.')
@@ -575,13 +590,13 @@ def install_amnezia(op, data, release, work, agent):
         with tar.extractfile(member) as source, open(work / 'sing-box', 'wb') as target:
             shutil.copyfileobj(source, target)
     archive.unlink()
-    image = 'vpn-amneziawg:' + release['version'] + '-tools-' + release['tools_tag'][1:]
+    image = 'vpn-amneziawg:' + release['version'] + '-tools-' + release['tools_version']
     build(['--pull', '--build-arg', 'AWG_GO_REF=' + release['tag'],
          '--build-arg', 'AWG_GO_COMMIT=' + release['commit'], '--build-arg', 'AWG_TOOLS_REF=' + release['tools_tag'],
          '--build-arg', 'AWG_TOOLS_COMMIT=' + release['tools_commit'], '-t', image, str(work)], 1500)
     before = None if fresh else json.dumps(state, sort_keys=True)
     state.update(version=release['version'], tag=release['tag'], image=image,
-                 tools_version=release['tools_tag'][1:], commit=release['commit'], tools_commit=release['tools_commit'])
+                 tools_version=release['tools_version'], commit=release['commit'], tools_commit=release['tools_commit'])
     amnezia.save(state, sync=False)
     port = state['port']
 
@@ -769,6 +784,25 @@ def install_cdn(op, data, release, work, agent):
 HANDLERS = {'hysteria': install_hysteria, 'trusttunnel': install_trusttunnel, 'amnezia': install_amnezia, 'cdn': install_cdn}
 
 
+def fresh_amnezia(version):
+    """Installation must fail on upstream errors rather than silently using an old cache."""
+    if version is not None and (not isinstance(version, str) or not re.fullmatch(r'\d+(\.\d+){1,3}', version)):
+        raise PolicyError('Некорректная версия')
+    try:
+        available = discover('amnezia')
+    except Exception:
+        raise PolicyError('Не удалось проверить актуальную серверную версию AmneziaWG. Повторите установку позже.') from None
+    with CHECK_LOCK:
+        # The status card compares against what installation just saw.
+        value = cached()
+        value['components']['amnezia'] = {'releases': available}
+        amnezia.write(CACHE, json.dumps(value, sort_keys=True))
+    release = next((r for r in available if version in (None, r['version'])), None)
+    if release is None:
+        raise PolicyError('Серверная версия AmneziaWG не найдена в репозитории разработчика')
+    return release
+
+
 def install(op, data, agent):
     name = data.get('component')
     if name not in SOURCES or not set(data) <= {'component', 'version', 'port'}:
@@ -779,23 +813,23 @@ def install(op, data, agent):
     if op == 'protocols.update' and not current['installed']:
         raise PolicyError('Протокол не установлен')
     if name == 'amnezia':
-        # Installation must fail on upstream errors rather than silently using an old cache.
-        try:
-            available = discover(name)
-        except Exception:
-            raise PolicyError('Не удалось проверить актуальную серверную версию AmneziaWG. Повторите установку позже.') from None
-        release = next((r for r in available if data.get('version') in (None, r['version'])), None)
-        if release is None:
-            raise PolicyError('Серверная версия AmneziaWG не найдена в репозитории разработчика')
+        release = fresh_amnezia(data.get('version'))
     else:
         release = pick(name, data.get('version'))
-    if op == 'protocols.update' and current['version']:
-        if key(release['version']) == key(current['version']):
+    floor = current['version']
+    if name == 'amnezia' and op == 'protocols.update':
+        # A stopped container or a legacy binary hides its version; the deployed selection still bounds a downgrade.
+        try:
+            floor = amnezia.load().get('version') or floor
+        except PolicyError:
+            pass
+    if op == 'protocols.update' and floor:
+        if key(release['version']) == key(floor):
             tools_newer = (name == 'amnezia' and (not current.get('tools_version') or
-                           key(release['tools_tag'][1:]) > key(current['tools_version'])))
+                           key(release['tools_version']) > key(current['tools_version'])))
             if not tools_newer:
                 raise PolicyError('Эта версия уже установлена')
-        if key(release['version']) < key(current['version']):
+        if key(release['version']) < key(floor):
             raise PolicyError('Понижение версии запрещено')
     BUILD.mkdir(mode=0o700, parents=True, exist_ok=True)
     work = BUILD / f'{name}-{release["version"]}-{secrets.token_hex(4)}'

@@ -360,7 +360,8 @@ def cache(**components):
         name: {'releases': releases} for name, releases in components.items()}}))
 
 
-AWG = {'version': '3.1.20260828', 'tag': 'v3.1.20260828', 'commit': 'a' * 40, 'tools_tag': 'v3.1.20260812', 'tools_commit': 'e' * 40,
+AWG = {'version': '3.1.20260828', 'tag': 'v3.1.20260828', 'commit': 'a' * 40, 'tools_tag': 'v3.1.20260812', 'tools_version': '3.1.20260812',
+       'tools_commit': 'e' * 40,
        'box_version': '1.12.9', 'box_tag': 'v1.12.9', 'box_sha256': '3' * 64}
 
 
@@ -463,12 +464,14 @@ def test_amnezia_status_reads_binaries_and_allows_tools_only_update(host):
     cache(amnezia=[AWG])
     host['port'] = 47443
     protocols.install('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    # Images built before provenance report upstream's legacy constant: unknown, not 0.0.
     host['server_version'] = '0.0.20250522'
-    assert protocols.installed('amnezia')['version'] == '0.0.20250522'
+    assert protocols.installed('amnezia')['version'] is None
     del host['server_version']
-    newer = dict(AWG, tools_tag='v3.1.20260901', tools_commit='f' * 40)
+    newer = dict(AWG, tools_tag='v3.1.20260901', tools_version='3.1.20260901', tools_commit='f' * 40)
     cache(amnezia=[newer])
-    assert next(i for i in protocols.status()['items'] if i['id'] == 'amnezia')['update']
+    item = next(i for i in protocols.status()['items'] if i['id'] == 'amnezia')
+    assert item['update'] and item['tools_version'] == '3.1.20260812' and item['tools_latest'] == '3.1.20260901'
     protocols.install('protocols.update', {'component': 'amnezia'}, None)
     assert protocols.installed('amnezia')['tools_version'] == '3.1.20260901'
 
@@ -485,7 +488,7 @@ def test_amnezia_update_wrong_binary_restores_state_and_container(host):
     host['port'] = 47443
     protocols.install('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
     before = amnezia.STATE.read_text()
-    cache(amnezia=[dict(AWG, tools_tag='v3.1.20260901')])
+    cache(amnezia=[dict(AWG, tools_tag='v3.1.20260901', tools_version='3.1.20260901')])
     host['tools_version'] = '3.1.20260812'
     with pytest.raises(PolicyError, match='не прошёл проверку'):
         protocols.install('protocols.update', {'component': 'amnezia'}, None)
@@ -1068,3 +1071,51 @@ def test_amnezia_install_requires_a_verified_router_release(host):
     with pytest.raises(PolicyError, match='sing-box'):
         protocols.dispatch('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
     assert not any(c[:2] == ['docker', 'build'] for c in host['calls'])
+
+
+def test_amnezia_unknown_binary_version_still_refuses_downgrade(host, monkeypatch):
+    cache(amnezia=[AWG])
+    host['port'] = 47443
+    protocols.install('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    older = dict(AWG, version='3.1.20260812', tag='v3.1.20260812')
+    cache(amnezia=[AWG, older])
+    for server in ('0.0.20230223', None):
+        if server:
+            host['server_version'] = server
+        else:
+            monkeypatch.setattr(protocols, 'quiet', lambda args, timeout=8: (0, 'exited'))
+        assert protocols.installed('amnezia')['version'] is None
+        with pytest.raises(PolicyError, match='Понижение'):
+            protocols.install('protocols.update', {'component': 'amnezia', 'version': '3.1.20260812'}, None)
+    assert sum(c[:2] == ['docker', 'build'] for c in host['calls']) == 1
+
+
+def test_amnezia_install_rejects_inconsistent_tools_version_and_refreshes_cache(host, monkeypatch):
+    latest = dict(AWG, version='3.1.20260915', tag='v3.1.20260915', commit='9' * 40)
+    monkeypatch.setattr(protocols, 'discover', lambda name: [dict(latest, tools_version='3.1.20260901')])
+    host['port'] = 47443
+    with pytest.raises(PolicyError, match='Некорректные данные'):
+        protocols.install('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    assert protocols.cached()['components']['amnezia']['releases'][0]['version'] == '3.1.20260915'
+    for version in (['3.1.20260915'], '3.1.20260915; id'):
+        with pytest.raises(PolicyError, match='Некорректная версия'):
+            protocols.install('protocols.install', {'component': 'amnezia', 'version': version, 'port': 47443}, None)
+
+
+def test_amnezia_versions_are_read_once_per_container(host, monkeypatch):
+    cache(amnezia=[AWG])
+    host['port'] = 47443
+    protocols.install('protocols.install', {'component': 'amnezia', 'port': 47443}, None)
+    real = protocols.quiet
+    ids = {'id': 'a' * 64}
+    def quiet(args, timeout=8):
+        code, out = real(args, timeout)
+        return (code, out + ' ' + ids['id']) if args[:2] == ['docker', 'inspect'] and code == 0 else (code, out)
+    monkeypatch.setattr(protocols, 'quiet', quiet)
+    monkeypatch.setattr(protocols, '_AWG_VERSIONS', {})
+    reads = lambda: sum(c[-1] == '--version' for c in host['calls'])
+    host['calls'].clear()
+    protocols.installed('amnezia'), protocols.installed('amnezia')
+    assert reads() == 2
+    ids['id'] = 'b' * 64
+    assert protocols.installed('amnezia')['tools_version'] == '3.1.20260812' and reads() == 4
