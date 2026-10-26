@@ -1,5 +1,5 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 8b29988..7b57bdd 100644
+index 8b29988..ed48016 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
 @@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -11,13 +11,13 @@ index 8b29988..7b57bdd 100644
 +  stream counters, an anonymous session id and a per-process keyed user tag; summarize unauthenticated sessions once
 +  a minute, log the session timeouts at startup and a single summary on SIGINT/SIGTERM.
 +- [Changed] SIGTERM is handled on a dedicated thread: the endpoint logs the shutdown summary, flushes the log and
-+  terminates by the default SIGTERM action.
++  terminates by the default SIGTERM action, also if logging panics or blocks for more than 3 seconds.
 +
  ### Changed
  
  ### Deprecated
 diff --git a/endpoint/src/main.rs b/endpoint/src/main.rs
-index 477b7fb..88ed425 100644
+index 477b7fb..22c0c4c 100644
 --- a/endpoint/src/main.rs
 +++ b/endpoint/src/main.rs
 @@ -75,6 +75,8 @@ fn increase_fd_limit() {
@@ -29,18 +29,13 @@ index 477b7fb..88ed425 100644
      let args = clap::Command::new("VPN endpoint")
          .args(&[
              // Built-in version parameter handling is deficient in that it
-@@ -518,7 +520,19 @@ fn main() {
+@@ -518,7 +520,14 @@ fn main() {
          async move { core.listen().await }
      };
  
 +    trusttunnel::termination::spawn_sigterm_handler({
 +        let core = core.clone();
-+        move || {
-+            format!(
-+                "Shutdown (SIGTERM): {} sessions closed",
-+                core.active_sessions()
-+            )
-+        }
++        move || core.shutdown_summary("SIGTERM")
 +    })
 +    .expect("Couldn't start SIGTERM handler");
 +
@@ -49,14 +44,11 @@ index 477b7fb..88ed425 100644
          let tls_hosts_settings_path = tls_hosts_settings_path.clone();
          async move {
              let mut sighup_listener = signal::unix::signal(signal::unix::SignalKind::hangup())
-@@ -544,6 +558,10 @@ fn main() {
+@@ -544,6 +553,7 @@ fn main() {
      #[allow(clippy::await_holding_lock)]
      let interrupt_task = async move {
          tokio::signal::ctrl_c().await.unwrap();
-+        info!(
-+            "Shutdown (SIGINT): {} sessions closed",
-+            core.active_sessions()
-+        );
++        info!("{}", core.shutdown_summary("SIGINT"));
          shutdown.lock().unwrap().submit();
          shutdown.lock().unwrap().completion().await
      };
@@ -76,7 +68,7 @@ index a88a0db..bb697ad 100644
  rt_doc = ["dep:macros"]
  tracing = ["tokio/tracing"]
 diff --git a/lib/src/core.rs b/lib/src/core.rs
-index adeb055..7ad8220 100644
+index adeb055..7729acf 100644
 --- a/lib/src/core.rs
 +++ b/lib/src/core.rs
 @@ -10,6 +10,7 @@ use crate::icmp_forwarder::IcmpForwarder;
@@ -105,7 +97,7 @@ index adeb055..7ad8220 100644
  }
  
  impl Context {
-@@ -160,12 +163,21 @@ impl Core {
+@@ -160,12 +163,26 @@ impl Core {
                  next_client_id: Default::default(),
                  next_tunnel_id: Default::default(),
                  connection_limiter,
@@ -115,9 +107,14 @@ index adeb055..7ad8220 100644
          })
      }
  
-+    /// Number of client tunnel sessions which are currently open
-+    pub fn active_sessions(&self) -> u64 {
-+        self.context.active_sessions.load(Ordering::Relaxed)
++    /// The record to log when the endpoint is stopped by `signal`: the number of open client
++    /// tunnel sessions and the not yet reported unauthenticated ones
++    pub fn shutdown_summary(&self, signal: &str) -> String {
++        session_log::shutdown_line(
++            signal,
++            self.context.active_sessions.load(Ordering::Relaxed),
++            &self.context.unauthenticated_closes,
++        )
 +    }
 +
      /// Run an endpoint instance inside the caller provided asynchronous runtime.
@@ -127,7 +124,7 @@ index adeb055..7ad8220 100644
          let listen_tcp = async {
              self.listen_tcp()
                  .await
-@@ -202,10 +214,21 @@ impl Core {
+@@ -202,10 +219,21 @@ impl Core {
  
          let mut fatal_error_rx = self.context.fatal_error.subscribe();
  
@@ -149,7 +146,7 @@ index adeb055..7ad8220 100644
              x = fatal_error_rx.changed() => match x {
                  Ok(()) => match fatal_error_rx.borrow().clone() {
                      Some(e) => Err(e.into_io_error()),
-@@ -712,11 +735,18 @@ impl Core {
+@@ -712,11 +740,18 @@ impl Core {
              }
              _ => None,
          };
@@ -169,7 +166,7 @@ index adeb055..7ad8220 100644
          );
  
          let (authentication_policy, sni_connection_guard) =
-@@ -726,6 +756,9 @@ impl Core {
+@@ -726,6 +761,9 @@ impl Core {
                      let auth = authentication::Source::Sni(credentials.into());
                      match authenticator.authenticate(&auth, &tunnel_id) {
                          authentication::Status::Pass => {
@@ -179,7 +176,7 @@ index adeb055..7ad8220 100644
                              let guard = context.connection_limiter.as_ref().and_then(|limiter| {
                                  let creds = match &auth {
                                      authentication::Source::Sni(s) => s.as_ref(),
-@@ -739,12 +772,15 @@ impl Core {
+@@ -739,12 +777,15 @@ impl Core {
                                      tunnel_id,
                                      "Connection limit exceeded for SNI-authenticated client"
                                  );
@@ -195,7 +192,7 @@ index adeb055..7ad8220 100644
                              return;
                          }
                      }
-@@ -759,6 +795,7 @@ impl Core {
+@@ -759,6 +800,7 @@ impl Core {
              authentication_policy,
              sni_connection_guard,
              tunnel_id.clone(),
@@ -203,7 +200,7 @@ index adeb055..7ad8220 100644
          );
  
          log_id!(trace, tunnel_id, "Listening for client tunnel");
-@@ -814,6 +851,8 @@ impl Default for Context {
+@@ -814,6 +856,8 @@ impl Default for Context {
              next_client_id: Default::default(),
              next_tunnel_id: Default::default(),
              connection_limiter: None,
@@ -372,10 +369,10 @@ index 5181900..aeb4571 100644
  
 diff --git a/lib/src/session_log.rs b/lib/src/session_log.rs
 new file mode 100644
-index 0000000..5f99390
+index 0000000..bad8d40
 --- /dev/null
 +++ b/lib/src/session_log.rs
-@@ -0,0 +1,798 @@
+@@ -0,0 +1,834 @@
 +use crate::settings::Settings;
 +use crate::tls_demultiplexer::Protocol;
 +use crate::{log_id, log_utils};
@@ -628,6 +625,10 @@ index 0000000..5f99390
 +impl SessionStats {
 +    /// Mark the session as authenticated. `username` must come from credentials
 +    /// which passed the authentication.
++    pub fn is_authenticated(&self) -> bool {
++        self.authenticated.load(Ordering::Relaxed)
++    }
++
 +    pub fn on_authenticated(&self, username: Option<&str>) {
 +        self.authenticated.store(true, Ordering::Relaxed);
 +        if let Some(username) = username {
@@ -670,6 +671,21 @@ index 0000000..5f99390
 +            total, details
 +        ))
 +    }
++}
++
++/// The single record logged when the endpoint is stopped by `signal`, instead of a line
++/// per closed session. Includes the not yet reported unauthenticated sessions.
++pub(crate) fn shutdown_line(
++    signal: &str,
++    active_sessions: u64,
++    unauthenticated: &UnauthenticatedCloses,
++) -> String {
++    let mut line = format!("Shutdown ({}): {} sessions closed", signal, active_sessions);
++    if let Some(summary) = unauthenticated.take_summary() {
++        line.push_str("; ");
++        line.push_str(&summary);
++    }
++    line
 +}
 +
 +/// Tracks a client session from creation until it is closed and logs the close record
@@ -725,7 +741,7 @@ index 0000000..5f99390
 +        if std::mem::replace(&mut self.finished, true) || *reason == CloseReason::Shutdown {
 +            return None;
 +        }
-+        if !self.stats.authenticated.load(Ordering::Relaxed) {
++        if !self.stats.is_authenticated() {
 +            self.unauthenticated.add(reason);
 +            return None;
 +        }
@@ -1093,6 +1109,23 @@ index 0000000..5f99390
 +    }
 +
 +    #[test]
++    fn shutdown_line_includes_pending_unauthenticated() {
++        let unauth = Arc::new(UnauthenticatedCloses::default());
++        assert_eq!(
++            shutdown_line("SIGTERM", 3, &unauth),
++            "Shutdown (SIGTERM): 3 sessions closed"
++        );
++        for _ in 0..2 {
++            let _ = record_with(true, unauth.clone()).finish(&CloseReason::PeerReset);
++        }
++        assert_eq!(
++            shutdown_line("SIGTERM", 3, &unauth),
++            "Shutdown (SIGTERM): 3 sessions closed; Unauthenticated sessions closed: 2 (reset_by_peer=2)"
++        );
++        assert!(unauth.take_summary().is_none());
++    }
++
++    #[test]
 +    fn close_line_has_no_ip_address() {
 +        let ips = ["192.0.2.17", "2001:db8::1", "::ffff:192.0.2.17"];
 +        let reasons = [
@@ -1176,12 +1209,16 @@ index 0000000..5f99390
 +}
 diff --git a/lib/src/termination.rs b/lib/src/termination.rs
 new file mode 100644
-index 0000000..77e0f12
+index 0000000..8003ff9
 --- /dev/null
 +++ b/lib/src/termination.rs
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,88 @@
 +use std::io;
 +use std::thread::JoinHandle;
++use std::time::Duration;
++
++/// How long the SIGTERM handler may spend logging before the process is terminated anyway
++pub const SUMMARY_TIMEOUT: Duration = Duration::from_secs(3);
 +
 +fn sigterm_set() -> libc::sigset_t {
 +    // SAFETY: `sigemptyset` initializes the set before `sigaddset` uses it
@@ -1202,6 +1239,28 @@ index 0000000..77e0f12
 +    }
 +}
 +
++/// Terminate the process by the default SIGTERM action from the calling thread
++fn terminate() {
++    // SAFETY: restoring the default disposition and re-raising the signal on a thread
++    // which does not block it terminates the process as an unhandled SIGTERM would
++    unsafe {
++        libc::signal(libc::SIGTERM, libc::SIG_DFL);
++    }
++    let _ = set_sigterm_mask(libc::SIG_UNBLOCK);
++    unsafe {
++        libc::raise(libc::SIGTERM);
++    }
++}
++
++/// Terminates the process when dropped, including while unwinding from a panic
++struct TerminateOnDrop;
++
++impl Drop for TerminateOnDrop {
++    fn drop(&mut self) {
++        terminate();
++    }
++}
++
 +/// Block SIGTERM in the calling thread. Threads spawned afterwards inherit the mask,
 +/// so this must be called before any other thread is started.
 +pub fn block_sigterm() -> io::Result<()> {
@@ -1211,6 +1270,8 @@ index 0000000..77e0f12
 +/// Wait for SIGTERM on a dedicated thread, which does not depend on the async runtime.
 +/// On the signal, log the line returned by `summary`, flush the logger and terminate
 +/// the process by the default SIGTERM action, so the parent still sees the signal status.
++/// The process is terminated even if logging panics, and at most [`SUMMARY_TIMEOUT`]
++/// after the signal if logging blocks.
 +/// Requires [`block_sigterm`] to have been called first.
 +pub fn spawn_sigterm_handler<F>(summary: F) -> io::Result<JoinHandle<()>>
 +where
@@ -1226,21 +1287,22 @@ index 0000000..77e0f12
 +                error!("Waiting for SIGTERM failed");
 +                return;
 +            }
++            let _terminate = TerminateOnDrop;
++            let watchdog = std::thread::Builder::new()
++                .name("sigterm-watchdog".to_string())
++                .spawn(|| {
++                    std::thread::sleep(SUMMARY_TIMEOUT);
++                    terminate();
++                });
++            if watchdog.is_err() {
++                return;
++            }
 +            info!("{}", summary());
 +            log::logger().flush();
-+            // SAFETY: restoring the default disposition and re-raising the signal
-+            // on this thread terminates the process as an unhandled SIGTERM would
-+            unsafe {
-+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
-+            }
-+            let _ = set_sigterm_mask(libc::SIG_UNBLOCK);
-+            unsafe {
-+                libc::raise(libc::SIGTERM);
-+            }
 +        })
 +}
 diff --git a/lib/src/tunnel.rs b/lib/src/tunnel.rs
-index a6c2aaa..ca0ae7e 100644
+index a6c2aaa..ae56826 100644
 --- a/lib/src/tunnel.rs
 +++ b/lib/src/tunnel.rs
 @@ -6,6 +6,7 @@ use crate::downstream::{
@@ -1310,7 +1372,34 @@ index a6c2aaa..ca0ae7e 100644
      }
  
      fn resolve_username(
-@@ -135,6 +149,7 @@ impl Tunnel {
+@@ -124,6 +138,26 @@ impl Tunnel {
+         }
+     }
+ 
++    /// Mark the session as authenticated as soon as a request carries valid credentials,
++    /// before the session may close, so that short sessions are not reported as anonymous
++    fn mark_session_authenticated(&self, request: &dyn downstream::PendingMultiplexedRequest) {
++        if self.session.stats.is_authenticated() {
++            return;
++        }
++        let Some(authenticator) = self.context.authenticator.as_ref() else {
++            return;
++        };
++        if let Ok(Some(source)) = request.auth_info() {
++            if authenticator.authenticate(&source, &self.id) == Status::Pass {
++                let username = match &source {
++                    authentication::Source::ProxyBasic(s) => decode_username(s.as_ref()),
++                    authentication::Source::Sni(s) => decode_username(s.as_ref()),
++                };
++                self.session.stats.on_authenticated(username.as_deref());
++            }
++        }
++    }
++
+     async fn listen_inner(&mut self) -> io::Result<()> {
+         loop {
+             log_id!(trace, self.id, "Tunnel waiting for request");
+@@ -135,6 +169,7 @@ impl Tunnel {
              {
                  Ok(Ok(None)) => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
@@ -1318,7 +1407,7 @@ index a6c2aaa..ca0ae7e 100644
                      return Ok(());
                  }
                  Ok(Ok(Some(r))) => {
-@@ -143,18 +158,25 @@ impl Tunnel {
+@@ -143,18 +178,26 @@ impl Tunnel {
                  }
                  Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
@@ -1340,11 +1429,12 @@ index a6c2aaa..ca0ae7e 100644
              };
  
 +            self.session.stats.streams.fetch_add(1, Ordering::Relaxed);
++            self.mark_session_authenticated(request.as_ref());
 +
              let context = self.context.clone();
              let forwarder = self.forwarder.clone();
              let tls_domain = self.downstream.tls_domain().to_string();
-@@ -166,13 +188,21 @@ impl Tunnel {
+@@ -166,13 +209,21 @@ impl Tunnel {
              } else {
                  None
              };
@@ -1366,7 +1456,7 @@ index a6c2aaa..ca0ae7e 100644
                          metrics.add_outbound_bytes(protocol, username.as_deref(), n)
                      }
                  }
-@@ -213,6 +243,8 @@ impl Tunnel {
+@@ -213,6 +264,8 @@ impl Tunnel {
                                      request.fail_request(ConnectionError::Authentication(
                                          "Connection limit exceeded".to_string(),
                                      ));
@@ -1375,21 +1465,9 @@ index a6c2aaa..ca0ae7e 100644
                                      return Err(io::Error::new(
                                          ErrorKind::PermissionDenied,
                                          "Connection limit exceeded",
-@@ -248,8 +280,18 @@ impl Tunnel {
-                 ) {
-                     (Ok(Some(source)), _, Some(authenticator)) => {
+@@ -250,6 +303,7 @@ impl Tunnel {
                          match authenticator.authenticate(&source, &log_id) {
--                            Status::Pass => Some(source),
-+                            Status::Pass => {
-+                                let username = match &source {
-+                                    authentication::Source::ProxyBasic(s) => {
-+                                        decode_username(s.as_ref())
-+                                    }
-+                                    authentication::Source::Sni(s) => decode_username(s.as_ref()),
-+                                };
-+                                session_stats.on_authenticated(username.as_deref());
-+                                Some(source)
-+                            }
+                             Status::Pass => Some(source),
                              Status::Reject => {
 +                                session_stats.auth_failures.fetch_add(1, Ordering::Relaxed);
                                  let err = ConnectionError::Authentication(
@@ -1397,23 +1475,33 @@ index a6c2aaa..ca0ae7e 100644
                                  );
 diff --git a/lib/tests/sigterm.rs b/lib/tests/sigterm.rs
 new file mode 100644
-index 0000000..9c928a2
+index 0000000..452ec44
 --- /dev/null
 +++ b/lib/tests/sigterm.rs
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,184 @@
 +//! Runs without the libtest harness: the harness starts threads before a test body runs,
 +//! and SIGTERM must be blocked before any thread exists. The binary re-executes itself
 +//! as the child process under test.
 +
-+use std::io::{BufRead, BufReader, Read};
++use std::io::{BufRead, BufReader, Read, Write};
 +use std::os::unix::process::ExitStatusExt;
-+use std::process::{Command, Stdio};
-+use std::time::Duration;
++use std::process::{Command, ExitStatus, Stdio};
++use std::time::{Duration, Instant};
 +use trusttunnel::{log_utils, termination};
 +
 +const CHILD_ENV: &str = "TT_SIGTERM_CHILD";
 +const LOG_FILE_ENV: &str = "TT_SIGTERM_LOG_FILE";
 +const SUMMARY: &str = "Shutdown (SIGTERM): 3 sessions closed";
++
++#[derive(Clone, Copy, PartialEq)]
++enum Stdout {
++    /// The parent reads the child's stdout
++    Read,
++    /// The parent closes the read end, so writes fail with EPIPE
++    Closed,
++    /// The parent never reads, and the child fills the pipe
++    Full,
++}
 +
 +fn main() {
 +    match std::env::var(CHILD_ENV) {
@@ -1433,13 +1521,27 @@ index 0000000..9c928a2
 +    log::set_max_level(log::LevelFilter::Info);
 +    termination::spawn_sigterm_handler(|| SUMMARY.to_string()).unwrap();
 +
++    if mode == "fill_stdout" {
++        std::thread::spawn(|| {
++            let chunk = vec![b'x'; 1 << 16];
++            let mut stdout = std::io::stdout().lock();
++            loop {
++                if stdout.write_all(&chunk).is_err() {
++                    return;
++                }
++            }
++        });
++        std::thread::sleep(Duration::from_millis(200));
++    }
++
 +    let rt = tokio::runtime::Builder::new_multi_thread()
 +        .worker_threads(2)
 +        .enable_all()
 +        .build()
 +        .unwrap();
 +    rt.block_on(async {
-+        if mode == "busy" {
++        let busy = mode != "idle";
++        if busy {
 +            for _ in 0..2 {
 +                tokio::spawn(async {
 +                    loop {
@@ -1448,8 +1550,8 @@ index 0000000..9c928a2
 +                });
 +            }
 +        }
-+        println!("READY");
-+        if mode == "busy" {
++        eprintln!("READY");
++        if busy {
 +            loop {
 +                std::thread::sleep(Duration::from_secs(1));
 +            }
@@ -1458,19 +1560,37 @@ index 0000000..9c928a2
 +    });
 +}
 +
-+fn run_child(mode: &str, log_file: Option<&std::path::Path>) -> (std::process::ExitStatus, String) {
++fn run_child(
++    mode: &str,
++    stdout_mode: Stdout,
++    log_file: Option<&std::path::Path>,
++) -> (ExitStatus, String, Duration) {
 +    let mut cmd = Command::new(std::env::current_exe().unwrap());
-+    cmd.env(CHILD_ENV, mode).stdout(Stdio::piped());
++    cmd.env(CHILD_ENV, mode)
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped());
 +    if let Some(path) = log_file {
 +        cmd.env(LOG_FILE_ENV, path);
 +    }
 +    let mut child = cmd.spawn().unwrap();
-+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
++    let stdout = child.stdout.take().unwrap();
++    let stdout = match stdout_mode {
++        Stdout::Read => Some(stdout),
++        Stdout::Closed => {
++            drop(stdout);
++            None
++        }
++        Stdout::Full => {
++            std::mem::forget(stdout);
++            None
++        }
++    };
++    let mut stderr = BufReader::new(child.stderr.take().unwrap());
 +    let mut line = String::new();
 +    loop {
 +        line.clear();
 +        assert_ne!(
-+            stdout.read_line(&mut line).unwrap(),
++            stderr.read_line(&mut line).unwrap(),
 +            0,
 +            "child exited early"
 +        );
@@ -1478,20 +1598,35 @@ index 0000000..9c928a2
 +            break;
 +        }
 +    }
++    let started = Instant::now();
 +    // SAFETY: plain kill(2) on the child we spawned
 +    assert_eq!(
 +        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
 +        0
 +    );
-+    let mut rest = String::new();
-+    stdout.read_to_string(&mut rest).unwrap();
-+    (child.wait().unwrap(), rest)
++    let status = loop {
++        if let Some(status) = child.try_wait().unwrap() {
++            break status;
++        }
++        if started.elapsed() > Duration::from_secs(20) {
++            child.kill().unwrap();
++            panic!("{}: child ignored SIGTERM", mode);
++        }
++        std::thread::sleep(Duration::from_millis(50));
++    };
++    let elapsed = started.elapsed();
++    let mut output = String::new();
++    if let Some(mut stdout) = stdout {
++        stdout.read_to_string(&mut output).unwrap();
++    }
++    (status, output, elapsed)
 +}
 +
-+fn check(name: &str, mode: &str, use_log_file: bool) {
++fn check(name: &str, mode: &str, stdout_mode: Stdout, use_log_file: bool) {
 +    let dir = tempfile::tempdir().unwrap();
 +    let path = dir.path().join("endpoint.log");
-+    let (status, stdout) = run_child(mode, use_log_file.then_some(path.as_path()));
++    let (status, stdout, elapsed) =
++        run_child(mode, stdout_mode, use_log_file.then_some(path.as_path()));
 +    assert_eq!(
 +        status.signal(),
 +        Some(libc::SIGTERM),
@@ -1499,17 +1634,32 @@ index 0000000..9c928a2
 +        name,
 +        status
 +    );
-+    let output = if use_log_file {
-+        std::fs::read_to_string(&path).unwrap()
-+    } else {
-+        stdout
-+    };
-+    assert!(output.contains(SUMMARY), "{}: output {:?}", name, output);
-+    println!("test {} ... ok", name);
++    assert!(
++        elapsed < termination::SUMMARY_TIMEOUT + Duration::from_secs(5),
++        "{}: terminated after {:?}",
++        name,
++        elapsed
++    );
++    if stdout_mode == Stdout::Read {
++        let output = if use_log_file {
++            std::fs::read_to_string(&path).unwrap()
++        } else {
++            stdout
++        };
++        assert!(output.contains(SUMMARY), "{}: output {:?}", name, output);
++    }
++    println!("test {} ... ok ({:?})", name, elapsed);
 +}
 +
 +fn parent() {
-+    check("sigterm_idle_runtime_stdout", "idle", false);
-+    check("sigterm_busy_runtime_stdout", "busy", false);
-+    check("sigterm_busy_runtime_log_file", "busy", true);
++    check("sigterm_idle_runtime_stdout", "idle", Stdout::Read, false);
++    check("sigterm_busy_runtime_stdout", "busy", Stdout::Read, false);
++    check("sigterm_busy_runtime_log_file", "busy", Stdout::Read, true);
++    check("sigterm_closed_stdout", "busy", Stdout::Closed, false);
++    check(
++        "sigterm_full_stdout_pipe",
++        "fill_stdout",
++        Stdout::Full,
++        false,
++    );
 +}
