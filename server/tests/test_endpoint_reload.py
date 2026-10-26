@@ -213,6 +213,38 @@ class EndpointReloadTests(unittest.TestCase):
         self.assertEqual(len(self.spawns), 2)
         self.assertEqual(self.connect(cfg).status, 'OK')
 
+    def test_startup_spawn_failure_still_starts_watcher_that_recovers(self):
+        import asyncio
+        cfg = self.issue()
+        self.manager._kill()
+        cwd = os.getcwd(); os.chdir(ROOT/'server/upstream')  # main mounts app/static relatively
+        try:
+            from app import main
+        finally:
+            os.chdir(cwd)
+        start = self.manager.start_cert_watcher
+        failing = patch.object(endpoint.subprocess, 'Popen', side_effect=OSError('synthetic exec failure'))
+        async def run():
+            with patch.object(self.manager, 'start_cert_watcher', side_effect=lambda: start(interval=.2)):
+                async with main.lifespan(main.app):
+                    self.assertTrue(self.manager._spawn_failed)
+                    self.assertIn('cert-watcher', {t.name for t in threading.enumerate()})
+                    failing.stop()
+                    deadline = time.monotonic() + 5
+                    while not self.manager._is_running() and time.monotonic() < deadline:
+                        await asyncio.sleep(.05)
+                    self.fake.wait()
+                    self.assertEqual(self.connect(cfg).status, 'OK')
+        failing.start()
+        try:
+            asyncio.run(run())
+        finally:
+            try:
+                failing.stop()
+            except RuntimeError:
+                pass  # already stopped inside run()
+        self.assertEqual(len(self.spawns), 2)
+
     def test_standby_is_replaced_on_restart_and_disabled_by_zero(self):
         before = {c['username'] for c in db.standby_credentials()}
         self.assertEqual(len(before), 16)

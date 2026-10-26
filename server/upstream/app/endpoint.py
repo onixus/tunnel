@@ -486,13 +486,15 @@ class EndpointManager:
             renew_every = max(1, 12 * 3600 // interval)  # certbot renew ~2 раза в сутки
             while not self._watcher_stop.wait(interval):
                 ticks += 1
-                try:
+                # Каждая задача в своём try: сбой одной не отменяет остальные.
+                def renew() -> None:
                     if db.get_setting("cert_mode") == "letsencrypt" and ticks % renew_every == 0:
                         renew_letsencrypt()
-                    self._check_cert_renewed()
-                    self._check_drift()
-                except Exception as e:  # вотчер не должен падать
-                    print(f"[endpoint] cert watcher error: {e}")
+                for task in (renew, self._check_cert_renewed, self._check_drift):
+                    try:
+                        task()
+                    except Exception as e:  # вотчер не должен падать
+                        print(f"[endpoint] cert watcher error: {e}")
 
         threading.Thread(target=loop, name="cert-watcher", daemon=True).start()
 
