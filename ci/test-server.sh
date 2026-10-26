@@ -23,6 +23,7 @@ python -m pytest -q --junitxml=reports/apex.xml server/tests/test_design_system.
 python -m pytest -q --junitxml=reports/routing.xml server/tests/test_service_routing.py server/tests/test_routing_api.py server/tests/test_routing_browser.py server/tests/test_protocols.py
 python -m pytest -q --junitxml=reports/qr.xml server/tests/test_config_qr.py server/tests/test_config_qr_browser.py
 python -m pytest -q --junitxml=reports/console.xml server/tests/test_console.py server/tests/test_publication.py server/tests/test_adblock.py server/tests/test_protection.py
+python -m pytest -q --junitxml=reports/endpoint-reload.xml server/tests/test_endpoint_reload.py
 for suite in test_exchange test_device_credentials test_device_credential_console test_agent_routes; do
     python -m pytest -q --junitxml="reports/$suite.xml" "server/tests/$suite.py"
 done

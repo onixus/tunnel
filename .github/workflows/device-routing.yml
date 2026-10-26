@@ -47,6 +47,7 @@ jobs:
       - name: Profile exchange, admin API and desktop/mobile browser lifecycle
         run: |
           python server/tests/test_exchange.py
+          python server/tests/test_endpoint_reload.py
           python server/tests/test_device_credentials.py
           python server/tests/test_device_credential_console.py
           python server/tests/test_agent_routes.py

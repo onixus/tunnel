@@ -400,16 +400,18 @@ class CredentialTests(ExchangeTests):
             result=self.change(device,'provision')
         self.assertEqual(result.json()['operations'][0]['state'],'failed')
 
-    def test_retry_after_write_failure_forces_process_restart(self):
+    def test_retry_after_write_failure_reapplies(self):
+        # Whether the retry restarts is the supervisor's decision: it restarts
+        # when the loaded credential set differs (test_endpoint_reload).
         device,_=self.enrolled()
         with patch.object(endpoint.manager,'reconcile',side_effect=RuntimeError('secret exception text')):
             result=self.change(device,'provision')
         self.assertEqual(result.json()['operations'][0]['state'],'failed')
         self.assertNotIn('secret exception',str(result.json()))
-        before=endpoint.manager._kill.call_count
+        before=endpoint.manager.reconcile.call_count
         with patch.object(managed.time,'monotonic',side_effect=range(1000)):
             managed.apply_pending()
-        self.assertGreater(endpoint.manager._kill.call_count,before)
+        self.assertGreater(endpoint.manager.reconcile.call_count,before)
         self.assertEqual(managed.snapshot(self.owner,device)['operations'][0]['state'],'applied')
 
     def test_legacy_admin_device_revoke_uses_durable_state(self):

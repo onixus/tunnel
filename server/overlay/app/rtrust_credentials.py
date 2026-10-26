@@ -1,8 +1,9 @@
 """Local TrustTunnel device credentials; durable desired state, serialized application.
 
 Only the portal's single endpoint supervisor is supported. No remote endpoint or
-external/shared profile is represented as revocable. A full restart disconnects
-all sessions; other credentials remain unchanged.
+external/shared profile is represented as revocable. Removing a credential
+restarts the endpoint, which disconnects all sessions; other credentials remain
+unchanged. Issuing one from the supervisor's standby set needs no restart.
 """
 import json
 import os
@@ -146,12 +147,16 @@ def create_device_config(user_id, device_id, tt_username, tt_password, label):
                                     (device_id, user_id)).fetchone()
             if current:
                 return current['id']
+            tt_username, tt_password = db.claim_credential(c, tt_username, tt_password)
             return c.execute('INSERT INTO configs(user_id,device_id,tt_username,tt_password,label) VALUES(?,?,?,?,?)',
                              (user_id, device_id, tt_username, tt_password, label)).lastrowid
 
 
 def apply_pending():
-    """Retry is an unconditional restart, including after file-write/start failure.
+    """Apply the committed credential set; restart only if the endpoint lacks it.
+
+    Removal (rotation, revocation, blocking) always differs from the loaded set
+    and restarts; issuance from the standby set and a repeated apply do not.
 
     BEGIN IMMEDIATE fences credential mutations while the supervisor reads the
     committed desired state. Lock ordering is always supervisor -> SQLite.
@@ -170,13 +175,11 @@ def apply_pending():
         try:
             with db.connect() as fence:
                 fence.execute('BEGIN IMMEDIATE')
-                # Reconcile writes the full committed credentials set. Killing
-                # first also removes sessions when a previous attempt wrote the
-                # file but never restarted the old process.
-                old = endpoint.manager._proc
-                endpoint.manager._kill()
-                if old is not None:
-                    old.wait(timeout=1)
+                # Reconcile writes the full committed credentials set and
+                # restarts whenever it differs from what the running process
+                # loaded, including when a previous attempt wrote the file but
+                # never restarted. A credential issued from the standby set is
+                # already loaded and needs no restart.
                 settings=db.get_settings()
                 domain=endpoint.effective_domain(settings)
                 if not domain or not endpoint.cert_present(domain):
@@ -266,8 +269,9 @@ def mutate(owner, device, action, key, identity=None):
                     # refuse (and roll back) rather than exceed the sync limit.
                     from .rtrust_profiles import require_device_capacity
                     require_device_capacity(c, owner, device)
+                    username, password = db.claim_credential(c, 'd' + str(device) + '-' + secrets.token_hex(12), secrets.token_urlsafe(32))
                     cfg_id = c.execute('INSERT INTO configs(user_id,device_id,tt_username,tt_password,label) VALUES(?,?,?,?,?)',
-                                       (owner, device, 'd' + str(device) + '-' + secrets.token_hex(12), secrets.token_urlsafe(32), row['name'])).lastrowid
+                                       (owner, device, username, password, row['name'])).lastrowid
                     c.execute('INSERT INTO rtrust_credentials(device,config,generation,legacy_shared) VALUES(?,?,?,?)', (device, cfg_id, generation, int(c.execute("SELECT EXISTS(SELECT 1 FROM rtrust_grants g JOIN configs c ON g.profile='managed-'||c.id WHERE g.device=? AND c.device_id IS NULL AND c.revoked_at IS NULL)",(device,)).fetchone()[0])))
                     c.execute('INSERT OR IGNORE INTO rtrust_grants VALUES(?,?)', ('managed-' + str(cfg_id), device))
                 c.execute("UPDATE rtrust_credential_operations SET state='failed',error='superseded_by_rotation' WHERE device=? AND state IN ('requested','pending','failed') AND action!='revoke'", (device,))
@@ -295,12 +299,7 @@ def install():
     endpoint.write_credentials_toml = write_credentials
     db.revoke_device = revoke_legacy
     db.delete_config = delete_config
-    if not getattr(endpoint.manager, '_rtrust_credentials_installed', False):
-        original = endpoint.manager.reconcile
-        def reconcile(restart_for_creds=False):
-            return original(restart_for_creds=True)
-        endpoint.manager.reconcile = reconcile
-        endpoint.manager._rtrust_credentials_installed = True
+    # The supervisor restarts on any credential removal by itself (fail-closed).
 
 
 def write_credentials(creds):
