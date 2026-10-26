@@ -1,5 +1,9 @@
 # Unified console deployment
 
+Для пустого сервера x86_64 используйте [мастер Ubuntu 24.04](../docs/fresh-install.md)
+или [мастер CentOS Stream 9/10](../docs/fresh-install-centos.md) из собранного `.run`.
+Ниже — установка sidecar на существующем сервере.
+
 
 The console is an additive sidecar for the **existing onixus-rf installation**,
 not a general-purpose installer for a fresh VPN server. It uses the live portal

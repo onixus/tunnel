@@ -20,3 +20,7 @@ data/
 certs/
 __pycache__/
 .DS_Store
+
+# Generated installer bundles and disposable local test tooling.
+dist/
+.installer-lab/

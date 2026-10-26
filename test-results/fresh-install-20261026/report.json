@@ -1,0 +1,124 @@
+{
+  "installer": {
+    "file": "/Users/onixus/Git/tunnel/dist/tunnel-installer-ubuntu24-amd64.run",
+    "sha256": "172e6d6371d899744fff37a02c4de688324bac3b7fa20a39998c326701bd2d1f",
+    "bytes": 7318319,
+    "server_head": "a0cf449469cdcf1ff9dede749052cb40be396790",
+    "working_tree_sources": true,
+    "client_codec_source": "4400ca12938619df92326c4abe21818bf39915e9"
+  },
+  "environment": {
+    "os": "Ubuntu 24.04.5 LTS x86_64",
+    "kernel": "6.8.0-147-generic",
+    "isolation": "Disposable QEMU VM, software TCG; separate Docker daemon, no live mounts",
+    "vcpus": 4,
+    "memory_mib": 4096,
+    "ubuntu_image_sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
+  },
+  "acceptance": {
+    "https_login": true,
+    "redirect_preserves_external_port": true,
+    "resume_preserves_settings_and_certificate": true,
+    "registration_closed": true,
+    "console_health": "healthy",
+    "bundled_router": "sing-box version 1.14.4",
+    "protocols": [
+      {
+        "id": "hysteria",
+        "installed": true,
+        "version": "2.13.0",
+        "state": "active"
+      },
+      {
+        "id": "trusttunnel",
+        "installed": true,
+        "version": "1.1.0",
+        "state": "running"
+      },
+      {
+        "id": "amnezia",
+        "installed": true,
+        "version": "3.1.20260828",
+        "state": "running"
+      },
+      {
+        "id": "cdn",
+        "installed": true,
+        "version": "26.10.21",
+        "state": "running"
+      }
+    ]
+  },
+  "protocol_installs": [
+    {
+      "component": "trusttunnel",
+      "ok": true,
+      "seconds": 72.5,
+      "result": {
+        "message": "TrustTunnel endpoint 1.1.0 установлен и проверен"
+      }
+    },
+    {
+      "component": "hysteria",
+      "ok": true,
+      "seconds": 24.7,
+      "result": {
+        "message": "Hysteria 2.13.0 и H UI v0.0.25 установлены, ядро выключено. Разрешите UDP 443, затем настройте ядро в H UI; пароль администратора — в /root/h-ui-bootstrap.json."
+      }
+    },
+    {
+      "component": "cdn",
+      "ok": true,
+      "seconds": 69.6,
+      "result": {
+        "message": "Xray 26.10.21 работает на TCP 2053. Откройте порт для адресов CDN, затем укажите домен CDN кнопкой «Настроить CDN»."
+      }
+    },
+    {
+      "component": "amnezia",
+      "ok": true,
+      "seconds": 428.3,
+      "result": {
+        "message": "AmneziaWG 3.1.20260828 работает на UDP 47443. Откройте этот порт в firewall и создайте пользователей."
+      }
+    }
+  ],
+  "targeted_regressions": {
+    "passed": 77,
+    "failed": 0
+  },
+  "verified_recovery": [
+    "Resume after temporary DNS failure",
+    "Readiness wait accommodates cold imports",
+    "CLI options survive Docker argument construction",
+    "HTTPS redirects preserve external SSH port",
+    "First-install rollback stops new agent and retains startup log",
+    "Large verified sing-box binary and optional shared library extracted with bounded sizes",
+    "Router glibc compatibility and actual version verified before install success",
+    "Full compiler diagnostics saved root-only"
+  ],
+  "limitations": [
+    "Hysteria core stays disabled until H UI configuration",
+    "CDN needs an external domain/CDN and origin firewall configuration",
+    "VPN client traffic, real CDN traversal and external exit routing were not tested",
+    "Earlier broad run had an intermittent OpenCV QR decode failure; isolated QR test passed; QR generation was unchanged",
+    "This is a source installer requiring network access, with a self-signed 365-day certificate and manual renewal; no release publication or live VPN deployment"
+  ],
+  "infrastructure_incident": {
+    "node": "192.168.68.126:2222",
+    "previous_journal_ended_utc": "2026-10-26T15:41:29Z",
+    "new_boot_utc": "2026-10-26T15:51:20Z",
+    "container_exit_code": 255,
+    "container_oom_killed": false,
+    "evidence": [
+      "Btrfs tree-log replay",
+      "journald reports unclean shutdown",
+      "No panic/OOM record or crash dump found"
+    ],
+    "root_cause": "Not established from retained guest logs. Nested KVM was a possible factor, not a confirmed cause. Subsequent tests used TCG."
+  },
+  "cleanup": {
+    "remote_containers": "Confirmed removed: tunnel-installer-vm-20261026 and tunnel-installer-units-20261026; temporary source copies removed after receipts were saved",
+    "local_docker": "API timeout; local test container cleanup could not be confirmed. Docker Desktop was not globally restarted."
+  }
+}

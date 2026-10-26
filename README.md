@@ -34,6 +34,9 @@ R-TrustTunnel, черновики e-mail/Telegram-рассылок, очеред
 
 ## С чего начать
 
+- [Установка с нуля: мастер для Ubuntu 24.04](docs/fresh-install.md)
+- [Установка с нуля: мастер для CentOS Stream 9/10](docs/fresh-install-centos.md)
+
 - [Архитектура, адреса, порты и маршруты](docs/architecture.md)
 - [Резервный выход и переключение маршрутов](docs/reserve-exit.md)
 - [Установка WireGuard и выходного SOCKS5](docs/interserver.md)

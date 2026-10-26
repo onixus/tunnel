@@ -5,6 +5,7 @@ forwards to this origin on a CDN-proxied port. Hysteria (UDP) and TrustTunnel ca
 """
 import ipaddress
 import json
+import host_platform
 import os
 from pathlib import Path
 import re
@@ -318,6 +319,7 @@ def verify(port, attempts=20):
 def save(state):
     amnezia.write(STATE, json.dumps(state, sort_keys=True))
     amnezia.write(RUNTIME / 'config.json', render_server(state))
+    host_platform.restore_labels(RUNTIME)
 
 
 def restart():

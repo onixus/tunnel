@@ -11,6 +11,7 @@ import agent
 import amnezia
 import cdn
 import protocols
+import host_platform
 from routing_policy import PolicyError, make_plan
 import service_routes
 
@@ -111,6 +112,7 @@ def main():
         os.chmod(path.parent, 0o750)
         os.chown(path, 0, 10001)
         os.chmod(path, 0o660)
+        host_platform.restore_labels(path.parent)
         server.serve_forever()
 
 

@@ -34,7 +34,7 @@ TG = Path('/etc/vpn-telegram/config.json')
 ROOT_KEY = Path('/opt/vpn-console/root.pub')
 SOCKET = '/run/vpn-console/agent.sock'
 LOCK = threading.Lock()
-ORIGIN = 'https://onixus-rf.duckdns.org'
+ORIGIN = os.environ.get('CONSOLE_PUBLIC_ORIGIN', 'https://onixus-rf.duckdns.org').rstrip('/')
 
 class Rejected(Exception):
     pass
@@ -369,9 +369,10 @@ def dispatch(op,data):
     if op in ('hysteria.block','hysteria.unblock','hysteria.rotate','hysteria.export'):
         a=account(data.get('id'))
         if op=='hysteria.export':
-            c=hui_config(); query={'sni':'onixus-rf.duckdns.org'}
+            host=urllib.parse.urlsplit(ORIGIN).hostname
+            c=hui_config(); query={'sni':host}
             if c.get('obfs',{}).get('type')=='salamander': query.update(obfs='salamander',**{'obfs-password':c['obfs']['salamander']['password']})
-            return {'content':'hysteria2://'+urllib.parse.quote(a['con_pass'],safe='')+'@onixus-rf.duckdns.org:443/?'+urllib.parse.urlencode(query)+'#'+urllib.parse.quote(a['username'])}
+            return {'content':'hysteria2://'+urllib.parse.quote(a['con_pass'],safe='')+'@'+host+':443/?'+urllib.parse.urlencode(query)+'#'+urllib.parse.quote(a['username'])}
         payload={'id':a['id'],'username':a['username']}
         if op=='hysteria.rotate': payload['conPass']=secrets.token_hex(16)
         else: payload['deleted']=1 if op=='hysteria.block' else 0
