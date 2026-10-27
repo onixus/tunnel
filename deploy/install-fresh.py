@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fresh Ubuntu 24.04 / CentOS Stream 9/10 x86_64 installation, managed through SSH."""
 import argparse
+import hashlib
 import http.cookiejar
 import ipaddress
 import json
@@ -185,6 +186,23 @@ def dependencies(host):
     return str(venv / 'bin/python3')
 
 
+def load_images():
+    # The archive digest comes from the manifest inside the already verified payload.
+    images = json.loads((ROOT / 'manifest.json').read_text()).get('images') or {}
+    archive = ROOT / images.get('archive', 'images/tunnel-images.tar.gz')
+    digest = hashlib.sha256()
+    with archive.open('rb') as source:
+        for chunk in iter(lambda: source.read(1 << 20), b''):
+            digest.update(chunk)
+    if digest.hexdigest() != images.get('sha256'):
+        raise ValueError('Контрольная сумма архива образов не совпала с manifest.json')
+    run(['docker', 'load', '-i', archive], stdout=subprocess.DEVNULL)
+    for tag in images['tags']:
+        arch = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Os}}/{{.Architecture}}', tag], text=True).strip()
+        if arch != 'linux/amd64':
+            raise ValueError(f'Образ {tag} собран для {arch}, нужен linux/amd64')
+
+
 def install(settings):
     host_os = host_platform.platform_id()
     print('[1/6] Установка зависимостей ' + host_os, flush=True)
@@ -252,8 +270,12 @@ def install(settings):
     write(HOME / 'nginx.conf', nginx_text, 0o644)
     for shared in (HOME / 'data', HOME / 'nginx.conf', Path('/etc/letsencrypt')):
         host_platform.restore_labels(shared)
-    print('[3/6] Сборка портала и Rust codec (первый раз — несколько минут)', flush=True)
-    run(['docker', 'build', '-f', ROOT / 'deploy/fresh-portal.Dockerfile', '-t', 'tunnel-fresh-portal:local', ROOT])
+    if (ROOT / 'images').is_dir():
+        print('[3/6] Загрузка готовых образов портала и nginx', flush=True)
+        load_images()
+    else:
+        print('[3/6] Сборка портала и Rust codec (первый раз — несколько минут)', flush=True)
+        run(['docker', 'build', '-f', ROOT / 'deploy/fresh-portal.Dockerfile', '-t', 'tunnel-fresh-portal:local', ROOT])
     print('[4/6] Закрытая регистрация и создание администратора', flush=True)
     init = '''from app import db\nimport os\ndb.init_db()\ndb.set_settings({'panel_domain': os.environ['PUBLIC_ADDRESS'], 'conn_domain': os.environ['PUBLIC_ADDRESS'], 'conn_address': os.environ['PUBLIC_ADDRESS'], 'conn_port': '8443', 'cert_mode': 'external', 'registration_enabled': '0', 'brand_name': 'VPN', 'portal_url': 'https://localhost:18443'})\n'''
     compose('run', '--rm', '-T', '--no-deps', 'trusttunnel-web', 'python', '-', input=init, text=True)

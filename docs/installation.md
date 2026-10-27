@@ -57,6 +57,23 @@ python3 scripts/build-installer.py --target centos-stream --client-source /пу�
 воспроизводимой. Проверка SHA-256 обнаруживает повреждение файла, но требует
 доверия к источнику самого файла контрольной суммы.
 
+### Пакет с готовыми образами
+
+Флаг `--with-images` один раз собирает образ портала с Rust codec для
+`linux/amd64` и кладёт его в пакет вместе с `nginx:1.28-alpine`. Нужен Docker
+с buildx; на ARM-машине нужна эмуляция amd64 и сборка идёт дольше. Вместо неё
+можно собрать на x86-хосте с Docker по SSH: `DOCKER_HOST=ssh://<хост>` перед командой.
+
+```sh
+python3 scripts/build-installer.py --target ubuntu24 --with-images --client-source /путь/к/R-Trusttunnel
+```
+
+Результат — `tunnel-installer-<ОС>-amd64-images.run` и `.sha256`; запускается так же,
+как обычный. Мастер проверяет SHA-256 архива образов по `manifest.json`, выполняет
+`docker load` вместо сборки и отклоняет образы не под `linux/amd64`. На сервере
+не нужны crates.io и Docker Hub для портала; репозитории ОС, Docker и (на CentOS)
+PyPI по-прежнему нужны. Образы консоли и VPN-протоколов, как и раньше, собираются на сервере.
+
 ## 3. Запустите мастер на сервере
 
 Перенесите `.run` и его `.sha256` в один каталог сервера. Для Ubuntu:
