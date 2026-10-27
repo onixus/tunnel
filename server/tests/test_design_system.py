@@ -343,7 +343,8 @@ def load_apply():
 
 
 def install_portal_modules(module, target):
-    for name in module.RENDERING_MODULES:
+    # A real base image also carries the modules checked for the supervisor contract.
+    for name in (*module.RENDERING_MODULES, *(marker[0] for marker in module.SUPERVISOR_MARKERS)):
         (target / name).write_bytes((ROOT / 'server/upstream/app' / name).read_bytes())
 
 
