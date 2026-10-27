@@ -11,12 +11,33 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SHA = '4400ca12938619df92326c4abe21818bf39915e9'
+# Images the fresh installer would otherwise build or pull on the server.
+PORTAL_IMAGE = 'tunnel-fresh-portal:local'
+NGINX_IMAGE = 'nginx:1.28-alpine'
+IMAGES = 'images/tunnel-images.tar.gz'
 
 
-def build(client, output, target='ubuntu24'):
+def save_images(staging):
+    """Build the portal for the server architecture and export it with nginx."""
+    platform = ['--platform', 'linux/amd64']
+    subprocess.run(['docker', 'buildx', 'build', *platform, '--load', '-f', str(staging / 'deploy/fresh-portal.Dockerfile'),
+                    '-t', PORTAL_IMAGE, str(staging)], check=True)
+    subprocess.run(['docker', 'pull', *platform, NGINX_IMAGE], check=True)
+    target = staging / IMAGES
+    target.parent.mkdir()
+    with target.open('wb') as out:
+        save = subprocess.Popen(['docker', 'save', *platform, PORTAL_IMAGE, NGINX_IMAGE], stdout=subprocess.PIPE)
+        subprocess.run(['gzip', '-6'], stdin=save.stdout, stdout=out, check=True)
+        if save.wait():
+            raise subprocess.CalledProcessError(save.returncode, 'docker save')
+    return {'archive': IMAGES, 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
+            'tags': [PORTAL_IMAGE, NGINX_IMAGE], 'platform': 'linux/amd64'}
+
+
+def build(client, output, target='ubuntu24', with_images=False):
     subprocess.run(['git', '-C', str(client), 'cat-file', '-e', CLIENT_SHA + '^{commit}'], check=True)
     output.mkdir(parents=True, exist_ok=True)
-    basename = 'tunnel-installer-' + target + '-amd64'
+    basename = 'tunnel-installer-' + target + '-amd64' + ('-images' if with_images else '')
     archive = output / (basename + '.tar.gz')
     hashes = {}
     with tempfile.TemporaryDirectory() as folder:
@@ -38,8 +59,11 @@ def build(client, output, target='ubuntu24'):
         raw = subprocess.check_output(['git', '-C', str(client), 'archive', CLIENT_SHA])
         with tarfile.open(fileobj=io.BytesIO(raw)) as source:
             source.extractall(staging / 'client-source', filter='data')
+        images = save_images(staging) if with_images else None
         metadata = {'server_head': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
                     'working_tree': True, 'target': target, 'client_sha': CLIENT_SHA, 'files_sha256': hashes}
+        if images:
+            metadata['images'] = images
         (staging / 'manifest.json').write_text(json.dumps(metadata, indent=2))
         (staging / 'START-HERE.txt').write_text((ROOT / ('docs/fresh-install-centos.md' if target == 'centos-stream' else 'docs/fresh-install.md')).read_text())
         with tarfile.open(archive, 'w:gz') as bundle:
@@ -77,5 +101,6 @@ if __name__ == '__main__':
     parser.add_argument('--client-source', type=Path, required=True)
     parser.add_argument('--target', choices=('ubuntu24', 'centos-stream'), default='ubuntu24')
     parser.add_argument('--output', type=Path, default=ROOT / 'dist')
+    parser.add_argument('--with-images', action='store_true', help='embed prebuilt amd64 portal and nginx images (needs Docker buildx)')
     args = parser.parse_args()
-    build(args.client_source, args.output, args.target)
+    build(args.client_source, args.output, args.target, args.with_images)

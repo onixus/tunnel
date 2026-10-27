@@ -296,3 +296,26 @@ def test_cloud_kernel_requires_operator_reboot_when_running_modules_retired(monk
         fresh.ensure_kernel_modules()
     assert calls[-1] == ['dnf', 'install', '-y', 'kernel', 'kernel-modules']
     assert not any(call[0] == 'reboot' for call in calls)
+
+
+@pytest.mark.parametrize('tamper, arch', [(False, 'linux/amd64'), (True, 'linux/amd64'), (False, 'linux/arm64')])
+def test_prebuilt_images_verified_before_and_after_load(tmp_path, monkeypatch, tamper, arch):
+    import hashlib
+    (tmp_path / 'images').mkdir()
+    archive = tmp_path / 'images/tunnel-images.tar.gz'
+    archive.write_bytes(b'synthetic image archive')
+    digest = hashlib.sha256(b'synthetic image archive').hexdigest()
+    (tmp_path / 'manifest.json').write_text(json.dumps({'images': {
+        'archive': 'images/tunnel-images.tar.gz', 'sha256': '0' * 64 if tamper else digest,
+        'tags': ['tunnel-fresh-portal:local', 'nginx:1.28-alpine']}}))
+    calls = []
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: calls.append(args))
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda *args, **kwargs: arch + '\n')
+    if tamper or arch != 'linux/amd64':
+        with pytest.raises(ValueError):
+            fresh.load_images()
+        assert calls == ([] if tamper else [['docker', 'load', '-i', archive]])
+    else:
+        fresh.load_images()
+        assert calls == [['docker', 'load', '-i', archive]]
