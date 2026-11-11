@@ -37,7 +37,7 @@ jobs:
       - name: Install isolated API and browser dependencies
         run: python -m pip install -r server/test-environment/requirements.txt pytest playwright
       - name: Install Chromium
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install chromium
       - name: Check packaging and syntax
         run: |
           python server/tests/test_publication.py
