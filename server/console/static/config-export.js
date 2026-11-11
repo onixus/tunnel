@@ -54,7 +54,7 @@ function showConfigExport(source, id, preferQr = false) {
         throw Error("Сервис не вернул конфигурацию.");
       exported = result;
       root.innerHTML = `
-        <p class="note">QR-код и ссылка дают доступ к VPN. Сканируйте код в приложении, поддерживающем этот протокол.</p>
+        <p class="note">QR-код и ссылка дают доступ к VPN. Для R-TrustTunnel вставьте ссылку или скачайте YAML: в нём прыжок портов раз в 15 секунд.</p>
         <div class="export-tabs" role="group" aria-label="Формат конфигурации">
           <button id="show-qr" aria-controls="export-qr">QR-код</button>
           <button id="show-link" aria-controls="export-link">Ссылка</button>
@@ -95,7 +95,12 @@ function showConfigExport(source, id, preferQr = false) {
           "QR-код недоступен. Скопируйте ссылку или скачайте конфигурацию.";
       }
       find("#download").onclick = () => {
-        if (exported) save(exported.content, "text/plain;charset=utf-8", source === "amnezia" ? "conf" : "txt");
+        if (!exported) return;
+        if (typeof exported.yaml === "string" && exported.yaml) {
+          save(exported.yaml, "text/yaml;charset=utf-8", "yaml");
+          return;
+        }
+        save(exported.content, "text/plain;charset=utf-8", source === "amnezia" ? "conf" : "txt");
       };
       find("#copy-config").onclick = async () => {
         if (!exported) return;

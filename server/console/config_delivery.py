@@ -13,7 +13,7 @@ from email.message import EmailMessage
 CHANNELS = ('email', 'telegram')
 TG_TEXT_LIMIT = 3500
 INSTRUCTIONS = {
-    'hysteria': 'Импортируйте ссылку hysteria2:// в клиент (Hiddify, v2rayN, NekoBox, Streisand) или отсканируйте QR-код.',
+    'hysteria': 'Импортируйте ссылку hysteria2:// в R-TrustTunnel или отсканируйте QR-код. Вложенный YAML задаёт прыжок портов раз в 15 секунд.',
     'amnezia': 'Импортируйте файл .conf в AmneziaVPN или AmneziaWG (версия с поддержкой AmneziaWG 3.1) либо отсканируйте QR-код.',
     'cdn': 'Импортируйте ссылку vless:// в клиент с поддержкой Xray (v2rayN, v2rayNG, Hiddify, NekoBox, Streisand) или отсканируйте QR-код.',
     'trusttunnel': 'Импортируйте ссылку в приложение TrustTunnel / R-TrustTunnel, отсканируйте QR-код или используйте TOML в консольном клиенте.',
@@ -55,9 +55,12 @@ def qr_png(content, scale=8, border=4):
 def hysteria_bundle(user, export):
     if user.get('deleted'):
         raise DeliveryError('Пользователь Hysteria заблокирован; конфигурация не отправлена')
-    link = export({'id': user['id']})['content']
+    exported = export({'id': user['id']})
+    link = exported['content']
     name = user['username']
     files = [(f'hysteria-{name}.txt', (link + '\n').encode(), 'text/plain')]
+    if exported.get('yaml'):
+        files.append((f'hysteria-{name}.yaml', exported['yaml'].encode(), 'text/yaml'))
     return {'title': 'Hysteria — ' + name, 'kind': 'hysteria', 'items': [{'name': name, 'link': link, 'files': files}]}
 
 

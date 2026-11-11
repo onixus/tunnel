@@ -78,6 +78,31 @@ def hui(method, path, payload=None):
     finally:
         con.close()
 
+def hysteria_share(account):
+    """R-TrustTunnel reads a port set in the address; YAML carries hopInterval."""
+    host=urllib.parse.urlsplit(ORIGIN).hostname
+    config=hui_config()
+    rows=read_db('SELECT value FROM config WHERE key=?', ('HYSTERIA2_CONFIG_PORT_HOPPING',))
+    hop=(rows[0]['value'] if rows else '').strip()
+    if hop and not re.fullmatch(r'\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*', hop):
+        raise Rejected('Некорректный диапазон порт-хопинга')
+    parts=[item.strip() for item in hop.split(',') if item.strip() and item.strip()!='443']
+    ports='443'+((','+','.join(parts)) if parts else '')
+    query={'sni':host}
+    obfs=''
+    if config.get('obfs',{}).get('type')=='salamander':
+        obfs=config['obfs']['salamander']['password']
+        query.update(obfs='salamander',**{'obfs-password':obfs})
+    link=('hysteria2://'+urllib.parse.quote(account['con_pass'],safe='')
+          +'@'+host+':'+ports+'/?'+urllib.parse.urlencode(query)
+          +'#'+urllib.parse.quote(account['username']))
+    lines=['server: '+host+':'+ports,'auth: '+account['con_pass'],'tls:','  sni: '+host]
+    if obfs:
+        lines+=['obfs:','  type: salamander','  salamander:','    password: '+obfs]
+    if parts:
+        lines+=['transport:','  udp:','    hopInterval: 15s']
+    return {'content':link,'yaml':'\n'.join(lines)+'\n'}
+
 def account(id):
     rows=read_db("SELECT * FROM account WHERE id=? AND role='user'", (int(id),))
     if not rows: raise Rejected('Пользователь Hysteria не найден')
@@ -369,10 +394,7 @@ def dispatch(op,data):
     if op in ('hysteria.block','hysteria.unblock','hysteria.rotate','hysteria.export'):
         a=account(data.get('id'))
         if op=='hysteria.export':
-            host=urllib.parse.urlsplit(ORIGIN).hostname
-            c=hui_config(); query={'sni':host}
-            if c.get('obfs',{}).get('type')=='salamander': query.update(obfs='salamander',**{'obfs-password':c['obfs']['salamander']['password']})
-            return {'content':'hysteria2://'+urllib.parse.quote(a['con_pass'],safe='')+'@'+host+':443/?'+urllib.parse.urlencode(query)+'#'+urllib.parse.quote(a['username'])}
+            return hysteria_share(a)
         payload={'id':a['id'],'username':a['username']}
         if op=='hysteria.rotate': payload['conPass']=secrets.token_hex(16)
         else: payload['deleted']=1 if op=='hysteria.block' else 0
