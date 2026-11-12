@@ -204,8 +204,9 @@ def test_console_installer_keeps_cli_options_after_container_arguments(tmp_path,
     if fail_final_health:
         with pytest.raises(RuntimeError, match='synthetic final health failure'):
             installer.main()
-        assert ['systemctl', 'disable', '--now', 'vpn-console-agent'] in fallback_calls
+        assert ['systemctl', 'disable', '--now', 'vpn-console-agent', 'vpn-console-boot'] in fallback_calls
         assert not path('/etc/systemd/system/vpn-console-agent.service').exists()
+        assert not path('/etc/systemd/system/vpn-console-boot.service').exists()
         assert (installer.BACK / 'console-startup.log').read_text() == 'synthetic startup diagnostic'
         assert '# BEGIN VPN CONSOLE' not in nginx.read_text()
         return
@@ -215,6 +216,9 @@ def test_console_installer_keeps_cli_options_after_container_arguments(tmp_path,
     assert '# BEGIN VPN CONSOLE' in nginx.read_text()
     assert (installer.BACK / 'portal.db').exists()
     assert 'ExecStart=' + agent_python + ' ' in path('/etc/systemd/system/vpn-console-agent.service').read_text()
+    assert 'ExecStart=' + agent_python + ' ' in path('/etc/systemd/system/vpn-console-boot.service').read_text()
+    assert 'd /run/vpn-console 0750 root 10001' in path('/etc/tmpfiles.d/vpn-console.conf').read_text()
+    assert ['systemd-tmpfiles', '--create', str(path('/etc/tmpfiles.d/vpn-console.conf'))] in calls
     starts = [command for command in calls if command[:3] == ['docker', 'run', '-d']]
     assert ('label=type:vpn_console_t' in starts[0]) is agent_python.startswith('/opt/')
 

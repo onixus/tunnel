@@ -45,6 +45,7 @@ HTTPS-запрос через туннель с полноценным отве�
 | WireGuard handshake есть, SOCKS timeout | Native nftables на выходном узле, правило TCP 1080, затем UDP relay |
 | Панель не открывается через Hysteria | Маршрут 10.254.77.1/32 не bypass; port rule выше private→direct; ACL выше reject |
 | Через SSH refused | Туннель завершён, локальный порт занят, служба панели остановлена |
+| После перезагрузки нет `/console/` | `docker ps -a` для `vpn-console` и `rtrust-portal-https`; каталог `/run/vpn-console` должен существовать до старта Docker. Если контейнер Exited, а каталог уже есть: `docker start vpn-console rtrust-portal-https` |
 | QUIC не работает, HTTP/2 работает | UDP 8443, ограничения сети/DPI, Docker mapping, MTU |
 | Только крупные ответы зависают | Пакетные потери, PMTU; WG 1380, Hysteria TUN 1400, TT TUN 1280 — снижайте только после измерений |
 | curl получает 403 от H UI | Панель фильтрует некоторые User-Agent; проверьте браузером, это не всегда сеть |

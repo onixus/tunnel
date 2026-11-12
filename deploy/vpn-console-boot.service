@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore VPN console containers after Docker starts
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+# unless-stopped does not cover a container Docker failed to restore, or one whose
+# manual-stop flag was persisted during the previous daemon shutdown.
+ExecStart=/usr/bin/python3 /opt/vpn-console/restore-console.py
+[Install]
+WantedBy=multi-user.target

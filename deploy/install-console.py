@@ -58,10 +58,14 @@ def main():
     for name in ('.rtrust-profile-key','.secret_key'):
         if (data/name).is_file():shutil.copy2(data/name,BACK/name)
     shutil.copy2(NGINX,BACK/'nginx.conf')
-    for p in AGENT_FILES+('root.pub','console.env'):
+    for p in AGENT_FILES+('root.pub','console.env','restore-console.py'):
         if (DEST/p).exists():shutil.copy2(DEST/p,BACK/p)
     unit=Path('/etc/systemd/system/vpn-console-agent.service')
+    boot_unit=Path('/etc/systemd/system/vpn-console-boot.service')
+    runtime_dir=Path('/etc/tmpfiles.d/vpn-console.conf')
     if unit.exists():shutil.copy2(unit,BACK/'agent.service')
+    if boot_unit.exists():shutil.copy2(boot_unit,BACK/'boot.service')
+    if runtime_dir.exists():shutil.copy2(runtime_dir,BACK/'tmpfiles.conf')
     previous=None
     p=subprocess.run(['docker','inspect','vpn-console'],capture_output=True,text=True)
     if p.returncode==0:previous=json.loads(p.stdout)[0];(BACK/'container.json').write_text(p.stdout)
@@ -87,6 +91,14 @@ def main():
     shutil.copy2(ROOT/'server/console/update-root.pub',DEST/'root.pub')
     shutil.copy2(ROOT/'deploy/vpn-console-agent.service',unit)
     unit.write_text(unit.read_text().replace('ExecStart=/usr/bin/python3 ', 'ExecStart='+agent_python+' '))
+    shutil.copy2(ROOT/'deploy/restore-console.py',DEST/'restore-console.py')
+    (DEST/'restore-console.py').chmod(0o755)
+    shutil.copy2(ROOT/'deploy/vpn-console-boot.service',boot_unit)
+    boot_unit.write_text(boot_unit.read_text().replace('ExecStart=/usr/bin/python3 ', 'ExecStart='+agent_python+' '))
+    # systemd-tmpfiles applies this before docker.service; a later agent mkdir is too late.
+    runtime_dir.parent.mkdir(mode=0o755, exist_ok=True)
+    runtime_dir.write_text((ROOT/'deploy/vpn-console.tmpfiles').read_text())
+    runtime_dir.chmod(0o644)
     # Persist only the inherited settings this service needs, never print their values.
     settings={k:env[k] for k in ('SECRET_KEY','SMTP_CONNECT_HOST','PUBLIC_ADDRESS','CLIENT_CA_FILE','CONSOLE_ORIGIN','CONSOLE_PUBLIC_ORIGIN','CONSOLE_USER_DOMAIN','CONSOLE_AGENT_PYTHON') if k in env}
     if any('\n' in v or '\r' in v for v in settings.values()):raise RuntimeError('Unsupported multiline environment')
@@ -94,9 +106,12 @@ def main():
     host_platform.restore_labels(data)
     host_platform.restore_labels(DEST)
     host_platform.restore_labels(unit)
+    host_platform.restore_labels(boot_unit)
+    host_platform.restore_labels(runtime_dir)
     old_nginx=NGINX.read_text()
     try:
-        run(['systemctl','daemon-reload']);run(['systemctl','enable','--now','vpn-console-agent'])
+        run(['systemd-tmpfiles','--create',str(runtime_dir)])
+        run(['systemctl','daemon-reload']);run(['systemctl','enable','--now','vpn-console-agent']);run(['systemctl','enable','vpn-console-boot'])
         run(['systemctl','restart','vpn-console-agent'])
         for _ in range(20):
             if Path('/run/vpn-console/agent.sock').exists():break
@@ -150,18 +165,27 @@ def main():
         if previous:
             subprocess.run(['docker','rename','vpn-console-backup-'+STAMP,'vpn-console'],capture_output=True)
             subprocess.run(['docker','start','vpn-console'],capture_output=True)
-        for name in AGENT_FILES+('root.pub','console.env'):
+        for name in AGENT_FILES+('root.pub','console.env','restore-console.py'):
             if (BACK/name).exists():shutil.copy2(BACK/name,DEST/name)
-            elif name in AGENT_FILES and name!='agent.py':(DEST/name).unlink(missing_ok=True)
+            elif name=='restore-console.py' or (name in AGENT_FILES and name!='agent.py'):(DEST/name).unlink(missing_ok=True)
         if (BACK/'agent.service').exists():
             shutil.copy2(BACK/'agent.service',unit)
+            if (BACK/'boot.service').exists():shutil.copy2(BACK/'boot.service',boot_unit)
+            else:
+                subprocess.run(['systemctl','disable','--now','vpn-console-boot'],capture_output=True)
+                boot_unit.unlink(missing_ok=True)
+            if (BACK/'tmpfiles.conf').exists():shutil.copy2(BACK/'tmpfiles.conf',runtime_dir)
+            else:runtime_dir.unlink(missing_ok=True)
             subprocess.run(['systemctl','daemon-reload'],capture_output=True)
             subprocess.run(['systemctl','restart','vpn-console-agent'],capture_output=True)
         else:
             # A first installation has no preceding agent to restore. Do not
             # leave its new unit restarting after its modules were rolled back.
-            subprocess.run(['systemctl','disable','--now','vpn-console-agent'],capture_output=True)
+            subprocess.run(['systemctl','disable','--now','vpn-console-agent','vpn-console-boot'],capture_output=True)
             unit.unlink(missing_ok=True)
+            boot_unit.unlink(missing_ok=True)
+            runtime_dir.unlink(missing_ok=True)
+            (DEST/'restore-console.py').unlink(missing_ok=True)
             subprocess.run(['systemctl','daemon-reload'],capture_output=True)
         # Existing VPN containers are never replaced by this installer.
         print('Installation failed; original nginx restored. Recovery files:',BACK)

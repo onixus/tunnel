@@ -725,6 +725,9 @@ def test_agent_writable_paths_exist_before_it_starts():
     assert '/var/lib/h-ui' in paths and '/opt/amneziawg' in paths
     for path in ('/var/lib/h-ui', '/opt/amneziawg'):
         assert f"Path('{path}')" in installer and installer.index(f"Path('{path}')") < installer.index("'enable','--now','vpn-console-agent'")
+    assert 'Before=docker.service' not in unit and 'Type=simple' in unit
+    assert 'd /run/vpn-console 0750 root 10001' in (ROOT / 'deploy/vpn-console.tmpfiles').read_text()
+    assert 'systemd-tmpfiles' in installer and installer.index('systemd-tmpfiles') < installer.index("'enable','--now','vpn-console-agent'")
 
 
 def test_overview_does_not_show_uninstalled_protocol_as_failure():

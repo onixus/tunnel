@@ -1,0 +1,4 @@
+# /run is wiped on boot. Docker restores unless-stopped containers while starting
+# and does not retry a bind mount that was missing at that moment. This entry is
+# applied by systemd-tmpfiles-setup.service, which finishes before docker.service.
+d /run/vpn-console 0750 root 10001 -

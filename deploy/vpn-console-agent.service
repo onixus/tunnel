@@ -14,6 +14,8 @@ ProtectSystem=strict
 ProtectHome=read-only
 # Protocols can be installed from the console after the UI is deployed. The installer creates
 # /var/lib/h-ui up front: a path missing at start stays read-only until the agent restarts.
+# /run/vpn-console is not created here: /run is tmpfs, and Docker restores containers
+# before this service starts. deploy/vpn-console.tmpfiles creates the directory first.
 ReadWritePaths=/run /opt/vpn-console /opt/amneziawg /opt/xray-cdn /var/lib/h-ui -/opt/rtrust-updates -/opt/trusttunnel-web -/root/hysteria-route-backups
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 [Install]
