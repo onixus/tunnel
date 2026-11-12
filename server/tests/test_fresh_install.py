@@ -131,10 +131,11 @@ def test_trusttunnel_first_install_uses_resolved_local_base(tmp_path, monkeypatc
     assert '1.1.0' in result
 
 
-@pytest.mark.parametrize('local_health,fail_final_health,agent_python', [
-    (True, False, '/usr/bin/python3'), (False, False, '/usr/bin/python3'),
-    (True, True, '/usr/bin/python3'), (True, False, '/opt/vpn-console/venv/bin/python3')])
-def test_console_installer_keeps_cli_options_after_container_arguments(tmp_path, monkeypatch, local_health, fail_final_health, agent_python):
+@pytest.mark.parametrize('local_health,fail_final_health,agent_python,prior_agent', [
+    (True, False, '/usr/bin/python3', False), (False, False, '/usr/bin/python3', False),
+    (True, True, '/usr/bin/python3', False), (True, False, '/opt/vpn-console/venv/bin/python3', False),
+    (True, True, '/usr/bin/python3', True)])
+def test_console_installer_keeps_cli_options_after_container_arguments(tmp_path, monkeypatch, local_health, fail_final_health, agent_python, prior_agent):
     """Exercise the installer through final health verification, with no host mutations."""
     import io
     import sys
@@ -172,6 +173,8 @@ def test_console_installer_keeps_cli_options_after_container_arguments(tmp_path,
         db.execute('CREATE TABLE preserve(value TEXT)')
     nginx = tmp_path / 'nginx.conf'
     nginx.write_text('server {\n    location / {\n    }\n}\n')
+    if prior_agent:
+        path('/etc/systemd/system/vpn-console-agent.service').write_text('prior-agent\n')
     current = {'Config': {'Env': ['SECRET_KEY=synthetic-installer-test', 'CONSOLE_AGENT_PYTHON=' + agent_python]}, 'Image': 'sha256:' + 'a' * 64,
                'Mounts': [{'Destination': '/data', 'Source': str(data)}, {'Destination': '/certs', 'Source': str(tmp_path)}]}
     if agent_python.startswith('/opt/'):
@@ -204,9 +207,15 @@ def test_console_installer_keeps_cli_options_after_container_arguments(tmp_path,
     if fail_final_health:
         with pytest.raises(RuntimeError, match='synthetic final health failure'):
             installer.main()
-        assert ['systemctl', 'disable', '--now', 'vpn-console-agent', 'vpn-console-boot'] in fallback_calls
-        assert not path('/etc/systemd/system/vpn-console-agent.service').exists()
         assert not path('/etc/systemd/system/vpn-console-boot.service').exists()
+        assert not path('/etc/tmpfiles.d/vpn-console.conf').exists()
+        assert not (installer.DEST / 'restore-console.py').exists()
+        if prior_agent:
+            assert ['systemctl', 'disable', '--now', 'vpn-console-boot'] in fallback_calls
+            assert path('/etc/systemd/system/vpn-console-agent.service').read_text() == 'prior-agent\n'
+        else:
+            assert ['systemctl', 'disable', '--now', 'vpn-console-agent', 'vpn-console-boot'] in fallback_calls
+            assert not path('/etc/systemd/system/vpn-console-agent.service').exists()
         assert (installer.BACK / 'console-startup.log').read_text() == 'synthetic startup diagnostic'
         assert '# BEGIN VPN CONSOLE' not in nginx.read_text()
         return
