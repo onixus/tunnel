@@ -57,6 +57,8 @@ python3 scripts/build-installer.py --target centos-stream --client-source /пу�
 воспроизводимой. Проверка SHA-256 обнаруживает повреждение файла, но требует
 доверия к источнику самого файла контрольной суммы.
 
+Готовые образы текущего `main` опубликованы в [versions.md](versions.md): `ghcr.io/onixus/tunnel-fresh-portal` и `ghcr.io/onixus/vpn-console`, тег `5d3cba4`. Это не замена работающих контейнеров.
+
 ### Пакет с готовыми образами
 
 Флаг `--with-images` один раз собирает образ портала с Rust codec для
