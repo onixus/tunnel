@@ -736,6 +736,16 @@ def authenticated_admin(request):
     if admin is None:raise HTTPException(401,'Admin login required')
     return admin
 
+@router.get('/admin/api/endpoint-status')
+def endpoint_status(request:Request):
+    """What the portal supervisor last observed. The console sidecar has no endpoint of its own."""
+    if request.headers.get('authorization') is not None:raise HTTPException(403,'Admin browser session required')
+    authenticated_admin(request)
+    from . import endpoint
+    status=endpoint.manager.status()
+    return JSONResponse({'running':bool(status['running']),'domain':status['domain'],'cert_present':bool(status['cert_present']),
+                         'port':str(status['port']),'cert_domains':endpoint.scan_cert_domains()},headers=HEADERS)
+
 @router.get('/admin/agent-routes',response_class=HTMLResponse)
 def admin_routes_page(request:Request):
     if webauth.current_admin(request) is None:return RedirectResponse('/admin/login',302)

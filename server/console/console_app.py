@@ -98,19 +98,22 @@ async def body(request):
     if not isinstance(value,dict): raise HTTPException(422,'Ожидается объект')
     return value
 
-def legacy(actor_id,path,data):
+class PortalRejected(RuntimeError):
+    """The portal answered and refused the change. A timeout is not a refusal."""
+
+def legacy(actor_id,path,data,timeout=30):
     # Fixed paths constructed from checked integer IDs, session never saved in jobs.
     token=security.create_session_token(str(actor_id),'admin')
     origin=urlsplit(PORTAL)
     if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
         raise RuntimeError('Недопустимый внутренний адрес панели')
-    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=30)
+    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=timeout)
     try:
         client.request('POST','/admin/'+path,body=urlencode(data),headers={'Cookie':webauth.ADMIN_COOKIE+'='+token,'Content-Type':'application/x-www-form-urlencoded'})
         r=client.getresponse(); dest=r.getheader('Location',''); r.read(1048576)
         query=parse_qs(urlsplit(dest).query)
         if r.status not in (302,303) or 'err' in query or '/login' in dest:
-            raise RuntimeError('Панель TrustTunnel не подтвердила изменение')
+            raise PortalRejected('Панель TrustTunnel не подтвердила изменение')
     finally: client.close()
     return {'message':'Изменение TrustTunnel применено'}
 
@@ -157,11 +160,20 @@ def source_user(source,id):
 NICK=re.compile(r'[a-z0-9][a-z0-9_-]{2,31}')
 NAMES={'trusttunnel':'TrustTunnel','hysteria':'Hysteria','amnezia':'AmneziaWG','cdn':'CDN'}
 
+def console_names():
+    names=[]
+    for key in ('CONSOLE_PUBLIC_ORIGIN','CONSOLE_ORIGIN'):
+        host=urlsplit(os.environ.get(key,'')).hostname
+        if host and host not in names: names.append(host.lower())
+    return names
+
 def console_host(request):
+    # The label is a display name, not a routing input. A forwarded Host is shown
+    # only when it is one of the names this installation was configured with.
     host=(request.headers.get('host') or '').split(':')[0].strip().lower()
-    if host and 1<len(host)<=253 and all(part and all(c.isalnum() or c=='-' for c in part) for part in host.split('.')):
-        return host
-    return urlsplit(os.environ.get('CONSOLE_PUBLIC_ORIGIN') or os.environ.get('CONSOLE_ORIGIN','')).hostname or 'console'
+    allowed=console_names()
+    if host in allowed: return host
+    return allowed[0] if allowed else 'console'
 
 def user_domain():
     return os.environ.get('CONSOLE_USER_DOMAIN') or urlsplit(os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).hostname
@@ -775,16 +787,31 @@ SETTING_KEYS=('brand_name','cert_mode','panel_domain','connection_hidden','conn_
 CHECKBOX_KEYS={'connection_hidden','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol'}
 SETTING_CHOICES={'cert_mode':('external','letsencrypt'),'conn_protocol':('QUIC','HTTP/2','HTTP/1.1'),'smtp_tls':('starttls','ssl','none')}
 
-def portal_settings():
-    from app import endpoint
+def portal_status(admin_id):
+    """Read the endpoint the portal process owns. This sidecar never starts one."""
+    token=security.create_session_token(str(admin_id),'admin')
+    origin=urlsplit(PORTAL)
+    if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
+        raise RuntimeError('Недопустимый внутренний адрес панели')
+    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=10)
+    try:
+        client.request('GET','/admin/api/endpoint-status',headers={'Cookie':webauth.ADMIN_COOKIE+'='+token})
+        response=client.getresponse(); raw=response.read(65536)
+    finally: client.close()
+    if response.status!=200: raise RuntimeError('Портал не отдал состояние endpoint')
+    status=json.loads(raw)
+    if not isinstance(status,dict) or type(status.get('running')) is not bool: raise RuntimeError('Портал не отдал состояние endpoint')
+    domains=status.get('cert_domains')
+    return {'running':status['running'],'domain':status.get('domain') or '','cert_present':status.get('cert_present') is True,
+            'port':str(status.get('port') or '8443'),'cert_domains':domains if isinstance(domains,list) else []}
+
+def portal_settings(admin_id):
     current=db.get_settings()
     public={key:current.get(key,'') for key in SETTING_KEYS if key!='smtp_password'}
     public['smtp_password_set']=bool(current.get('smtp_password'))
-    try:
-        domains=endpoint.scan_cert_domains(); status=endpoint.manager.status()
-    except Exception:
-        domains,status=[],{'running':False,'domain':'','cert_present':False,'port':current.get('conn_port','8443')}
-    return {'settings':public,'cert_domains':domains,'endpoint':status}
+    try: status=portal_status(admin_id)
+    except Exception: status={'running':False,'domain':'','cert_present':False,'port':current.get('conn_port','8443'),'cert_domains':[],'unavailable':True}
+    return {'settings':public,'cert_domains':status.pop('cert_domains'),'endpoint':status}
 
 def checked_setting(key,value):
     if not isinstance(value,str) or len(value)>300: raise HTTPException(422,'Некорректное значение настройки')
@@ -798,8 +825,7 @@ def checked_setting(key,value):
 
 @app.get('/console/api/settings')
 def settings_get(request:Request):
-    actor(request)
-    return portal_settings()
+    return portal_settings(actor(request))
 
 @app.post('/console/api/settings')
 async def settings_save(request:Request):
@@ -812,15 +838,24 @@ async def settings_save(request:Request):
             if isinstance(data.get(key),str) and data[key]: updates[key]=checked_setting(key,data[key])
         elif key in data: updates[key]=checked_setting(key,data[key])
         else: updates[key]=current.get(key,'')
-    db.set_settings(updates)
-    applied=True
-    try:
-        from app import endpoint
-        endpoint.manager.apply_settings()
-    except Exception: applied=False
-    audit(admin,'trusttunnel.settings','applied' if applied else 'saved')
-    result=portal_settings()
-    result.update(saved=True,applied=applied,message='Настройки сохранены и переданы endpoint.' if applied else 'Настройки сохранены. Endpoint не подтвердил применение.')
+    # The portal supervisor is the only process that can reload the endpoint.
+    # A refused apply must not leave the database ahead of the running process,
+    # and a restart can outlast the HTTP proxy in front of this sidecar.
+    before={key:current.get(key,'') for key in SETTING_KEYS}
+    # The portal treats a present checkbox as on. An explicit 0 would be saved as 1.
+    payload={key:value for key,value in updates.items() if key not in CHECKBOX_KEYS or value=='1'}
+    # apply_settings waits out a coalesced restart; stay under the 90s proxy timeout.
+    try: await run_in_threadpool(legacy,admin,'settings',payload,70)
+    except PortalRejected:
+        db.set_settings(before)
+        audit(admin,'trusttunnel.settings','rejected')
+        raise HTTPException(502,'Портал не применил настройки. Предыдущие значения восстановлены.')
+    except Exception:
+        audit(admin,'trusttunnel.settings','unknown')
+        raise HTTPException(504,'Портал не ответил вовремя. Проверьте endpoint перед повтором: настройки могли примениться.')
+    audit(admin,'trusttunnel.settings','applied')
+    result=portal_settings(admin)
+    result.update(saved=True,applied=True,message='Настройки сохранены и применены endpoint.')
     return result
 
 @app.post('/console/api/telegram')

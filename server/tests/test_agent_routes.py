@@ -33,6 +33,18 @@ class AgentRouteTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.text)
         return result.json()['id'], data
 
+    def test_endpoint_status_comes_from_the_portal_supervisor(self):
+        from unittest.mock import patch
+        from app import endpoint
+        self.assertEqual(self.client.get('/admin/api/endpoint-status').status_code,401)
+        self.admin()
+        observed={'running':True,'domain':'vpn.example','cert_present':True,'port':'8443'}
+        with patch.object(endpoint.manager,'status',return_value=observed),patch.object(endpoint,'scan_cert_domains',return_value=['vpn.example']):
+            result=self.client.get('/admin/api/endpoint-status')
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(result.json(),{**observed,'cert_domains':['vpn.example']})
+        self.assertEqual(result.headers['cache-control'],'no-store')
+
     def test_admin_authentication_csrf_and_assets(self):
         self.assertEqual(self.client.get('/admin/api/agent-routes').status_code,401)
         self.assertEqual(self.client.get('/admin/agent-routes',follow_redirects=False).status_code,302)

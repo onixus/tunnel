@@ -572,7 +572,7 @@ function settingsPage() {
       "Настройки TrustTunnel",
       "Домен, сертификат, адрес подключения и SMTP. Сохранение применяет их к endpoint.",
     ) +
-    `<div class="note">${endpoint.running ? "Endpoint запущен" : "Endpoint остановлен"} · домен ${esc(endpoint.domain || "не задан")} · сертификат ${endpoint.cert_present ? "есть" : "нет"} · порт ${esc(endpoint.port || "8443")}</div>
+    `<div class="note">${endpoint.unavailable ? "Портал не отдал состояние endpoint. Сохранение всё равно идёт через него и не подтвердится, если он не ответит." : (endpoint.running ? "Endpoint запущен" : "Endpoint остановлен") + " · домен " + esc(endpoint.domain || "не задан") + " · сертификат " + (endpoint.cert_present ? "есть" : "нет") + " · порт " + esc(endpoint.port || "8443")}</div>
      <form id="settings-form" class="stack">
        <section class="card"><h2>Общее</h2>
          ${field("brand_name", "Название панели", s.brand_name)}
@@ -607,7 +607,8 @@ function settingsPage() {
        <div class="actions"><button type="submit">Применить Hysteria</button></div>
      </form>
      <form id="filter-form" class="card"><h2>Исключения фильтра DNS</h2>
-       <p class="subtitle">Исключение снимает блокировку домена. Дополнительная блокировка сильнее исключения, кроме защищённых имён. Источники списков не меняются.</p>
+       <p class="subtitle">Исключение снимает блокировку домена. Дополнительная блокировка сильнее исключения. Защищённые имена не принимаются: корень и так не блокируется. Источники списков не меняются.</p>
+       <p class="subtitle">Защищены: ${esc(((state.adblock || {}).protected || []).join(", ") || "список не получен")}${(state.adblock || {}).last_error ? " · последняя ошибка обновления: " + esc(state.adblock.last_error) : ""}</p>
        <label class="field">Не блокировать, по одному домену на строку<textarea name="allow">${esc(((state.adblock || {}).allow || []).join("\n"))}</textarea></label>
        <label class="field">Блокировать дополнительно<textarea name="deny">${esc(((state.adblock || {}).deny || []).join("\n"))}</textarea></label>
        <div class="actions"><button type="submit">Сохранить и обновить списки</button></div>
@@ -661,6 +662,7 @@ function render() {
   };
   // A deleted user's card falls back to the list.
   if (page === "person" && !(state.people || []).some((p) => p.id === personId)) page = "users";
+  if (window.DeviceRoutes && DeviceRoutes.forget) DeviceRoutes.forget();
   $("#content").innerHTML = map[page]();
   document.querySelectorAll("#content .primary").forEach((button, index) => {
     if (index > 0) button.classList.remove("primary");
@@ -694,30 +696,28 @@ function navigate(target) {
 }
 function bindCoreSettings() {
   const hysteria = $("#hysteria-core-form");
-  if (hysteria) hysteria.onsubmit = async (event) => {
+  if (hysteria) hysteria.onsubmit = (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(hysteria));
-    const button = hysteria.querySelector("[type=submit]");
-    button.disabled = true;
-    try {
-      await job("hysteria.core", { port: Number(data.port), obfs: hysteria.obfs.checked, obfs_password: data.obfs_password || "" });
-    } catch (error) {
-      notice(error.message, true);
-      button.disabled = false;
-    }
+    const port = Number(data.port);
+    if (!Number.isInteger(port) || !(port === 443 || (port >= 1024 && port <= 65535))) return notice("Порт Hysteria: 443 или 1024–65535.", true);
+    confirmJob(
+      "Применить Hysteria",
+      "Служба перезапустится, клиенты кратко отключатся. Если порт или маскировка изменились, выпустите конфигурации заново.",
+      "hysteria.core",
+      { port, obfs: hysteria.obfs.checked, obfs_password: data.obfs_password || "" },
+    );
   };
   const filter = $("#filter-form");
-  if (filter) filter.onsubmit = async (event) => {
+  if (filter) filter.onsubmit = (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(filter));
-    const button = filter.querySelector("[type=submit]");
-    button.disabled = true;
-    try {
-      await job("adblock.exceptions", { allow: domainLines(data.allow || ""), deny: domainLines(data.deny || "") });
-    } catch (error) {
-      notice(error.message, true);
-      button.disabled = false;
-    }
+    confirmJob(
+      "Обновить исключения фильтра",
+      "Списки будут пересобраны. Ошибка обновления оставит последнюю рабочую версию.",
+      "adblock.exceptions",
+      { allow: domainLines(data.allow || ""), deny: domainLines(data.deny || "") },
+    );
   };
 }
 function bindTelegram() {

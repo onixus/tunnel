@@ -48,6 +48,44 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.client.post('/console/api/jobs',json={},headers={'X-CSRF-Token':self.csrf,'Origin':'https://evil.invalid'}).status_code,403)
         self.client.cookies.clear();self.assertEqual(self.client.get('/console/api/state').status_code,401)
         self.client.cookies.set('admin_token',security.create_session_token(str(self.user),'user'));self.assertEqual(self.client.get('/console/api/state').status_code,401)
+    def test_settings_are_applied_by_the_portal_and_restored_on_refusal(self):
+        db.set_settings({'brand_name':'Before','smtp_password':'kept-secret','cert_mode':'external','conn_protocol':'QUIC','smtp_tls':'starttls'})
+        status={'running':True,'domain':'vpn.example','cert_present':True,'port':'8443','cert_domains':['vpn.example']}
+        def refuse(*args):
+            db.set_settings({'brand_name':'After'})
+            raise ui.PortalRejected('no')
+        with patch.object(ui,'legacy',side_effect=refuse),patch.object(ui,'portal_status',return_value=status),patch('app.endpoint.manager') as manager:
+            refused=self.post('settings',{'brand_name':'After','cert_mode':'external','conn_protocol':'QUIC','smtp_tls':'starttls'})
+        self.assertEqual(refused.status_code,502,refused.text)
+        self.assertEqual(db.get_setting('brand_name'),'Before')
+        self.assertEqual(db.get_setting('smtp_password'),'kept-secret')
+        manager.apply_settings.assert_not_called()
+        def stall(*args):
+            db.set_settings({'brand_name':'After'})
+            raise TimeoutError('stall')
+        with patch.object(ui,'legacy',side_effect=stall),patch.object(ui,'portal_status',return_value=status):
+            unknown=self.post('settings',{'brand_name':'After','cert_mode':'external','conn_protocol':'QUIC','smtp_tls':'starttls'})
+        self.assertEqual(unknown.status_code,504,unknown.text)
+        self.assertEqual(db.get_setting('brand_name'),'After')
+        with patch.object(ui,'legacy',return_value={'message':'ok'}) as legacy,patch.object(ui,'portal_status',return_value=status):
+            saved=self.post('settings',{'brand_name':'Kept','cert_mode':'external','conn_protocol':'QUIC','smtp_tls':'starttls','registration_enabled':True})
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertTrue(saved.json()['applied'])
+        self.assertNotIn('kept-secret',saved.text)
+        self.assertEqual(saved.json()['endpoint']['running'],True)
+        sent=legacy.call_args.args[2]
+        self.assertEqual(sent['brand_name'],'Kept')
+        self.assertEqual(sent['registration_enabled'],'1')
+        self.assertNotIn('connection_hidden',sent)
+        self.assertNotIn('smtp_password',sent)
+
+    def test_console_host_ignores_an_unconfigured_request_host(self):
+        with patch.dict(os.environ,{'CONSOLE_PUBLIC_ORIGIN':'https://vpn.example','CONSOLE_ORIGIN':''}):
+            page=self.client.get('/console',headers={'host':'evil.example'})
+        self.assertEqual(page.status_code,200)
+        self.assertIn('vpn.example',page.text)
+        self.assertNotIn('evil.example',page.text)
+
     def test_real_templates_assets_and_logout_state(self):
         r=self.client.get('/console');self.assertEqual(r.status_code,200);self.assertIn('csrf-token',r.text)
         for asset in ['console.css','console.js']:self.assertEqual(self.client.get('/console/static/'+asset).status_code,200)
@@ -600,20 +638,41 @@ class AgentTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_hysteria_core_changes_port_without_returning_password(self):
-        switch=type('Switch',(),{'write_config':lambda self,value: written.append(value)})()
+        from unittest.mock import MagicMock
+        old='listen: :443\nobfs:\n  type: salamander\n  salamander:\n    password: current-secret\n'
         written=[]
-        with patch.object(agent,'hui_config',return_value={'listen':':443','obfs':{'type':'salamander','salamander':{'password':'current-secret'}}}),patch.object(agent,'module_switch',return_value=switch),patch.object(agent,'run'):
+        switch=MagicMock()
+        switch.get_config.return_value=old
+        switch.write_config.side_effect=lambda value: written.append(value)
+        root=Path(TMP.name)/secrets.token_hex(8); root.mkdir()
+        with patch.object(agent,'module_switch',return_value=switch),patch.object(agent,'BACKUPS',root),patch.object(agent,'HYSTERIA_LOCK',root/'lock'),patch.object(agent.fcntl,'flock'),patch.object(agent,'run',return_value='active'):
             result=agent.apply_hysteria_core({'port':4443,'obfs':True,'obfs_password':''})
         self.assertEqual(result['port'],4443)
+        self.assertTrue(result['reexport'])
         self.assertNotIn('current-secret',json.dumps(result))
-        self.assertIn('4443',written[0])
+        self.assertIn(':4443',written[0])
+        self.assertTrue(any(path.suffix=='.yaml' for path in root.iterdir()))
         with self.assertRaises(agent.Rejected):agent.apply_hysteria_core({'port':80,'obfs':False,'obfs_password':''})
+
+    def test_hysteria_core_restores_config_when_start_fails(self):
+        from unittest.mock import MagicMock
+        old='listen: :443\n'
+        switch=MagicMock(); switch.get_config.return_value=old
+        def fail_start(args, timeout=30):
+            if args[:2]==['systemctl','start']: raise agent.Rejected('Операция не завершена: systemctl')
+            return 'active'
+        root=Path(TMP.name)/secrets.token_hex(8); root.mkdir()
+        with patch.object(agent,'module_switch',return_value=switch),patch.object(agent,'BACKUPS',root),patch.object(agent,'HYSTERIA_LOCK',root/'lock'),patch.object(agent.fcntl,'flock'),patch.object(agent,'run',side_effect=fail_start):
+            with self.assertRaises(agent.Rejected):agent.apply_hysteria_core({'port':4443,'obfs':False,'obfs_password':''})
+        self.assertEqual(switch.write_config.call_args_list[-1].args[0],old)
 
     def test_filter_exceptions_do_not_replace_sources(self):
         root=Path(TMP.name)/secrets.token_hex(8); root.mkdir(); policy=root/'policy.json'
         policy.write_text(json.dumps({'sources':[{'id':'kept'}],'protected':['example.com'],'allow':[],'deny':[]}))
-        with patch.object(agent,'POLICY',policy),patch.object(agent,'run'):
+        with patch.object(agent,'POLICY',policy),patch.object(agent,'ADBLOCK_LOCK',root/'update.lock'),patch.object(agent,'run'):
             agent.update_filter_exceptions({'allow':['Safe.Example.com'],'deny':['ads.example.com']})
+            with self.assertRaises(agent.Rejected):agent.update_filter_exceptions({'allow':['1.2.3.4'],'deny':[]})
+            with self.assertRaises(agent.Rejected):agent.update_filter_exceptions({'allow':['example.com'],'deny':[]})
         saved=json.loads(policy.read_text())
         self.assertEqual(saved['sources'],[{'id':'kept'}])
         self.assertEqual((saved['allow'],saved['deny']),(['safe.example.com'],['ads.example.com']))

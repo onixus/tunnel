@@ -86,6 +86,11 @@ exceptions are not accepted from the UI. A changed protected prefix requires rev
 
 ## Delivery and Telegram
 
+TrustTunnel settings are saved by asking the portal to apply them. The sidecar
+does not start an endpoint and does not report the portal's endpoint as its own.
+A refused apply restores the previous values. A portal timeout is reported as
+unconfirmed: the running endpoint may already have the new settings.
+
 Existing SMTP settings are reused. The Telegram page can bind the same
 owner-only bot: the agent checks the token with Telegram, writes
 `/etc/vpn-telegram/config.json` as root `0600`, and restarts `vpn-telegram` when

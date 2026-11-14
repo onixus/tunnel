@@ -6,6 +6,7 @@ that was already imported. Does not stop panels or switch authentication.
 """
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -22,8 +23,13 @@ def main():
     args = parser.parse_args()
     if args.hui_db is None and args.portal_db is None:
         parser.error('Укажите --hui-db, --portal-db или оба')
+    # A new console.db holds connection passwords. Do not leave it world-readable.
+    os.umask(0o077)
     args.console_db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.console_db.exists() and args.console_db.stat().st_mode & 0o077:
+        parser.error('console.db доступна не только владельцу; исправьте права перед импортом')
     connection = sqlite3.connect(args.console_db)
+    os.chmod(args.console_db, 0o600)
     try:
         report = panel_shadow.import_panels(
             connection,

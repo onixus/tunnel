@@ -224,6 +224,13 @@ window.DeviceRoutes = {
           .then(() => message("Состояние обновлено"))
           .catch((e) => message(e.message, true));
     });
+    let codeTimer = 0;
+    const forgetCode = () => {
+      clearTimeout(codeTimer);
+      const shown = $("code");
+      if (shown) shown.textContent = "";
+    };
+    this.forget = forgetCode;
     $("enroll").addEventListener("click", () =>
       act(async () => {
         const result = await api("/enrollment-codes", "POST", {
@@ -231,11 +238,11 @@ window.DeviceRoutes = {
         });
         $("code").textContent =
           result.code + " · действует " + result.expires_in + " секунд";
-        setTimeout(() => {
-          $("code").textContent = "";
-        }, result.expires_in * 1000);
+        clearTimeout(codeTimer);
+        codeTimer = setTimeout(forgetCode, Math.min(result.expires_in, 180) * 1000);
       }),
     );
+    // Clear before the console replaces this page; a detached node would keep the code.
     load().catch((error) => message(error.message, true));
   },
 };
