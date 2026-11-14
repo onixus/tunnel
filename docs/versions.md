@@ -18,14 +18,9 @@ AmneziaWG 3.1 собирается консолью из исходников [a
 
 Docker base `python:3.12-slim` и транзитивные Python-зависимости не закреплены digest/полным lockfile: новая сборка не обязана быть побитово идентична. Для обновления сначала сохраните рабочий image ID и данные, затем проверьте новую сборку отдельно.
 
-## Образы портала и консоли
+## Образ портала и консоли
 
-Собраны 14.11.2026 на Fedora 43 x86_64 из `5d3cba4` (`main` после PR #47). Платформа `linux/amd64`. Публикация не заменяет работающие контейнеры.
-
-| Образ | Теги | Digest |
-|---|---|---|
-| [ghcr.io/onixus/tunnel-fresh-portal](https://github.com/onixus/tunnel/pkgs/container/tunnel-fresh-portal) | `5d3cba4`, `pr47` | `sha256:1ebc179f4a95512b84ed631bd169656be295c09a9a837c8af826948b105a73c1` |
-| [ghcr.io/onixus/vpn-console](https://github.com/onixus/tunnel/pkgs/container/vpn-console) | `5d3cba4`, `pr47` | `sha256:59b2ac3988893834b7197a738a672ee0e3044cfc2e1a67516f99aa7e66b38e82` |
+Один образ содержит и портал, и консоль. Портал стартует командой образа и владеет endpoint. Консоль — второй процесс того же образа: `uvicorn routing_app:app --host 0.0.0.0 --port 8000`. Платформа `linux/amd64`. Публикация не заменяет работающие контейнеры.
 
 ## Технические первоисточники
 
