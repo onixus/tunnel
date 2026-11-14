@@ -596,7 +596,7 @@ label.check {
   margin: 8px 0;
 }
 #status.error {
-  color: var(--danger, #c43838);
+  color: var(--danger);
 }
 label.field {
   display: grid;

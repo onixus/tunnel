@@ -588,7 +588,7 @@ function settingsPage() {
        <section class="card"><h2>Параметры подключения</h2>
          <div class="settings-grid">${field("conn_address", "Адрес", s.conn_address)}${field("conn_port", "Порт", s.conn_port, "number")}${field("conn_sni", "Custom SNI", s.conn_sni)}</div>
          <label class="field">Протокол<select name="conn_protocol">${["QUIC", "HTTP/2", "HTTP/1.1"].map((p) => `<option ${s.conn_protocol === p ? "selected" : ""}>${p}</option>`).join("")}</select></label>
-         <div class="settings-grid">${["address", "port", "domain", "sni", "protocol", "username", "password"].map((name) => `<label class="check"><input type="checkbox" name="show_${name}" ${s["show_" + name] === "1" ? "checked" : ""}> Показывать ${name}</label>`).join("")}</div>
+         <div class="settings-grid">${[["address", "Адрес"], ["port", "Порт"], ["domain", "Домен"], ["sni", "SNI"], ["protocol", "Протокол"], ["username", "Логин"], ["password", "Пароль"]].map(([name, label]) => `<label class="check"><input type="checkbox" name="show_${name}" ${s["show_" + name] === "1" ? "checked" : ""}> Показывать ${label}</label>`).join("")}</div>
        </section>
        <section class="card"><h2>Почта</h2>
          <p class="subtitle">Пароль SMTP не показывается. Пустое поле сохраняет прежний${s.smtp_password_set ? ", он уже задан" : ""}.</p>
