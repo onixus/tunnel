@@ -13,7 +13,7 @@ COPY server/console/ /tmp/rtrust-console-update/
 COPY deploy/portal_patch.py /tmp/rtrust-portal-patch.py
 RUN python /tmp/rtrust-portal-patch.py && \
     if [ -d /console ]; then \
-        cp /tmp/rtrust-console-update/console_app.py /console/console_app.py && \
+        cp /tmp/rtrust-console-update/console_app.py /tmp/rtrust-console-update/panel_shadow.py /console/ && \
         cp -R /tmp/rtrust-console-update/templates /tmp/rtrust-console-update/static /console/; \
     fi && \
     rm -rf /tmp/rtrust-portal-patch.py /tmp/rtrust-console-update

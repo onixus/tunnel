@@ -22,6 +22,15 @@ def test_hysteria_share_puts_port_set_in_the_address(monkeypatch):
     assert 'hopInterval: 15s' in shared['yaml']
 
 
+def test_hysteria_share_uses_the_configured_listen_port(monkeypatch):
+    monkeypatch.setattr(agent, 'ORIGIN', 'https://vpn.example.invalid')
+    monkeypatch.setattr(agent, 'hui_config', lambda: {'listen': '0.0.0.0:4443'})
+    monkeypatch.setattr(agent, 'read_db', lambda *args: [{'value': '20000-40000'}])
+    shared = agent.hysteria_share({'con_pass': 'fixture-secret', 'username': 'user'})
+    assert '@vpn.example.invalid:4443,20000-40000/?' in shared['content']
+    assert ':443' not in shared['content']
+
+
 def test_hysteria_share_without_hopping_stays_on_one_port(monkeypatch):
     monkeypatch.setattr(agent, 'ORIGIN', 'https://vpn.example.invalid')
     monkeypatch.setattr(agent, 'hui_config', lambda: {})

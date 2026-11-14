@@ -143,7 +143,7 @@ def main():
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_cookie_flags ~ secure httponly samesite=strict;
         client_max_body_size 32k;
-        proxy_read_timeout 35s;
+        proxy_read_timeout 90s;
     }
     # END VPN CONSOLE
 '''

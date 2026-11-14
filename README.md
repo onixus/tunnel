@@ -39,6 +39,7 @@
 - [Ubuntu 24.04](docs/fresh-install.md) и [CentOS Stream 9/10](docs/fresh-install-centos.md)
 - [Архитектура, порты и маршруты](docs/architecture.md)
 - [Единая консоль](docs/unified-console.md) и [панели](docs/panels.md)
+- [Отказ от H UI и портала](docs/panel-retirement.md)
 - [Установка, обновление и мониторинг протоколов](docs/protocols.md)
 - [Маршрутизация сервисов](docs/service-routing.md) и [резервный выход](docs/reserve-exit.md)
 - [Межсерверный WireGuard и SOCKS5](docs/interserver.md)

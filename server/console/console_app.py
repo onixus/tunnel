@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from config_qr import with_qr
+import panel_shadow
 import config_delivery
 from app import config, db, security, webauth, mailer, conninfo
 
@@ -49,6 +50,8 @@ def init():
         CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS person_accounts(person INTEGER NOT NULL, source TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(source,user_id));
         ''')
+        # Shadow tables only. Live auth still belongs to H UI and the portal.
+        panel_shadow.ensure(c)
         # Existing installations also need monotonic IDs: stale tabs/jobs retain person IDs.
         c.execute('BEGIN IMMEDIATE')
         schema=c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='people'").fetchone()[0]
@@ -95,19 +98,22 @@ async def body(request):
     if not isinstance(value,dict): raise HTTPException(422,'Ожидается объект')
     return value
 
-def legacy(actor_id,path,data):
+class PortalRejected(RuntimeError):
+    """The portal answered and refused the change. A timeout is not a refusal."""
+
+def legacy(actor_id,path,data,timeout=30):
     # Fixed paths constructed from checked integer IDs, session never saved in jobs.
     token=security.create_session_token(str(actor_id),'admin')
     origin=urlsplit(PORTAL)
     if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
         raise RuntimeError('Недопустимый внутренний адрес панели')
-    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=30)
+    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=timeout)
     try:
         client.request('POST','/admin/'+path,body=urlencode(data),headers={'Cookie':webauth.ADMIN_COOKIE+'='+token,'Content-Type':'application/x-www-form-urlencoded'})
         r=client.getresponse(); dest=r.getheader('Location',''); r.read(1048576)
         query=parse_qs(urlsplit(dest).query)
         if r.status not in (302,303) or 'err' in query or '/login' in dest:
-            raise RuntimeError('Панель TrustTunnel не подтвердила изменение')
+            raise PortalRejected('Панель TrustTunnel не подтвердила изменение')
     finally: client.close()
     return {'message':'Изменение TrustTunnel применено'}
 
@@ -153,6 +159,21 @@ def source_user(source,id):
 # linked explicitly, never merged by matching names; logins are derived from the nick.
 NICK=re.compile(r'[a-z0-9][a-z0-9_-]{2,31}')
 NAMES={'trusttunnel':'TrustTunnel','hysteria':'Hysteria','amnezia':'AmneziaWG','cdn':'CDN'}
+
+def console_names():
+    names=[]
+    for key in ('CONSOLE_PUBLIC_ORIGIN','CONSOLE_ORIGIN'):
+        host=urlsplit(os.environ.get(key,'')).hostname
+        if host and host not in names: names.append(host.lower())
+    return names
+
+def console_host(request):
+    # The label is a display name, not a routing input. A forwarded Host is shown
+    # only when it is one of the names this installation was configured with.
+    host=(request.headers.get('host') or '').split(':')[0].strip().lower()
+    allowed=console_names()
+    if host in allowed: return host
+    return allowed[0] if allowed else 'console'
 
 def user_domain():
     return os.environ.get('CONSOLE_USER_DOMAIN') or urlsplit(os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).hostname
@@ -374,8 +395,10 @@ async def headers(request,call_next):
 def index(request:Request):
     try: actor(request)
     except HTTPException: return RedirectResponse('/admin/login',302)
-    token=hmac.new(config.SECRET_KEY.encode(),('console:'+request.cookies.get(webauth.ADMIN_COOKIE,'')).encode(),hashlib.sha256).hexdigest()
-    return templates.TemplateResponse(request,'index.html',{'csrf':token})
+    cookie=request.cookies.get(webauth.ADMIN_COOKIE,'')
+    token=hmac.new(config.SECRET_KEY.encode(),('console:'+cookie).encode(),hashlib.sha256).hexdigest()
+    route_csrf=hmac.new(config.SECRET_KEY.encode(),('rtrust-admin-routes:'+cookie).encode(),hashlib.sha256).hexdigest()
+    return templates.TemplateResponse(request,'index.html',{'csrf':token,'route_csrf':route_csrf,'host_name':console_host(request)})
 
 @app.get('/console/api/state')
 def state(request:Request):
@@ -396,7 +419,7 @@ def state(request:Request):
     snapshot['observed_at']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     return snapshot
 
-ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','updates.fetch','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
+ACTIONS={'adblock.refresh','adblock.exceptions','hysteria.core','routes.check','routes.apply','updates.promote','updates.server','updates.fetch','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
          'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send',
          'amnezia.create','amnezia.block','amnezia.unblock','amnezia.rotate','protocols.check','protocols.install','protocols.update',
          'cdn.create','cdn.block','cdn.unblock','cdn.rotate','cdn.configure',
@@ -500,6 +523,16 @@ def validate_action(action,data,*,check_state=True):
         with connect() as c: row=c.execute('SELECT state FROM campaigns WHERE id=?',(data.get('id'),)).fetchone()
         if not row or row['state']!='draft': raise HTTPException(409,'Рассылка уже отправлялась или не существует')
         return {'id':data['id']}
+    if action=='hysteria.core':
+        if set(data)!={'port','obfs','obfs_password'} or type(data['port']) is not int or type(data['obfs']) is not bool or not isinstance(data['obfs_password'],str):
+            raise HTTPException(422,'Проверьте порт и маскировку Hysteria')
+        if not (data['port']==443 or 1024<=data['port']<=65535): raise HTTPException(422,'Порт Hysteria: 443 или 1024–65535')
+        if len(data['obfs_password'])>64: raise HTTPException(422,'Слишком длинный пароль маскировки')
+        return data
+    if action=='adblock.exceptions':
+        if set(data)!={'allow','deny'} or not isinstance(data['allow'],list) or not isinstance(data['deny'],list): raise HTTPException(422,'Укажите списки доменов')
+        if len(data['allow'])>200 or len(data['deny'])>200: raise HTTPException(422,'Не более 200 доменов в списке')
+        return data
     if action in ('routes.check','adblock.refresh','protocols.check'):
         if data: raise HTTPException(422,'Некорректные параметры')
         return {}
@@ -749,6 +782,92 @@ def send_campaign(id):
         uncertain=c.execute("SELECT 1 FROM deliveries WHERE campaign=? AND state!='accepted'",(id,)).fetchone()
         c.execute('UPDATE campaigns SET state=? WHERE id=?',('partial' if uncertain else 'accepted',id))
     return {'message':'Обработка завершена. Проверьте статусы получателей; accepted означает принятие провайдером.'}
+
+SETTING_KEYS=('brand_name','cert_mode','panel_domain','connection_hidden','conn_domain','le_email','conn_address','conn_port','conn_sni','conn_protocol','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol','smtp_host','smtp_port','smtp_user','smtp_password','smtp_from','smtp_tls','portal_url')
+CHECKBOX_KEYS={'connection_hidden','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol'}
+SETTING_CHOICES={'cert_mode':('external','letsencrypt'),'conn_protocol':('QUIC','HTTP/2','HTTP/1.1'),'smtp_tls':('starttls','ssl','none')}
+
+def portal_status(admin_id):
+    """Read the endpoint the portal process owns. This sidecar never starts one."""
+    token=security.create_session_token(str(admin_id),'admin')
+    origin=urlsplit(PORTAL)
+    if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
+        raise RuntimeError('Недопустимый внутренний адрес панели')
+    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=10)
+    try:
+        client.request('GET','/admin/api/endpoint-status',headers={'Cookie':webauth.ADMIN_COOKIE+'='+token})
+        response=client.getresponse(); raw=response.read(65536)
+    finally: client.close()
+    if response.status!=200: raise RuntimeError('Портал не отдал состояние endpoint')
+    status=json.loads(raw)
+    if not isinstance(status,dict) or type(status.get('running')) is not bool: raise RuntimeError('Портал не отдал состояние endpoint')
+    domains=status.get('cert_domains')
+    return {'running':status['running'],'domain':status.get('domain') or '','cert_present':status.get('cert_present') is True,
+            'port':str(status.get('port') or '8443'),'cert_domains':domains if isinstance(domains,list) else []}
+
+def portal_settings(admin_id):
+    current=db.get_settings()
+    public={key:current.get(key,'') for key in SETTING_KEYS if key!='smtp_password'}
+    public['smtp_password_set']=bool(current.get('smtp_password'))
+    try: status=portal_status(admin_id)
+    except Exception: status={'running':False,'domain':'','cert_present':False,'port':current.get('conn_port','8443'),'cert_domains':[],'unavailable':True}
+    return {'settings':public,'cert_domains':status.pop('cert_domains'),'endpoint':status}
+
+def checked_setting(key,value):
+    if not isinstance(value,str) or len(value)>300: raise HTTPException(422,'Некорректное значение настройки')
+    value=value.strip()
+    if key in SETTING_CHOICES and value not in SETTING_CHOICES[key]: raise HTTPException(422,'Недопустимое значение '+key)
+    if key in ('conn_port','smtp_port'):
+        if not value.isdigit() or not 1<=int(value)<=65535: raise HTTPException(422,'Недопустимый порт')
+    if key in ('le_email','smtp_from') and value and (' ' in value or len(value)>200): raise HTTPException(422,'Недопустимый адрес почты')
+    if key in ('panel_domain','conn_domain','conn_sni','conn_address','smtp_host','portal_url','smtp_password') and (' ' in value or '\n' in value or '\r' in value): raise HTTPException(422,'Недопустимое значение '+key)
+    return value
+
+@app.get('/console/api/settings')
+def settings_get(request:Request):
+    return portal_settings(actor(request))
+
+@app.post('/console/api/settings')
+async def settings_save(request:Request):
+    admin=actor(request,True)
+    data=await body(request)
+    current=db.get_settings(); updates={}
+    for key in SETTING_KEYS:
+        if key in CHECKBOX_KEYS: updates[key]='1' if data.get(key) in (True,'1','on') else '0'
+        elif key=='smtp_password':
+            if isinstance(data.get(key),str) and data[key]: updates[key]=checked_setting(key,data[key])
+        elif key in data: updates[key]=checked_setting(key,data[key])
+        else: updates[key]=current.get(key,'')
+    # The portal supervisor is the only process that can reload the endpoint.
+    # A refused apply must not leave the database ahead of the running process,
+    # and a restart can outlast the HTTP proxy in front of this sidecar.
+    before={key:current.get(key,'') for key in SETTING_KEYS}
+    # The portal treats a present checkbox as on. An explicit 0 would be saved as 1.
+    payload={key:value for key,value in updates.items() if key not in CHECKBOX_KEYS or value=='1'}
+    # apply_settings waits out a coalesced restart; stay under the 90s proxy timeout.
+    try: await run_in_threadpool(legacy,admin,'settings',payload,70)
+    except PortalRejected:
+        db.set_settings(before)
+        audit(admin,'trusttunnel.settings','rejected')
+        raise HTTPException(502,'Портал не применил настройки. Предыдущие значения восстановлены.')
+    except Exception:
+        audit(admin,'trusttunnel.settings','unknown')
+        raise HTTPException(504,'Портал не ответил вовремя. Проверьте endpoint перед повтором: настройки могли примениться.')
+    audit(admin,'trusttunnel.settings','applied')
+    result=portal_settings(admin)
+    result.update(saved=True,applied=True,message='Настройки сохранены и применены endpoint.')
+    return result
+
+@app.post('/console/api/telegram')
+async def telegram_bind(request:Request):
+    admin=actor(request,True)
+    data=await body(request)
+    token=data.get('token'); owner=data.get('owner')
+    if set(data)!={'token','owner'} or not isinstance(token,str) or not re.fullmatch(r'[0-9]{6,12}:[A-Za-z0-9_-]{30,64}',token) or type(owner) is not int or not 0<owner<=2**63-1:
+        raise HTTPException(422,'Укажите токен бота и числовой ID владельца')
+    result=await run_in_threadpool(agent,'telegram.configure',{'token':token,'owner':owner})
+    audit(admin,'telegram.configure',str(owner))
+    return result
 
 @app.get('/console/healthz')
 def healthz():

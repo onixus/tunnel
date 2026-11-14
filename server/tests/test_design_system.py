@@ -116,7 +116,10 @@ def page(tmp_path, console_state):
             if path == '/console/api/state':
                 return req.fulfill(json=console_state)
             if path == '/console/':
-                return req.fulfill(body=source(ROOT / 'server/console/templates/index.html').replace(b'{{ csrf }}', b'synthetic'), content_type='text/html', headers={'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:"})
+                html = source(ROOT / 'server/console/templates/index.html').replace(b'{{ csrf }}', b'synthetic').replace(b'{{ route_csrf }}', b'synthetic').replace(b'{{ host_name }}', b'vpn.example.invalid')
+                return req.fulfill(body=html, content_type='text/html', headers={'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:"})
+            if path == '/console/api/settings':
+                return req.fulfill(json={'settings': {'brand_name': 'ONIXUS', 'cert_mode': 'external', 'conn_port': '443', 'conn_protocol': 'QUIC', 'smtp_tls': 'starttls', 'smtp_password_set': False}, 'cert_domains': [], 'endpoint': {'running': False, 'domain': '', 'cert_present': False, 'port': '443'}})
             if path.startswith('/portal/v2/') or path == '/admin/api/agent-routes':
                 return req.fulfill(json={'profiles': [], 'devices': [], 'groups': [], 'users': [], 'managed_credentials': {'enabled': False}})
             if path.startswith('/overlay/'):
@@ -163,7 +166,7 @@ def test_console_screens(page, mode):
     page.goto('https://design.example.invalid/console/')
     expect(page.locator('#content h1')).to_be_visible()
     theme(page, mode)
-    for name in ['overview', 'users', 'keys', 'routing', 'protocols', 'updates', 'campaigns', 'telegram', 'audit']:
+    for name in ['overview', 'users', 'keys', 'routing', 'devices', 'protocols', 'updates', 'campaigns', 'telegram', 'audit', 'settings']:
         page.locator(f'nav [data-page={name}]').click()
         expect(page.locator('#content h1')).to_be_visible()
         assert BASELINE or page.locator('#content .primary').count() <= 1

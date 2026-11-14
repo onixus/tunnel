@@ -19,6 +19,8 @@ legacy settings and client/profile APIs remain available.
   capabilities; this is a service trust boundary, not independent administrator auth.
 - Hysteria reads its existing SQLite database and mutates through H UI's local API
   using a short-lived service JWT. The existing user IDs, credentials and bot remain.
+  `panel_shadow.py` can copy those accounts into `console.db` read-only; the copy
+  is not consulted for login, export, or kick. See `docs/panel-retirement.md`.
 - TrustTunnel user operations call the existing internal admin routes. Credential
   rotation/revocation writes the existing database and asks the running endpoint
   manager to reconcile. These operations can briefly reconnect TrustTunnel clients.
@@ -84,10 +86,17 @@ exceptions are not accepted from the UI. A changed protected prefix requires rev
 
 ## Delivery and Telegram
 
-Existing SMTP settings are reused. The Telegram token remains in
-`/etc/vpn-telegram/config.json` and is never returned to the browser. The existing
-owner-only control bot continues polling; the console does not start a competing
-`getUpdates` consumer. Telegram recipients must start that bot first.
+TrustTunnel settings are saved by asking the portal to apply them. The sidecar
+does not start an endpoint and does not report the portal's endpoint as its own.
+A refused apply restores the previous values. A portal timeout is reported as
+unconfirmed: the running endpoint may already have the new settings.
+
+Existing SMTP settings are reused. The Telegram page can bind the same
+owner-only bot: the agent checks the token with Telegram, writes
+`/etc/vpn-telegram/config.json` as root `0600`, and restarts `vpn-telegram` when
+that unit exists. The token is never returned to the browser or written to the
+audit log. The console still does not start a competing `getUpdates` consumer.
+Telegram recipients must start that bot first.
 
 Contacts are explicitly assigned to a protocol identity, with an opt-in flag.
 Accounts across protocols are not automatically merged on matching display names.

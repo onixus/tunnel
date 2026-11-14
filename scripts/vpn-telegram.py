@@ -6,7 +6,10 @@ CFG=Path('/etc/vpn-telegram/config.json')
 STATE=Path('/var/lib/vpn-telegram/state.json')
 PENDING={}
 ID_REPLIES={}
-PANEL_URL='https://onixus-rf.duckdns.org/console/'
+def panel_url():
+ value=CONFIG.get('panel_url')
+ if isinstance(value,str) and value.startswith('https://') and ' ' not in value and len(value)<=200:return value
+ return 'https://onixus-rf.duckdns.org/console/'
 def command(args,timeout=15):
  try:
   r=subprocess.run(args,capture_output=True,text=True,timeout=timeout)
@@ -36,7 +39,7 @@ def status():
  lines.append(command(['openssl','x509','-in','/etc/hysteria/server.crt','-noout','-enddate'])[1])
  return '\n'.join(lines)
 ACTIONS={
- 'route-primary':(['/usr/local/sbin/hysteria-exit-switch','primary'],'Переключить выход Hysteria на onixus.ru'),
+ 'route-primary':(['/usr/local/sbin/hysteria-exit-switch','primary'],'Переключить выход Hysteria на основной узел'),
  'route-reserve':(['/usr/local/sbin/hysteria-exit-switch','reserve'],'Переключить выход Hysteria на резервный узел'),
  'restart-hysteria':(['systemctl','restart','h-ui'],'Перезапустить Hysteria'),
  'restart-trusttunnel':(['docker','restart','trusttunnel-web'],'Перезапустить TrustTunnel'),
@@ -75,10 +78,10 @@ def handle(update):
   send('Управление VPN\n/status — службы, ресурсы, сертификат и маршрут\n/panel — единая панель управления\n/bans — блокировки SSH и веб-входа\n/route — выбор основного/резервного выхода Hysteria\n/restart — перезапуск VPN с подтверждением\nИзменения доступны только владельцу в личном чате.')
  elif cmd=='/status':send(status())
  elif cmd in ['/panel','/panels']:
-  send('Единая VPN-панель: пользователи, ключи, обновления, рассылки и маршруты. Вход по учётной записи администратора TrustTunnel.',[[{'text':'Открыть панель','url':PANEL_URL}]])
+  send('Единая VPN-панель: пользователи, ключи, обновления, рассылки и маршруты. Вход по учётной записи администратора TrustTunnel.',[[{'text':'Открыть панель','url':panel_url()}]])
  elif cmd=='/bans':
   send('\n\n'.join(command(['fail2ban-client','status',j])[1] for j in ['sshd','vpn-web']))
- elif cmd=='/route':send('Выход Hysteria. Исключения RU/РФ/СНГ сохраняются.',[[{'text':'Основной: onixus.ru','callback_data':'select:route-primary'},{'text':'Резервный','callback_data':'select:route-reserve'}]])
+ elif cmd=='/route':send('Выход Hysteria. Исключения RU/РФ/СНГ сохраняются.',[[{'text':'Основной выход','callback_data':'select:route-primary'},{'text':'Резервный','callback_data':'select:route-reserve'}]])
  elif cmd=='/restart':send('Выберите службу:',[[{'text':'Hysteria','callback_data':'select:restart-hysteria'},{'text':'TrustTunnel','callback_data':'select:restart-trusttunnel'}]])
 def persist(offset):
  tmp=STATE.with_suffix('.tmp');tmp.write_text(json.dumps({'offset':offset}));os.chmod(tmp,0o600);tmp.replace(STATE)

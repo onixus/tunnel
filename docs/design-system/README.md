@@ -35,7 +35,7 @@ as user accounts. CI capture artifacts are not deployment documentation.
 ## Validation boundary
 
 `server/tests/test_design_system.py` checks token distribution, font hashes,
-absence of component color literals/CDNs/sub-11px type, all 9 network sections,
+absence of component color literals/CDNs/sub-11px type, all 11 network sections,
 15 portal templates and 2 overlay pages in both themes, mobile overflow,
 visible text contrast (4.5:1), input-boundary contrast (3:1), theme persistence,
 OS changes, storage events/denial, focus and light print output. Disabled controls

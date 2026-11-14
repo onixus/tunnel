@@ -43,6 +43,7 @@ def prepare(base, tag):
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         (context / 'server/console').mkdir()
         shutil.copy2(ROOT / 'server/console/console_app.py', context / 'server/console/console_app.py')
+        shutil.copy2(ROOT / 'server/console/panel_shadow.py', context / 'server/console/panel_shadow.py')
         for folder in ('templates', 'static'):
             shutil.copytree(ROOT / 'server/console' / folder, context / 'server/console' / folder)
         console_ui = {str(path.relative_to(context / 'server/console')): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -80,6 +81,7 @@ assert 'post' in paths['/portal/v2/device-token/renew']
 assert 'post' in paths['/admin/api/device-credentials/{identifier}/revoke']
 assert 'get' in paths['/portal/v2/routing']
 assert 'get' in paths['/admin/agent-routes']
+assert 'get' in paths['/admin/api/endpoint-status']
 assert 'put' in paths['/admin/api/agent-routes/devices/{identifier}']
 assert Path('/app/app/static/apex/fonts/Inter.ttf').is_file()
 assert 'apex/theme.js' in Path('/app/app/templates/base_admin.html').read_text(encoding='utf-8')
