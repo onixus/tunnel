@@ -22,6 +22,10 @@ Docker base `python:3.12-slim` и транзитивные Python-зависим
 
 Один образ содержит и портал, и консоль. Портал стартует командой образа и владеет endpoint. Консоль — второй процесс того же образа: `uvicorn routing_app:app --host 0.0.0.0 --port 8000`. Платформа `linux/amd64`. Публикация не заменяет работающие контейнеры.
 
+| Образ | Тег | Digest |
+|---|---|---|
+| [ghcr.io/onixus/tunnel-fresh-portal](https://github.com/onixus/tunnel/pkgs/container/tunnel-fresh-portal) | `6fd9958` | `sha256:9daf3e095473213e8f5f4755b5c283e4622517e2ae9c1f8df9b24a24018cc959` |
+
 ## Технические первоисточники
 
 - [Hysteria: ACL](https://v2.hysteria.network/docs/advanced/ACL/)
