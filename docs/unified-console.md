@@ -23,7 +23,8 @@
 Системный трафик сервера не переключается вместе с VPN.
 
 [Маршрутизация](service-routing.md) · [Протоколы](protocols.md) ·
-[Карточки людей и устройств](../server/console/README.md#users).
+[Карточки людей и устройств](../server/console/README.md#users) ·
+[Отказ от H UI и портала](panel-retirement.md).
 
 ## Очередь и подтверждения
 

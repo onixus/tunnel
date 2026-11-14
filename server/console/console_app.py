@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from config_qr import with_qr
+import panel_shadow
 import config_delivery
 from app import config, db, security, webauth, mailer, conninfo
 
@@ -49,6 +50,8 @@ def init():
         CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS person_accounts(person INTEGER NOT NULL, source TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(source,user_id));
         ''')
+        # Shadow tables only. Live auth still belongs to H UI and the portal.
+        panel_shadow.ensure(c)
         # Existing installations also need monotonic IDs: stale tabs/jobs retain person IDs.
         c.execute('BEGIN IMMEDIATE')
         schema=c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='people'").fetchone()[0]
@@ -153,6 +156,12 @@ def source_user(source,id):
 # linked explicitly, never merged by matching names; logins are derived from the nick.
 NICK=re.compile(r'[a-z0-9][a-z0-9_-]{2,31}')
 NAMES={'trusttunnel':'TrustTunnel','hysteria':'Hysteria','amnezia':'AmneziaWG','cdn':'CDN'}
+
+def console_host(request):
+    host=(request.headers.get('host') or '').split(':')[0].strip().lower()
+    if host and 1<len(host)<=253 and all(part and all(c.isalnum() or c=='-' for c in part) for part in host.split('.')):
+        return host
+    return urlsplit(os.environ.get('CONSOLE_PUBLIC_ORIGIN') or os.environ.get('CONSOLE_ORIGIN','')).hostname or 'console'
 
 def user_domain():
     return os.environ.get('CONSOLE_USER_DOMAIN') or urlsplit(os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).hostname
@@ -374,8 +383,10 @@ async def headers(request,call_next):
 def index(request:Request):
     try: actor(request)
     except HTTPException: return RedirectResponse('/admin/login',302)
-    token=hmac.new(config.SECRET_KEY.encode(),('console:'+request.cookies.get(webauth.ADMIN_COOKIE,'')).encode(),hashlib.sha256).hexdigest()
-    return templates.TemplateResponse(request,'index.html',{'csrf':token})
+    cookie=request.cookies.get(webauth.ADMIN_COOKIE,'')
+    token=hmac.new(config.SECRET_KEY.encode(),('console:'+cookie).encode(),hashlib.sha256).hexdigest()
+    route_csrf=hmac.new(config.SECRET_KEY.encode(),('rtrust-admin-routes:'+cookie).encode(),hashlib.sha256).hexdigest()
+    return templates.TemplateResponse(request,'index.html',{'csrf':token,'route_csrf':route_csrf,'host_name':console_host(request)})
 
 @app.get('/console/api/state')
 def state(request:Request):
@@ -749,6 +760,58 @@ def send_campaign(id):
         uncertain=c.execute("SELECT 1 FROM deliveries WHERE campaign=? AND state!='accepted'",(id,)).fetchone()
         c.execute('UPDATE campaigns SET state=? WHERE id=?',('partial' if uncertain else 'accepted',id))
     return {'message':'Обработка завершена. Проверьте статусы получателей; accepted означает принятие провайдером.'}
+
+SETTING_KEYS=('brand_name','cert_mode','panel_domain','connection_hidden','conn_domain','le_email','conn_address','conn_port','conn_sni','conn_protocol','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol','smtp_host','smtp_port','smtp_user','smtp_password','smtp_from','smtp_tls','portal_url')
+CHECKBOX_KEYS={'connection_hidden','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol'}
+SETTING_CHOICES={'cert_mode':('external','letsencrypt'),'conn_protocol':('QUIC','HTTP/2','HTTP/1.1'),'smtp_tls':('starttls','ssl','none')}
+
+def portal_settings():
+    from app import endpoint
+    current=db.get_settings()
+    public={key:current.get(key,'') for key in SETTING_KEYS if key!='smtp_password'}
+    public['smtp_password_set']=bool(current.get('smtp_password'))
+    try:
+        domains=endpoint.scan_cert_domains(); status=endpoint.manager.status()
+    except Exception:
+        domains,status=[],{'running':False,'domain':'','cert_present':False,'port':current.get('conn_port','8443')}
+    return {'settings':public,'cert_domains':domains,'endpoint':status}
+
+def checked_setting(key,value):
+    if not isinstance(value,str) or len(value)>300: raise HTTPException(422,'Некорректное значение настройки')
+    value=value.strip()
+    if key in SETTING_CHOICES and value not in SETTING_CHOICES[key]: raise HTTPException(422,'Недопустимое значение '+key)
+    if key in ('conn_port','smtp_port'):
+        if not value.isdigit() or not 1<=int(value)<=65535: raise HTTPException(422,'Недопустимый порт')
+    if key in ('le_email','smtp_from') and value and (' ' in value or len(value)>200): raise HTTPException(422,'Недопустимый адрес почты')
+    if key in ('panel_domain','conn_domain','conn_sni','conn_address','smtp_host','portal_url','smtp_password') and (' ' in value or '\n' in value or '\r' in value): raise HTTPException(422,'Недопустимое значение '+key)
+    return value
+
+@app.get('/console/api/settings')
+def settings_get(request:Request):
+    actor(request)
+    return portal_settings()
+
+@app.post('/console/api/settings')
+async def settings_save(request:Request):
+    admin=actor(request,True)
+    data=await body(request)
+    current=db.get_settings(); updates={}
+    for key in SETTING_KEYS:
+        if key in CHECKBOX_KEYS: updates[key]='1' if data.get(key) in (True,'1','on') else '0'
+        elif key=='smtp_password':
+            if isinstance(data.get(key),str) and data[key]: updates[key]=checked_setting(key,data[key])
+        elif key in data: updates[key]=checked_setting(key,data[key])
+        else: updates[key]=current.get(key,'')
+    db.set_settings(updates)
+    applied=True
+    try:
+        from app import endpoint
+        endpoint.manager.apply_settings()
+    except Exception: applied=False
+    audit(admin,'trusttunnel.settings','applied' if applied else 'saved')
+    result=portal_settings()
+    result.update(saved=True,applied=applied,message='Настройки сохранены и переданы endpoint.' if applied else 'Настройки сохранены. Endpoint не подтвердил применение.')
+    return result
 
 @app.get('/console/healthz')
 def healthz():

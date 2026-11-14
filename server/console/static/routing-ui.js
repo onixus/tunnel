@@ -40,12 +40,12 @@
 
   function map() {
     const r = state.routing, p = r?.policy;
-    if (!p || r.error) return '<section class="card"><h2>Карта сети</h2><p class="error">Состояние маршрутов недоступно. Переключение запрещено.</p></section>';
+    if (!p || r.error) return `<section class="card"><h2>Карта сети</h2><p class="error">Агент ${esc(hostName())} недоступен${state.error ? ": " + esc(state.error) : ""}. Переключение выходов отсюда не выполняется.</p></section>`;
     requestAnimationFrame(draw);
     return `<section class="card network-card"><div class="network-title"><div><div class="eyebrow">ТОПОЛОГИЯ / ВЫХОДЯЩИЙ ТРАФИК</div><h2>Маршруты вашей сети</h2></div><span class="route-group">Общий выход: ${esc(exitName(p.group_exit))}</span></div>
       <p class="subtitle" id="route-help">Нажмите на выход, чтобы переключить выбранные сервисы. На сервис, чтобы назначить ему свой маршрут.</p>
       ${busy() ? '<div class="note">Переключение или восстановление не завершено. Дождитесь результата в журнале.</div>' : ""}
-      <div class="network-board"><svg class="route-wires" aria-hidden="true"></svg><div class="service-nodes"><div class="ingress-label"><span class="host-dot"></span> onixus-rf <small>Входной узел</small></div>
+      <div class="network-board"><svg class="route-wires" aria-hidden="true"></svg><div class="service-nodes"><div class="ingress-label"><span class="host-dot"></span> ${esc(hostName())} <small>Входной узел</small></div>
       ${p.services.map(s => `<button type="button" class="service-node ${kind(s.id).tone ? "service-" + kind(s.id).tone : ""}" data-action="route-service" data-service-node="${esc(s.id)}" data-route="${esc(s.actual_exit)}" data-service="${esc(s.id)}" ${!s.configurable || busy() ? "disabled" : ""} aria-label="Настроить маршрут ${esc(s.title)}"><span class="node-kicker">${esc(kind(s.id).kicker)}</span><strong>${esc(s.title)}</strong><span class="service-route">${esc(exitName(s.actual_exit))} <span aria-hidden="true">→</span></span><small>${esc(modeNames[s.mode])}${s.drift ? " · отличается от политики" : ""}</small>${!s.configurable ? `<small class="route-reason">${esc(s.reason)}</small>` : ""}</button>`).join("")}</div>
       <div class="exit-nodes">${[...(r.exits || []).filter(e => e.id !== "clean"), { id: "direct", host: "Входной сервер", via: "Без выходного узла" }].map(e => {
         const assigned = p.services.filter(s => s.actual_exit === e.id);

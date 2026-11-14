@@ -19,6 +19,8 @@ legacy settings and client/profile APIs remain available.
   capabilities; this is a service trust boundary, not independent administrator auth.
 - Hysteria reads its existing SQLite database and mutates through H UI's local API
   using a short-lived service JWT. The existing user IDs, credentials and bot remain.
+  `panel_shadow.py` can copy those accounts into `console.db` read-only; the copy
+  is not consulted for login, export, or kick. See `docs/panel-retirement.md`.
 - TrustTunnel user operations call the existing internal admin routes. Credential
   rotation/revocation writes the existing database and asks the running endpoint
   manager to reconcile. These operations can briefly reconnect TrustTunnel clients.

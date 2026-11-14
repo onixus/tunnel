@@ -1,4 +1,7 @@
 "use strict";
+function hostName() {
+  return document.querySelector('meta[name="console-host"]')?.content || location.hostname;
+}
 const $ = (s) => document.querySelector(s),
   esc = (v) =>
     String(v ?? "").replace(
@@ -23,11 +26,13 @@ const titles = {
   person: "Пользователи",
   keys: "Ключи и устройства",
   routing: "Маршрутизация",
+  devices: "Маршруты устройств",
   protocols: "Протоколы",
   updates: "Обновления",
   campaigns: "Рассылки",
   telegram: "Telegram",
   audit: "Журнал операций",
+  settings: "Настройки TrustTunnel",
 };
 const labels = {
   queued: "В очереди",
@@ -83,15 +88,28 @@ async function api(path, data) {
   if (!r.ok) throw Error(value.detail || "Ошибка запроса");
   return value;
 }
+const agentPages = new Set(["overview", "routing", "protocols", "updates", "telegram"]);
 async function refresh(renderPage = true) {
   if (loading) return;
   loading = true;
   try {
-    state = await api("state");
+    const kept = {
+      portalSettings: state.portalSettings,
+      portalEndpoint: state.portalEndpoint,
+      certDomains: state.certDomains,
+    };
+    state = Object.assign(await api("state"), kept);
+    if (page === "settings") {
+      const result = await api("settings");
+      state.portalSettings = result.settings;
+      state.portalEndpoint = result.endpoint;
+      state.certDomains = result.cert_domains;
+    }
     $("#freshness").textContent =
       "Снимок · " + new Date(state.observed_at).toLocaleTimeString("ru");
     if (renderPage) render();
-    if (state.error) notice(state.error, true);
+    if (state.error && agentPages.has(page)) notice(state.error, true);
+    else if (!agentPages.has(page) && $("#notice").textContent.startsWith("Агент недоступен")) notice("");
   } catch (e) {
     notice(e.message, true);
     $("#freshness").textContent = "Нет связи";
@@ -180,9 +198,9 @@ function overview() {
     heading(
       "Вся сеть. Один пульт.",
       "Пользователи, доступ и выходные узлы вашей VPN-инфраструктуры.",
-      pill("active", "ONIXUS-RF"),
+      pill("active", hostName()),
     ) +
-    `<div class="stats"><div class="stat"><label>УЧЁТНЫЕ ЗАПИСИ</label><strong>${u.length + h.length + awg.length + cdn.length}</strong><small>${u.length} TrustTunnel · ${h.length} Hysteria · ${awg.length} AmneziaWG · ${cdn.length} CDN</small></div><div class="stat"><label>КЛЮЧИ TRUSTTUNNEL</label><strong>${(state.keys || []).filter((k) => !k.revoked_at).length}</strong><small>Действующие учётные данные</small></div><div class="stat"><label>ВЫХОДЫ HYSTERIA</label><strong>${r.exits?.length ?? "—"}</strong><small>Выбран: ${esc(r.selected || "неизвестно")}</small></div><div class="stat"><label>УСТРОЙСТВА ПОРТАЛА</label><strong>${(state.devices || []).filter((d) => !d.revoked_at).length}</strong><small>Регистрации клиентов</small></div></div><div class="grid"><div class="card"><h2>Карта выходных узлов</h2><p class="subtitle">Текущая политика Hysteria 2</p><div class="topology"><div class="node current"><strong>onixus-rf</strong><small>Входящий VPN</small>${pill("active", "INGRESS")}</div><div class="flow">→</div><div class="exit-stack">${(r.exits || []).map((e) => `<div class="node ${e.id === r.selected ? "current" : ""}"><strong>${esc(e.host)}</strong><small>${esc(e.via)}</small>${pill(e.id === r.selected ? "active" : "queued", e.id === r.selected ? "ВЫБРАН" : "ДОСТУПЕН ДЛЯ ВЫБОРА")}</div>`).join("") || '<p class="error">Нет данных агента</p>'}</div></div><div class="note">TrustTunnel и сам сервер выходят напрямую. Исключения Hysteria обрабатываются раньше общего маршрута. Доступность выходов проверяется отдельно.</div>${btn("Управлять маршрутами →", "navigate", 'data-target="routing"', "subtle")}</div><div class="stack"><div class="card"><h2>Сервисы</h2>${[
+    `<div class="stats"><div class="stat"><label>УЧЁТНЫЕ ЗАПИСИ</label><strong>${u.length + h.length + awg.length + cdn.length}</strong><small>${u.length} TrustTunnel · ${h.length} Hysteria · ${awg.length} AmneziaWG · ${cdn.length} CDN</small></div><div class="stat"><label>КЛЮЧИ TRUSTTUNNEL</label><strong>${(state.keys || []).filter((k) => !k.revoked_at).length}</strong><small>Действующие учётные данные</small></div><div class="stat"><label>ВЫХОДЫ HYSTERIA</label><strong>${r.exits?.length ?? "—"}</strong><small>Выбран: ${esc(r.selected || "неизвестно")}</small></div><div class="stat"><label>УСТРОЙСТВА ПОРТАЛА</label><strong>${(state.devices || []).filter((d) => !d.revoked_at).length}</strong><small>Регистрации клиентов</small></div></div><div class="grid"><div class="card"><h2>Карта выходных узлов</h2><p class="subtitle">Текущая политика Hysteria 2</p><div class="topology"><div class="node current"><strong>${esc(hostName())}</strong><small>Входящий VPN</small>${pill("active", "INGRESS")}</div><div class="flow">→</div><div class="exit-stack">${(r.exits || []).map((e) => `<div class="node ${e.id === r.selected ? "current" : ""}"><strong>${esc(e.host)}</strong><small>${esc(e.via)}</small>${pill(e.id === r.selected ? "active" : "queued", e.id === r.selected ? "ВЫБРАН" : "ДОСТУПЕН ДЛЯ ВЫБОРА")}</div>`).join("") || '<p class="error">Нет данных агента</p>'}</div></div><div class="note">TrustTunnel и сам сервер выходят напрямую. Исключения Hysteria обрабатываются раньше общего маршрута. Доступность выходов проверяется отдельно.</div>${btn("Управлять маршрутами →", "navigate", 'data-target="routing"', "subtle")}</div><div class="stack"><div class="card"><h2>Сервисы</h2>${[
       ["Hysteria 2", "hysteria", "QUIC / UDP · 443"],
       ["TrustTunnel", "trusttunnel", "HTTP/2 + QUIC · 8443"],
       ["AmneziaWG 3.1", "amnezia", "WireGuard с маскировкой · UDP"],
@@ -513,6 +531,102 @@ function journal() {
     )
   );
 }
+function devicesPage() {
+  return (
+    heading(
+      "Маршруты устройств",
+      "Политика TUN настольных клиентов R-TrustTunnel на " + esc(hostName()) + ". Это не карта выходов Hysteria.",
+    ) +
+    `<p id="status" role="status" aria-live="polite"></p>
+     <div class="grid">
+       <section class="card"><h2>Группы</h2><div id="groups"></div></section>
+       <section class="card"><h2 id="editor-title">Новая группа</h2>
+         <form id="editor">
+           <label class="field">Название<input id="name" maxlength="80" required></label>
+           <label class="field">Сети через VPN, до 16 CIDR IPv4<textarea id="include" rows="3" required placeholder="0.0.0.0/0"></textarea></label>
+           <label class="field">Исключения, до 64 CIDR IPv4<textarea id="exclude" rows="3"></textarea></label>
+           <label class="check"><input id="exclude-lan" type="checkbox" checked> Исключить локальные сети</label>
+           <div class="actions"><button type="submit" class="primary">Сохранить</button><button id="cancel" type="button">Сбросить</button></div>
+         </form>
+       </section>
+     </div>
+     <div class="grid">
+       <section class="card"><h2>Привязать устройство</h2>
+         <label class="field">Пользователь<select id="user"></select></label>
+         <div class="actions"><button id="enroll" type="button">Создать одноразовый код</button></div>
+         <output id="code"></output>
+       </section>
+       <section class="card"><h2>Устройства</h2><div class="actions"><button id="refresh-routes" type="button" class="subtle">Обновить</button></div><div id="devices"></div></section>
+     </div>`
+  );
+}
+function field(name, label, value, type) {
+  return `<label class="field">${label}<input name="${name}" type="${type || "text"}" value="${esc(value || "")}"></label>`;
+}
+function settingsPage() {
+  const s = state.portalSettings || {},
+    endpoint = state.portalEndpoint || {};
+  return (
+    heading(
+      "Настройки TrustTunnel",
+      "Домен, сертификат, адрес подключения и SMTP. Сохранение применяет их к endpoint.",
+    ) +
+    `<div class="note">${endpoint.running ? "Endpoint запущен" : "Endpoint остановлен"} · домен ${esc(endpoint.domain || "не задан")} · сертификат ${endpoint.cert_present ? "есть" : "нет"} · порт ${esc(endpoint.port || "8443")}</div>
+     <form id="settings-form" class="stack">
+       <section class="card"><h2>Общее</h2>
+         ${field("brand_name", "Название панели", s.brand_name)}
+         ${field("panel_domain", "Домен панели", s.panel_domain)}
+         <label class="check"><input type="checkbox" name="registration_enabled" ${s.registration_enabled === "1" ? "checked" : ""}> Разрешить открытую регистрацию</label>
+       </section>
+       <section class="card"><h2>Домен и сертификат</h2>
+         <label class="field">Режим сертификатов<select name="cert_mode"><option value="external" ${s.cert_mode === "external" ? "selected" : ""}>Готовые сертификаты</option><option value="letsencrypt" ${s.cert_mode === "letsencrypt" ? "selected" : ""}>Let's Encrypt</option></select></label>
+         <label class="check"><input type="checkbox" name="connection_hidden" ${s.connection_hidden === "1" ? "checked" : ""}> Прятать подключение за отдельным доменом</label>
+         ${field("conn_domain", "Домен подключения (SNI)", s.conn_domain)}
+         ${field("le_email", "E-mail для Let's Encrypt", s.le_email, "email")}
+         <p class="subtitle">Найденные сертификаты: ${esc((state.certDomains || []).join(", ") || "нет")}</p>
+       </section>
+       <section class="card"><h2>Параметры подключения</h2>
+         <div class="settings-grid">${field("conn_address", "Адрес", s.conn_address)}${field("conn_port", "Порт", s.conn_port, "number")}${field("conn_sni", "Custom SNI", s.conn_sni)}</div>
+         <label class="field">Протокол<select name="conn_protocol">${["QUIC", "HTTP/2", "HTTP/1.1"].map((p) => `<option ${s.conn_protocol === p ? "selected" : ""}>${p}</option>`).join("")}</select></label>
+         <div class="settings-grid">${["address", "port", "domain", "sni", "protocol", "username", "password"].map((name) => `<label class="check"><input type="checkbox" name="show_${name}" ${s["show_" + name] === "1" ? "checked" : ""}> Показывать ${name}</label>`).join("")}</div>
+       </section>
+       <section class="card"><h2>Почта</h2>
+         <p class="subtitle">Пароль SMTP не показывается. Пустое поле сохраняет прежний${s.smtp_password_set ? ", он уже задан" : ""}.</p>
+         <div class="settings-grid">${field("smtp_host", "SMTP-хост", s.smtp_host)}${field("smtp_port", "Порт", s.smtp_port, "number")}</div>
+         <label class="field">Шифрование<select name="smtp_tls">${["starttls", "ssl", "none"].map((p) => `<option ${s.smtp_tls === p ? "selected" : ""}>${p}</option>`).join("")}</select></label>
+         <div class="settings-grid">${field("smtp_user", "Логин", s.smtp_user)}${field("smtp_password", "Пароль", "", "password")}${field("smtp_from", "From", s.smtp_from)}${field("portal_url", "Публичный URL панели", s.portal_url)}</div>
+       </section>
+       <div class="actions"><button class="primary" type="submit">Сохранить и применить</button></div>
+     </form>`
+  );
+}
+function bindSettings() {
+  const form = $("#settings-form");
+  if (!form) return;
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const data = {};
+    new FormData(form).forEach((value, key) => {
+      data[key] = value;
+    });
+    form.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+      data[input.name] = input.checked;
+    });
+    const button = form.querySelector("[type=submit]");
+    button.disabled = true;
+    try {
+      const result = await api("settings", data);
+      state.portalSettings = result.settings;
+      state.portalEndpoint = result.endpoint;
+      state.certDomains = result.cert_domains;
+      notice(result.message, !result.applied);
+      render();
+    } catch (error) {
+      notice(error.message, true);
+      button.disabled = false;
+    }
+  };
+}
 function render() {
   const map = {
     overview,
@@ -520,11 +634,13 @@ function render() {
     person: personPage,
     keys,
     routing,
+    devices: devicesPage,
     protocols: () => protocolsPage(),
     updates,
     campaigns,
     telegram,
     audit: journal,
+    settings: settingsPage,
   };
   // A deleted user's card falls back to the list.
   if (page === "person" && !(state.people || []).some((p) => p.id === personId)) page = "users";
@@ -541,6 +657,8 @@ function render() {
       document
         .querySelectorAll("tr[data-search]")
         .forEach((r) => (r.hidden = !r.dataset.search.includes($("#user-search").value.toLowerCase())));
+  if (page === "devices" && window.DeviceRoutes) DeviceRoutes.mount($("#content"));
+  if (page === "settings") bindSettings();
   if (page === "routing") {
     $("#content").oninput = () => (routeDirty = true);
   } else {
@@ -551,7 +669,21 @@ function render() {
 function navigate(target) {
   page = target;
   routeDirty = false;
+  history.replaceState(null, "", "/console/" + (target === "overview" ? "" : "#" + target));
+  if (!agentPages.has(target) && $("#notice").textContent.startsWith("Агент недоступен")) notice("");
   render();
+  if (target === "settings") loadSettings();
+}
+async function loadSettings() {
+  try {
+    const result = await api("settings");
+    state.portalSettings = result.settings;
+    state.portalEndpoint = result.endpoint;
+    state.certDomains = result.cert_domains;
+    if (page === "settings") render();
+  } catch (error) {
+    notice(error.message, true);
+  }
 }
 function formSubmit(id, callback) {
   $("#" + id).onsubmit = async (e) => {
@@ -943,5 +1075,11 @@ $("#refresh").onclick = () => {
 };
 $("#modal").addEventListener("close", () => {
   if (!$("#modal").open) $("#modal-body").replaceChildren();
+});
+const opened = location.hash.slice(1);
+if (titles[opened]) page = opened;
+addEventListener("hashchange", () => {
+  const target = location.hash.slice(1) || "overview";
+  if (titles[target] && target !== page) navigate(target);
 });
 refresh();
