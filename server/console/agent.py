@@ -78,6 +78,33 @@ def hui(method, path, payload=None):
     finally:
         con.close()
 
+def hysteria_core_snapshot():
+    config=hui_config(); listen=str(config.get('listen') or '')
+    port=listen.rsplit(':',1)[-1]
+    hop=read_db('SELECT value FROM config WHERE key=?', ('HYSTERIA2_CONFIG_PORT_HOPPING',))
+    return {'port':int(port) if port.isdigit() else None,
+            'obfs':config.get('obfs',{}).get('type')=='salamander',
+            'hop':(hop[0]['value'] if hop else '') or ''}
+
+def apply_hysteria_core(data):
+    """Change listen port and salamander masking. The current password is never returned."""
+    port=data.get('port'); enabled=data.get('obfs'); password=data.get('obfs_password','')
+    if type(port) is not int or not (port==443 or 1024<=port<=65535): raise Rejected('Порт Hysteria: 443 или 1024–65535')
+    if type(enabled) is not bool or not isinstance(password,str): raise Rejected('Некорректные параметры Hysteria')
+    if password and not re.fullmatch(r'[A-Za-z0-9._~+/-]{8,64}',password): raise Rejected('Пароль маскировки: 8–64 символа без пробелов')
+    config=hui_config(); current=((config.get('obfs') or {}).get('salamander') or {}).get('password')
+    listen=str(config.get('listen') or ':443')
+    host=listen.rsplit(':',1)[0] if ':' in listen else ''
+    config['listen']=host+':'+str(port)
+    if enabled:
+        if password: config['obfs']={'type':'salamander','salamander':{'password':password}}
+        elif not current: raise Rejected('Для включения маскировки нужен пароль')
+    else: config.pop('obfs',None)
+    switch=module_switch(); run(['systemctl','stop','h-ui'])
+    try: switch.write_config(yaml.safe_dump(config,sort_keys=False))
+    finally: run(['systemctl','start','h-ui'])
+    return {'message':'Настройки Hysteria применены. Клиенты кратко переподключатся.','port':port,'obfs':enabled}
+
 def hysteria_share(account):
     """R-TrustTunnel reads a port set in the address; YAML carries hopInterval."""
     host=urllib.parse.urlsplit(ORIGIN).hostname
@@ -307,6 +334,43 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     # No redirects: the bot token must never leave Telegram.
     def redirect_request(self,*args): return None
 
+def telegram_snapshot():
+    state={'configured':TG.is_file(),'owner':None,'username':None,'running':False}
+    if TG.is_file():
+        cfg=json.loads(TG.read_text())
+        if isinstance(cfg.get('owner'),int) and cfg['owner']>0: state['owner']=cfg['owner']
+        if isinstance(cfg.get('username'),str): state['username']=cfg['username'][:64]
+    try: state['running']=run(['systemctl','is-active','vpn-telegram'])=='active'
+    except Exception: state['running']=False
+    return state
+
+def configure_telegram(data):
+    """Bind the existing owner-only bot. The token is checked, then stored outside the browser."""
+    token=data.get('token'); owner=data.get('owner')
+    if not isinstance(token,str) or not re.fullmatch(r'[0-9]{6,12}:[A-Za-z0-9_-]{30,64}',token):
+        raise Rejected('Некорректный токен бота')
+    if type(owner) is not int or not 0<owner<=2**63-1: raise Rejected('Некорректный ID владельца')
+    panel=ORIGIN+'/console/'
+    if not re.fullmatch(r'https://[A-Za-z0-9.-]+(?::\d+)?/console/',panel):
+        raise Rejected('Некорректный адрес панели')
+    req=urllib.request.Request('https://api.telegram.org/bot'+token+'/getMe',data=b'{}',headers={'Content-Type':'application/json'})
+    try:
+        with urllib.request.build_opener(NoRedirect).open(req,timeout=15) as response: result=json.load(response)
+    except Exception: raise Rejected('Telegram не подтвердил токен')
+    username=(result.get('result') or {}).get('username') if result.get('ok') else None
+    if not isinstance(username,str) or not re.fullmatch(r'[A-Za-z0-9_]{4,32}',username):
+        raise Rejected('Telegram не подтвердил токен')
+    TG.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+    temporary=TG.with_name('.config-'+secrets.token_hex(6)+'.json')
+    temporary.write_text(json.dumps({'token':token,'owner':owner,'username':username,'panel_url':panel},indent=2)+'\n')
+    os.chmod(temporary,0o600); temporary.replace(TG)
+    message='Бот привязан'
+    if Path('/etc/systemd/system/vpn-telegram.service').is_file() or Path('/usr/lib/systemd/system/vpn-telegram.service').is_file():
+        run(['systemctl','daemon-reload']); run(['systemctl','enable','--now','vpn-telegram']); run(['systemctl','restart','vpn-telegram'])
+        message='Бот привязан и служба перезапущена'
+    else: message='Конфигурация записана. Служба vpn-telegram на этом сервере не установлена'
+    return {'configured':True,'owner':owner,'username':username,'running':telegram_snapshot()['running'],'message':message}
+
 def telegram_call(method,body,content_type):
     cfg=json.loads(TG.read_text())
     req=urllib.request.Request('https://api.telegram.org/bot'+cfg['token']+'/'+method,data=body,headers={'Content-Type':content_type})
@@ -343,8 +407,37 @@ def telegram_file(data):
     parts.append(f'--{boundary}--\r\n'.encode())
     return telegram_call('sendPhoto' if kind=='photo' else 'sendDocument',b''.join(parts),'multipart/form-data; boundary='+boundary)
 
+POLICY=Path('/opt/vpn-adblock/policy.json')
+
+def policy_domains(values,label):
+    if not isinstance(values,list) or len(values)>200: raise Rejected('Не более 200 доменов: '+label)
+    result=[]
+    for value in values:
+        if not isinstance(value,str): raise Rejected('Некорректный домен')
+        name=value.strip().lower().rstrip('.')
+        if not name: continue
+        if len(name)>253 or '.' not in name or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',part) for part in name.split('.')):
+            raise Rejected('Некорректный домен: '+label)
+        if name not in result: result.append(name)
+    return result
+
+def update_filter_exceptions(data):
+    if not POLICY.is_file(): raise Rejected('Локальный фильтр не установлен')
+    policy=json.loads(POLICY.read_text())
+    policy['allow']=policy_domains(data.get('allow'),'исключения')
+    policy['deny']=policy_domains(data.get('deny'),'дополнительные блокировки')
+    temporary=POLICY.with_name('.policy-'+secrets.token_hex(6)+'.json')
+    temporary.write_text(json.dumps(policy,ensure_ascii=False,indent=2)+'\n')
+    os.chmod(temporary,0o600); temporary.replace(POLICY)
+    run(['systemctl','start','--no-block','vpn-adblock-update.service'])
+    return {'message':'Исключения фильтра записаны. Обновление списков запущено.','allow':policy['allow'],'deny':policy['deny']}
+
 def adblock_snapshot():
     state=json.loads(Path('/opt/vpn-adblock/status.json').read_text())
+    if POLICY.is_file():
+        policy=json.loads(POLICY.read_text())
+        state['allow']=policy.get('allow') or []
+        state['deny']=policy.get('deny') or []
     state['running']=run(['docker','inspect','vpn-adblock','--format','{{.State.Running}}'])=='true' and run(['dig','@127.0.0.1','ads.example.invalid','+short','+time=1','+tries=1'],3)=='0.0.0.0'
     state['dns_interception']=run(['systemctl','is-active','vpn-adblock-dns'])=='active'
     state['next_update']=run(['systemctl','show','vpn-adblock-update.timer','--property=NextElapseUSecRealtime','--value'])
@@ -354,12 +447,14 @@ def dispatch(op,data):
     if op=='snapshot':
         result={}
         for key,fn in [('routing',route_snapshot),('updates',updates),('hysteria_users',lambda:read_db("SELECT id,username,quota,download,upload,expire_time,device_no,deleted,remark FROM account WHERE role='user' ORDER BY id")),
-                       ('adblock',adblock_snapshot),
-                       ('telegram',lambda:{'configured':TG.is_file(),'owner':json.loads(TG.read_text())['owner'],'running':run(['systemctl','is-active','vpn-telegram'])=='active'}),
+                       ('adblock',adblock_snapshot),('hysteria_core',hysteria_core_snapshot),
+                       ('telegram',telegram_snapshot),
                        ('services',lambda:{'hysteria':run(['systemctl','is-active','h-ui']),'trusttunnel':run(['docker','inspect','trusttunnel-web','--format','{{.State.Status}}']),'hysteria_version':run(['/var/lib/h-ui/bin/hysteria-linux-amd64','version'])[:200]})]:
             try: result[key]=fn()
             except Exception: result[key]={'error':'Источник временно недоступен'}
         return result
+    if op=='adblock.exceptions': return update_filter_exceptions(data)
+    if op=='hysteria.core': return apply_hysteria_core(data)
     if op=='adblock.refresh':
         if data: raise Rejected('Некорректные параметры')
         run(['systemctl','start','--no-block','vpn-adblock-update.service'])
@@ -369,6 +464,7 @@ def dispatch(op,data):
     if op=='routes.apply': return apply_routes(data)
     if op=='updates.promote': return promote(data)
     if op=='updates.server': return server_update(data)
+    if op=='telegram.configure': return configure_telegram(data)
     if op=='telegram.send': return telegram(data)
     if op=='telegram.file': return telegram_file(data)
     if op=='hysteria.create':

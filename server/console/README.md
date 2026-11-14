@@ -86,10 +86,12 @@ exceptions are not accepted from the UI. A changed protected prefix requires rev
 
 ## Delivery and Telegram
 
-Existing SMTP settings are reused. The Telegram token remains in
-`/etc/vpn-telegram/config.json` and is never returned to the browser. The existing
-owner-only control bot continues polling; the console does not start a competing
-`getUpdates` consumer. Telegram recipients must start that bot first.
+Existing SMTP settings are reused. The Telegram page can bind the same
+owner-only bot: the agent checks the token with Telegram, writes
+`/etc/vpn-telegram/config.json` as root `0600`, and restarts `vpn-telegram` when
+that unit exists. The token is never returned to the browser or written to the
+audit log. The console still does not start a competing `getUpdates` consumer.
+Telegram recipients must start that bot first.
 
 Contacts are explicitly assigned to a protocol identity, with an opt-in flag.
 Accounts across protocols are not automatically merged on matching display names.

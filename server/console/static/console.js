@@ -100,6 +100,7 @@ async function refresh(renderPage = true) {
     };
     state = Object.assign(await api("state"), kept);
     if (page === "settings") {
+      state.hysteria_core = state.hysteria_core && !state.hysteria_core.error ? state.hysteria_core : {};
       const result = await api("settings");
       state.portalSettings = result.settings;
       state.portalEndpoint = result.endpoint;
@@ -489,8 +490,8 @@ function campaigns() {
 function telegram() {
   const t = state.telegram || {};
   return (
-    heading("Telegram", "Интеграция с существующим приватным ботом.") +
-    `<div class="grid"><div class="card"><h2>Бот управления</h2><div class="service"><strong>Сервис</strong>${pill(t.running ? "active" : "unknown", t.running ? "Работает" : "Нет данных")}</div><div class="service"><strong>Токен</strong>${pill(t.configured ? "active" : "unknown", t.configured ? "На сервере" : "Не настроен")}</div><div class="service"><strong>Владелец</strong><code>${esc(t.owner || "—")}</code></div><div class="note">Токен не передаётся в браузер. Управляющие команды бота доступны только владельцу в личном чате.</div></div><div class="card"><h2>Доставка пользователям</h2><p class="subtitle">Укажите Telegram user ID в контакте пользователя и зафиксируйте согласие. Получатель должен сначала открыть существующего бота и нажать Start.</p><p class="subtitle">Для отправки создайте рассылку в канале Telegram, проверьте адресатов и подтвердите.</p>${btn("Открыть рассылки →", "navigate", 'data-target="campaigns"')}</div></div><h2>Контакты Telegram</h2>` +
+    heading("Telegram", "Один приватный бот: управление владельцем и доставка конфигураций.") +
+    `<div class="grid"><div class="card"><h2>Бот управления</h2><div class="service"><strong>Служба</strong>${pill(t.running ? "active" : "unknown", t.running ? "Работает" : "Не запущена")}</div><div class="service"><strong>Привязка</strong>${pill(t.configured ? "active" : "unknown", t.configured ? "@" + (t.username || "бот") : "Не привязан")}</div><div class="service"><strong>Владелец</strong><code>${esc(t.owner || "—")}</code></div><div class="note">Токен не читается обратно в браузер. Команды /status, /route и /restart принимает только владелец в личном чате. Это не второй бот и не замена рассылок.</div></div><div class="card"><h2>Привязать бота</h2><form id="telegram-form"><label class="field">Токен BotFather<input name="token" type="password" required autocomplete="off" spellcheck="false"></label><label class="field">Telegram ID владельца<input name="owner" inputmode="numeric" required></label><div class="actions"><button type="submit" class="primary">Привязать</button></div></form><p class="subtitle">Владелец узнаёт свой ID у бота командой /id. Получатели конфигураций по-прежнему задаются в карточке пользователя.</p></div></div><div class="card"><h2>Доставка пользователям</h2><p class="subtitle">ID получателя и согласие задаются в карточке человека. Сам бот только доставляет уже подтверждённую рассылку или конфигурацию.</p>${btn("Открыть рассылки →", "navigate", 'data-target="campaigns"')}</div><h2>Контакты Telegram</h2>` +
     table(
       ["Учётная запись", "Telegram ID", "Согласие"],
       (state.contacts || [])
@@ -597,8 +598,24 @@ function settingsPage() {
          <div class="settings-grid">${field("smtp_user", "Логин", s.smtp_user)}${field("smtp_password", "Пароль", "", "password")}${field("smtp_from", "From", s.smtp_from)}${field("portal_url", "Публичный URL панели", s.portal_url)}</div>
        </section>
        <div class="actions"><button class="primary" type="submit">Сохранить и применить</button></div>
+     </form>
+     <form id="hysteria-core-form" class="card"><h2>Hysteria</h2>
+       <p class="subtitle">Порт и маскировка ядра. Пароль маскировки не показывается; пустое поле сохраняет текущий.</p>
+       <div class="settings-grid">${field("port", "Порт", (state.hysteria_core || {}).port || "", "number")}</div>
+       <label class="check"><input type="checkbox" name="obfs" ${(state.hysteria_core || {}).obfs ? "checked" : ""}> Маскировка salamander</label>
+       ${field("obfs_password", "Новый пароль маскировки", "", "password")}
+       <div class="actions"><button type="submit">Применить Hysteria</button></div>
+     </form>
+     <form id="filter-form" class="card"><h2>Исключения фильтра DNS</h2>
+       <p class="subtitle">Исключение снимает блокировку домена. Дополнительная блокировка сильнее исключения, кроме защищённых имён. Источники списков не меняются.</p>
+       <label class="field">Не блокировать, по одному домену на строку<textarea name="allow">${esc(((state.adblock || {}).allow || []).join("\n"))}</textarea></label>
+       <label class="field">Блокировать дополнительно<textarea name="deny">${esc(((state.adblock || {}).deny || []).join("\n"))}</textarea></label>
+       <div class="actions"><button type="submit">Сохранить и обновить списки</button></div>
      </form>`
   );
+}
+function domainLines(value) {
+  return value.split(/[\s,]+/).map((item) => item.trim().toLowerCase()).filter(Boolean);
 }
 function bindSettings() {
   const form = $("#settings-form");
@@ -658,7 +675,8 @@ function render() {
         .querySelectorAll("tr[data-search]")
         .forEach((r) => (r.hidden = !r.dataset.search.includes($("#user-search").value.toLowerCase())));
   if (page === "devices" && window.DeviceRoutes) DeviceRoutes.mount($("#content"));
-  if (page === "settings") bindSettings();
+  if (page === "settings") { bindSettings(); bindCoreSettings(); }
+  if (page === "telegram") bindTelegram();
   if (page === "routing") {
     $("#content").oninput = () => (routeDirty = true);
   } else {
@@ -673,6 +691,56 @@ function navigate(target) {
   if (!agentPages.has(target) && $("#notice").textContent.startsWith("Агент недоступен")) notice("");
   render();
   if (target === "settings") loadSettings();
+}
+function bindCoreSettings() {
+  const hysteria = $("#hysteria-core-form");
+  if (hysteria) hysteria.onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(hysteria));
+    const button = hysteria.querySelector("[type=submit]");
+    button.disabled = true;
+    try {
+      await job("hysteria.core", { port: Number(data.port), obfs: hysteria.obfs.checked, obfs_password: data.obfs_password || "" });
+    } catch (error) {
+      notice(error.message, true);
+      button.disabled = false;
+    }
+  };
+  const filter = $("#filter-form");
+  if (filter) filter.onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(filter));
+    const button = filter.querySelector("[type=submit]");
+    button.disabled = true;
+    try {
+      await job("adblock.exceptions", { allow: domainLines(data.allow || ""), deny: domainLines(data.deny || "") });
+    } catch (error) {
+      notice(error.message, true);
+      button.disabled = false;
+    }
+  };
+}
+function bindTelegram() {
+  const form = $("#telegram-form");
+  if (!form) return;
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(form));
+    const owner = Number(data.owner);
+    if (!Number.isSafeInteger(owner) || owner <= 0) return notice("ID владельца должен быть положительным числом.", true);
+    const button = form.querySelector("[type=submit]");
+    button.disabled = true;
+    try {
+      const result = await api("telegram", { token: data.token, owner });
+      state.telegram = { configured: true, owner: result.owner, username: result.username, running: result.running };
+      form.reset();
+      notice(result.message || "Бот привязан");
+      render();
+    } catch (error) {
+      notice(error.message, true);
+      button.disabled = false;
+    }
+  };
 }
 async function loadSettings() {
   try {

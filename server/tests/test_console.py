@@ -599,6 +599,41 @@ class AgentTests(unittest.TestCase):
             with self.assertRaises(agent.Rejected):agent.apply_routes({'exit':'primary','rules':[],'revision':'old'})
             run.assert_not_called()
 
+    def test_hysteria_core_changes_port_without_returning_password(self):
+        switch=type('Switch',(),{'write_config':lambda self,value: written.append(value)})()
+        written=[]
+        with patch.object(agent,'hui_config',return_value={'listen':':443','obfs':{'type':'salamander','salamander':{'password':'current-secret'}}}),patch.object(agent,'module_switch',return_value=switch),patch.object(agent,'run'):
+            result=agent.apply_hysteria_core({'port':4443,'obfs':True,'obfs_password':''})
+        self.assertEqual(result['port'],4443)
+        self.assertNotIn('current-secret',json.dumps(result))
+        self.assertIn('4443',written[0])
+        with self.assertRaises(agent.Rejected):agent.apply_hysteria_core({'port':80,'obfs':False,'obfs_password':''})
+
+    def test_filter_exceptions_do_not_replace_sources(self):
+        root=Path(TMP.name)/secrets.token_hex(8); root.mkdir(); policy=root/'policy.json'
+        policy.write_text(json.dumps({'sources':[{'id':'kept'}],'protected':['example.com'],'allow':[],'deny':[]}))
+        with patch.object(agent,'POLICY',policy),patch.object(agent,'run'):
+            agent.update_filter_exceptions({'allow':['Safe.Example.com'],'deny':['ads.example.com']})
+        saved=json.loads(policy.read_text())
+        self.assertEqual(saved['sources'],[{'id':'kept'}])
+        self.assertEqual((saved['allow'],saved['deny']),(['safe.example.com'],['ads.example.com']))
+
+    def test_telegram_bind_stores_token_outside_the_result(self):
+        token='123456789:'+'A'*35
+        root=Path(TMP.name)/secrets.token_hex(8); cfg=root/'config.json'
+        class Body:
+            def __enter__(self):return self
+            def __exit__(self,*args):return False
+            def read(self):return b'{"ok":true,"result":{"username":"FixtureBot"}}'
+        opener=type('Opener',(),{'open':lambda self,req,timeout=15:Body()})()
+        with patch.object(agent,'TG',cfg),patch.object(agent,'ORIGIN','https://vpn.example.invalid'),patch.object(agent.urllib.request,'build_opener',return_value=opener),patch.object(agent,'run') as run:
+            result=agent.configure_telegram({'token':token,'owner':42})
+        self.assertNotIn(token,json.dumps(result))
+        self.assertEqual(json.loads(cfg.read_text())['token'],token)
+        self.assertEqual((result['owner'],result['username']),(42,'FixtureBot'))
+        self.assertFalse(any(call.args[0][:2]==['systemctl','restart'] for call in run.call_args_list))
+        with self.assertRaises(agent.Rejected):agent.configure_telegram({'token':'not-a-token','owner':42})
+
     def test_telegram_file_validation_and_multipart(self):
         good={'chat_id':5,'kind':'photo','filename':'qr-1.png','data':base64.b64encode(b'\x89PNG\r\n\x1a\nrest').decode(),'caption':'phone'}
         with patch.object(agent,'telegram_call',return_value={'message_id':3}) as call:

@@ -407,7 +407,7 @@ def state(request:Request):
     snapshot['observed_at']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     return snapshot
 
-ACTIONS={'adblock.refresh','routes.check','routes.apply','updates.promote','updates.server','updates.fetch','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
+ACTIONS={'adblock.refresh','adblock.exceptions','hysteria.core','routes.check','routes.apply','updates.promote','updates.server','updates.fetch','hysteria.create','hysteria.block','hysteria.unblock','hysteria.rotate',
          'trusttunnel.create','trusttunnel.block','trusttunnel.unblock','trusttunnel.key','trusttunnel.rotate','trusttunnel.revoke','trusttunnel.device-revoke','hysteria.update','campaign.send','config.send',
          'amnezia.create','amnezia.block','amnezia.unblock','amnezia.rotate','protocols.check','protocols.install','protocols.update',
          'cdn.create','cdn.block','cdn.unblock','cdn.rotate','cdn.configure',
@@ -511,6 +511,16 @@ def validate_action(action,data,*,check_state=True):
         with connect() as c: row=c.execute('SELECT state FROM campaigns WHERE id=?',(data.get('id'),)).fetchone()
         if not row or row['state']!='draft': raise HTTPException(409,'Рассылка уже отправлялась или не существует')
         return {'id':data['id']}
+    if action=='hysteria.core':
+        if set(data)!={'port','obfs','obfs_password'} or type(data['port']) is not int or type(data['obfs']) is not bool or not isinstance(data['obfs_password'],str):
+            raise HTTPException(422,'Проверьте порт и маскировку Hysteria')
+        if not (data['port']==443 or 1024<=data['port']<=65535): raise HTTPException(422,'Порт Hysteria: 443 или 1024–65535')
+        if len(data['obfs_password'])>64: raise HTTPException(422,'Слишком длинный пароль маскировки')
+        return data
+    if action=='adblock.exceptions':
+        if set(data)!={'allow','deny'} or not isinstance(data['allow'],list) or not isinstance(data['deny'],list): raise HTTPException(422,'Укажите списки доменов')
+        if len(data['allow'])>200 or len(data['deny'])>200: raise HTTPException(422,'Не более 200 доменов в списке')
+        return data
     if action in ('routes.check','adblock.refresh','protocols.check'):
         if data: raise HTTPException(422,'Некорректные параметры')
         return {}
@@ -811,6 +821,17 @@ async def settings_save(request:Request):
     audit(admin,'trusttunnel.settings','applied' if applied else 'saved')
     result=portal_settings()
     result.update(saved=True,applied=applied,message='Настройки сохранены и переданы endpoint.' if applied else 'Настройки сохранены. Endpoint не подтвердил применение.')
+    return result
+
+@app.post('/console/api/telegram')
+async def telegram_bind(request:Request):
+    admin=actor(request,True)
+    data=await body(request)
+    token=data.get('token'); owner=data.get('owner')
+    if set(data)!={'token','owner'} or not isinstance(token,str) or not re.fullmatch(r'[0-9]{6,12}:[A-Za-z0-9_-]{30,64}',token) or type(owner) is not int or not 0<owner<=2**63-1:
+        raise HTTPException(422,'Укажите токен бота и числовой ID владельца')
+    result=await run_in_threadpool(agent,'telegram.configure',{'token':token,'owner':owner})
+    audit(admin,'telegram.configure',str(owner))
     return result
 
 @app.get('/console/healthz')
