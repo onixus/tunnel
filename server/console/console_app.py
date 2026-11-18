@@ -8,19 +8,21 @@ import re
 import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
-from contextlib import asynccontextmanager, contextmanager
-from urllib.parse import urlsplit, parse_qs, urlencode
-import http.client
+from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from config_qr import with_qr
-import panel_shadow
 import config_delivery
+import console_people
+import console_portal
+import console_store
 from app import config, db, security, webauth, mailer, conninfo
 
 BASE=Path(__file__).parent
@@ -29,47 +31,12 @@ AGENT=os.environ.get('CONSOLE_SOCKET','/run/vpn-console/agent.sock')
 PORTAL=os.environ.get('CONSOLE_PORTAL','http://trusttunnel-web:8000')
 STOP=threading.Event()
 WRITE_LOCK=threading.Lock()
-
-@contextmanager
-def connect():
-    c=sqlite3.connect(STATE/'console.db',timeout=15); c.row_factory=sqlite3.Row
-    c.execute('PRAGMA journal_mode=WAL')
-    try:
-        with c: yield c
-    finally: c.close()
-
-def init():
-    STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
-    with connect() as c:
-        c.executescript('''
-        CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, at TEXT DEFAULT CURRENT_TIMESTAMP, actor INTEGER, action TEXT, detail TEXT);
-        CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, actor INTEGER, action TEXT, payload TEXT, state TEXT, result TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP, updated TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS contacts(source TEXT, user_id INTEGER, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,user_id));
-        CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, actor INTEGER, channel TEXT, subject TEXT, body TEXT, state TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS deliveries(campaign TEXT, recipient TEXT, state TEXT, error TEXT, PRIMARY KEY(campaign,recipient));
-        CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS person_accounts(person INTEGER NOT NULL, source TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(source,user_id));
-        ''')
-        # Shadow tables only. Live auth still belongs to H UI and the portal.
-        panel_shadow.ensure(c)
-        # Existing installations also need monotonic IDs: stale tabs/jobs retain person IDs.
-        c.execute('BEGIN IMMEDIATE')
-        schema=c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='people'").fetchone()[0]
-        if 'AUTOINCREMENT' not in schema.upper():
-            # Deleted IDs remain in the durable job history even when no live people remain.
-            high_water=c.execute("SELECT MAX(COALESCE((SELECT MAX(id) FROM people),0),COALESCE((SELECT MAX(CAST(json_extract(payload,'$.id') AS INTEGER)) FROM jobs WHERE action='person.delete' AND json_valid(payload)),0))").fetchone()[0]
-            c.execute("CREATE TABLE people_next(id INTEGER PRIMARY KEY AUTOINCREMENT, nick TEXT NOT NULL UNIQUE COLLATE NOCASE, email TEXT, chat_id INTEGER, consent INTEGER NOT NULL DEFAULT 0, created TEXT DEFAULT CURRENT_TIMESTAMP)")
-            c.execute('INSERT INTO people_next SELECT id,nick,email,chat_id,consent,created FROM people')
-            c.execute('DROP TABLE people')
-            c.execute('ALTER TABLE people_next RENAME TO people')
-            c.execute("DELETE FROM sqlite_sequence WHERE name='people'")
-            c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('people',?)",(high_water,))
-        c.execute("UPDATE jobs SET state='unknown',result=? WHERE state='running'",(json.dumps({'message':'Сервис перезапущен. Проверьте состояние перед повтором.'}),))
-        c.execute("UPDATE deliveries SET state='unknown',error='Прервано; автоматический повтор отключён' WHERE state='sending'")
-        c.execute("UPDATE campaigns SET state='unknown' WHERE state='sending'")
-
-def audit(actor,action,detail=''):
-    with connect() as c: c.execute('INSERT INTO audit(actor,action,detail) VALUES(?,?,?)',(actor,action,detail))
+# Bound by reference: tests retarget STATE and PORTAL on this module.
+console_store.state_dir = lambda: STATE
+console_portal.portal_url = lambda: PORTAL
+connect = console_store.connect
+init = console_store.init
+audit = console_store.audit
 
 def agent(op,data=None):
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
@@ -98,169 +65,28 @@ async def body(request):
     if not isinstance(value,dict): raise HTTPException(422,'Ожидается объект')
     return value
 
-class PortalRejected(RuntimeError):
-    """The portal answered and refused the change. A timeout is not a refusal."""
+PortalRejected = console_portal.PortalRejected
+legacy = console_portal.legacy
+managed_device_revoke = console_portal.managed_device_revoke
+source_user = console_people.source_user
+# One person (nick + contacts) owns at most one account per protocol.
+NICK = console_people.NICK
+NAMES = console_people.NAMES
+console_host = console_people.console_host
+user_domain = console_people.user_domain
+logins = console_people.logins
+person = console_people.person
+link = console_people.link
+unlink = console_people.unlink
+person_perform = console_people.person_perform
 
-def legacy(actor_id,path,data,timeout=30):
-    # Fixed paths constructed from checked integer IDs, session never saved in jobs.
-    token=security.create_session_token(str(actor_id),'admin')
-    origin=urlsplit(PORTAL)
-    if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
-        raise RuntimeError('Недопустимый внутренний адрес панели')
-    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=timeout)
-    try:
-        client.request('POST','/admin/'+path,body=urlencode(data),headers={'Cookie':webauth.ADMIN_COOKIE+'='+token,'Content-Type':'application/x-www-form-urlencoded'})
-        r=client.getresponse(); dest=r.getheader('Location',''); r.read(1048576)
-        query=parse_qs(urlsplit(dest).query)
-        if r.status not in (302,303) or 'err' in query or '/login' in dest:
-            raise PortalRejected('Панель TrustTunnel не подтвердила изменение')
-    finally: client.close()
-    return {'message':'Изменение TrustTunnel применено'}
-
-def managed_device_revoke(actor_id,device_id):
-    # The sidecar never starts an endpoint. Use the owning portal supervisor.
-    token=security.create_session_token(str(actor_id),'admin')
-    csrf=hmac.new(config.SECRET_KEY.encode(),('rtrust-admin-routes:'+token).encode(),hashlib.sha256).hexdigest()
-    origin=urlsplit(PORTAL)
-    if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
-        raise RuntimeError('Недопустимый внутренний адрес панели')
-    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=30)
-    try:
-        client.request('POST',f'/admin/api/device-credentials/{device_id}/revoke',headers={'Cookie':webauth.ADMIN_COOKIE+'='+token,'X-CSRF-Token':csrf})
-        response=client.getresponse();raw=response.read(1048576)
-        if response.status!=200:raise RuntimeError('Портал не подтвердил отзыв устройства')
-        result=json.loads(raw)
-        revoke=next((op for op in result.get('operations',[]) if op['action']=='revoke'),None)
-        if revoke and revoke['state']!='applied':
-            raise RuntimeError('Отзыв записан, но endpoint не подтвердил применение. Повторите операцию после восстановления endpoint.')
-        return {'message':'Отзыв отдельного VPN-пароля применён на endpoint' if revoke else 'Доступ к порталу отозван. Общие и внешние VPN-пароли остаются действующими.'}
-    finally:client.close()
-
-def source_user(source,id):
-    if source=='trusttunnel':
-        u=db.get_user(id)
-        if not u: raise HTTPException(404,'Пользователь не найден')
-        return dict(u)
-    if source=='hysteria':
-        users=agent('snapshot').get('hysteria_users',[])
-        if isinstance(users,list):
-            for u in users:
-                if u['id']==id: return u
-        raise HTTPException(404,'Пользователь не найден')
-    if source in ('amnezia','cdn'):
-        users=agent('snapshot').get(source+'_users',[])
-        if isinstance(users,list):
-            for u in users:
-                if u['id']==id: return u
-        raise HTTPException(404,'Пользователь не найден')
-    raise HTTPException(422,'Неизвестный источник')
-
-# One person (nick + contacts) owns at most one account per protocol. Accounts are
-# linked explicitly, never merged by matching names; logins are derived from the nick.
-NICK=re.compile(r'[a-z0-9][a-z0-9_-]{2,31}')
-NAMES={'trusttunnel':'TrustTunnel','hysteria':'Hysteria','amnezia':'AmneziaWG','cdn':'CDN'}
-
-def console_names():
-    names=[]
-    for key in ('CONSOLE_PUBLIC_ORIGIN','CONSOLE_ORIGIN'):
-        host=urlsplit(os.environ.get(key,'')).hostname
-        if host and host not in names: names.append(host.lower())
-    return names
-
-def console_host(request):
-    # The label is a display name, not a routing input. A forwarded Host is shown
-    # only when it is one of the names this installation was configured with.
-    host=(request.headers.get('host') or '').split(':')[0].strip().lower()
-    allowed=console_names()
-    if host in allowed: return host
-    return allowed[0] if allowed else 'console'
-
-def user_domain():
-    return os.environ.get('CONSOLE_USER_DOMAIN') or urlsplit(os.environ.get('CONSOLE_ORIGIN','https://onixus-rf.duckdns.org')).hostname
-
-def logins(nick,email=''):
-    # Hysteria requires 6+ characters; TrustTunnel requires an e-mail-shaped login.
-    return {'trusttunnel':email or f'{nick}@{user_domain()}','hysteria':nick if len(nick)>=6 else nick+'-vpn','amnezia':nick,'cdn':nick}
-
-def person(id):
-    with connect() as c:
-        row=c.execute('SELECT * FROM people WHERE id=?',(id,)).fetchone()
-        if not row: raise RuntimeError('Пользователь не найден')
-        return dict(row,accounts={r['source']:r['user_id'] for r in c.execute('SELECT source,user_id FROM person_accounts WHERE person=?',(id,))})
-
-def link(pid,source,uid):
-    with connect() as c:
-        p=c.execute('SELECT * FROM people WHERE id=?',(pid,)).fetchone()
-        c.execute('INSERT INTO person_accounts VALUES(?,?,?)',(pid,source,uid))
-        # Delivery and campaigns keep reading per-account contacts.
-        c.execute('INSERT OR REPLACE INTO contacts VALUES(?,?,?,?,?)',(source,uid,p['email'] or '',p['chat_id'],p['consent']))
-
-def unlink(source,uid):
-    with connect() as c:
-        c.execute('DELETE FROM person_accounts WHERE source=? AND user_id=?',(source,uid))
-        c.execute('DELETE FROM contacts WHERE source=? AND user_id=?',(source,uid))
-
-def create_account(source,p,admin):
-    login=logins(p['nick'],p['email'] or '')[source]
-    if source=='trusttunnel':
-        legacy(admin,'users/create',{'email':login,'password':secrets.token_urlsafe(24)})
-        uid=db.get_user_by_email(login)['id']
-        legacy(admin,f'users/{uid}/configs',{'label':'Основной'})
-        return uid
-    uid=agent(source+'.create',{'username':login,'days':365,'devices':3} if source=='hysteria' else {'username':login}).get('id')
-    if uid is None: raise RuntimeError(NAMES[source]+': учётка создана, но не найдена. Привяжите её вручную.')
-    return uid
-
-def delete_account(source,uid,admin):
-    if source=='trusttunnel':
-        if not db.get_user(uid): return unlink(source,uid)
-        with db.connect() as c:
-            devices=[r['id'] for r in c.execute('SELECT id FROM app_devices WHERE user_id=?',(uid,))]
-            integrated=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rtrust_credential_operations'").fetchone()
-        # Device credentials are revoked through their owner before the account disappears.
-        for d in devices: managed_device_revoke(admin,d) if integrated else db.revoke_device(d)
-        legacy(admin,f'users/{uid}/delete',{})
-    else: agent(source+'.delete',{'id':uid})
-    unlink(source,uid)
-
-def each_account(p,fn):
-    done,failed=[],[]
-    for source,uid in sorted(p['accounts'].items()):
-        try: fn(source,uid); done.append(NAMES[source])
-        except Exception as exc: failed.append(NAMES[source]+': '+(str(exc) if isinstance(exc,RuntimeError) else 'ошибка'))
-    return done,failed
-
-def person_perform(action,data,admin):
-    if action=='person.create':
-        with connect() as c:
-            pid=c.execute('INSERT INTO people(nick,email,chat_id,consent) VALUES(?,?,?,?)',(data['nick'],data['email'],data['chat_id'],int(data['consent']))).lastrowid
-        p=person(pid); done,failed=[],[]
-        for source in data['protocols']:
-            try: link(pid,source,create_account(source,p,admin)); done.append(NAMES[source])
-            except Exception as exc: failed.append(NAMES[source]+': '+(str(exc) if isinstance(exc,RuntimeError) else 'ошибка'))
-        if failed: raise RuntimeError(f"Пользователь {data['nick']} создан частично. Готово: {', '.join(done) or 'ничего'}. Ошибки: {'; '.join(failed)}. Недостающие протоколы добавьте в карточке пользователя.")
-        return {'message':f"Пользователь {data['nick']} создан: {', '.join(done)}",'id':pid}
-    p=person(data['id'])
-    if action=='person.add':
-        if data['source'] in p['accounts']: raise RuntimeError('У пользователя уже есть учётка '+NAMES[data['source']])
-        link(p['id'],data['source'],create_account(data['source'],p,admin))
-        return {'message':NAMES[data['source']]+': учётка создана'}
-    if action in ('person.block','person.unblock'):
-        done,failed=each_account(p,lambda source,uid:perform(source+action[6:],{'id':uid},admin))
-    elif action=='person.delete':
-        done,failed=each_account(p,lambda source,uid:delete_account(source,uid,admin))
-        if not failed:
-            with connect() as c: c.execute('DELETE FROM people WHERE id=?',(p['id'],))
-            return {'message':f"Пользователь {p['nick']} удалён вместе с учётками: {', '.join(done) or 'нет'}"}
-    else: raise RuntimeError('Операция не поддерживается')
-    if failed: raise RuntimeError('Выполнено не полностью. Готово: '+(', '.join(done) or 'ничего')+'. Ошибки: '+'; '.join(failed))
-    return {'message':'Изменение применено: '+(', '.join(done) or 'нет учёток')}
+console_people.services = sys.modules[__name__]
 
 def perform(action,data,admin):
     if action.startswith('person.'): return person_perform(action,data,admin)
     if action in ('hysteria.delete','amnezia.delete','cdn.delete','trusttunnel.delete'):
         source=action.split('.')[0]
-        delete_account(source,data['id'],admin)
+        console_people.delete_account(source,data['id'],admin)
         return {'message':NAMES[source]+': учётка удалена'}
     if action.startswith(('routes.','updates.','hysteria.','adblock.','amnezia.','cdn.','protocols.')): return agent(action,data)
     if action=='trusttunnel.create':
@@ -787,23 +613,7 @@ SETTING_KEYS=('brand_name','cert_mode','panel_domain','connection_hidden','conn_
 CHECKBOX_KEYS={'connection_hidden','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol'}
 SETTING_CHOICES={'cert_mode':('external','letsencrypt'),'conn_protocol':('QUIC','HTTP/2','HTTP/1.1'),'smtp_tls':('starttls','ssl','none')}
 
-def portal_status(admin_id):
-    """Read the endpoint the portal process owns. This sidecar never starts one."""
-    token=security.create_session_token(str(admin_id),'admin')
-    origin=urlsplit(PORTAL)
-    if origin.scheme!='http' or origin.hostname not in ('trusttunnel-web','127.0.0.1'):
-        raise RuntimeError('Недопустимый внутренний адрес панели')
-    client=http.client.HTTPConnection(origin.hostname,origin.port or 80,timeout=10)
-    try:
-        client.request('GET','/admin/api/endpoint-status',headers={'Cookie':webauth.ADMIN_COOKIE+'='+token})
-        response=client.getresponse(); raw=response.read(65536)
-    finally: client.close()
-    if response.status!=200: raise RuntimeError('Портал не отдал состояние endpoint')
-    status=json.loads(raw)
-    if not isinstance(status,dict) or type(status.get('running')) is not bool: raise RuntimeError('Портал не отдал состояние endpoint')
-    domains=status.get('cert_domains')
-    return {'running':status['running'],'domain':status.get('domain') or '','cert_present':status.get('cert_present') is True,
-            'port':str(status.get('port') or '8443'),'cert_domains':domains if isinstance(domains,list) else []}
+portal_status = console_portal.portal_status
 
 def portal_settings(admin_id):
     current=db.get_settings()

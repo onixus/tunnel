@@ -3,7 +3,6 @@ import base64
 import ipaddress
 import json
 import host_platform
-import os
 from pathlib import Path
 import re
 import secrets
@@ -13,6 +12,7 @@ import time
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+import hostexec
 from routing_policy import EXITS, PolicyError
 import trusttunnel_routing as acl_rules
 
@@ -44,10 +44,7 @@ SHARED = ('Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 
 
 
 def run(args, timeout=30):
-    p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if p.returncode:
-        raise PolicyError('Операция не завершена: ' + Path(args[0]).name)
-    return p.stdout.strip()
+    return hostexec.run(args, timeout, error=PolicyError)
 
 
 def genkey():
@@ -97,31 +94,13 @@ def new_state(port):
 
 
 def load():
-    try:
-        if STATE.stat().st_size > 1024 * 1024:
-            raise PolicyError('Состояние AmneziaWG повреждено')
-        state = json.loads(STATE.read_text())
-    except FileNotFoundError:
-        raise PolicyError('AmneziaWG не установлен. Установите протокол в разделе «Протоколы».') from None
-    except ValueError:
-        raise PolicyError('Состояние AmneziaWG повреждено') from None
-    if state.get('schema') != 1:
-        raise PolicyError('Неподдерживаемая версия состояния AmneziaWG')
-    return state
+    return hostexec.load_json_state(
+        STATE, 'AmneziaWG не установлен. Установите протокол в разделе «Протоколы».',
+        'Состояние AmneziaWG повреждено', 'Неподдерживаемая версия состояния AmneziaWG', error=PolicyError)
 
 
 def write(path, text):
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temp = path.with_name('.' + path.name + '.' + secrets.token_hex(6))
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, 'w') as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+    hostexec.atomic_write(path, text)
 
 
 def shared_lines(state):

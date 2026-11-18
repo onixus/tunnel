@@ -42,8 +42,8 @@ def prepare(base, tag):
         shutil.copytree(ROOT / 'server/upstream/app', context / 'server/upstream/app',
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
         (context / 'server/console').mkdir()
-        shutil.copy2(ROOT / 'server/console/console_app.py', context / 'server/console/console_app.py')
-        shutil.copy2(ROOT / 'server/console/panel_shadow.py', context / 'server/console/panel_shadow.py')
+        for name in ('console_app.py', 'console_store.py', 'console_portal.py', 'console_people.py', 'panel_shadow.py'):
+            shutil.copy2(ROOT / 'server/console' / name, context / 'server/console' / name)
         for folder in ('templates', 'static'):
             shutil.copytree(ROOT / 'server/console' / folder, context / 'server/console' / folder)
         console_ui = {str(path.relative_to(context / 'server/console')): hashlib.sha256(path.read_bytes()).hexdigest()
