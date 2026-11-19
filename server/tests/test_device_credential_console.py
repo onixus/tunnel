@@ -15,7 +15,7 @@ class ConsoleCredentialTests(unittest.TestCase):
             response=connection.getresponse.return_value
             response.status=200
             response.read.return_value=json.dumps({'operations':[{'action':'revoke','state':state}]}).encode()
-            with patch.object(console.console_portal.http.client,'HTTPConnection',return_value=connection):
+            with patch('http.client.HTTPConnection',return_value=connection):
                 if state=='applied':
                     result=console.managed_device_revoke(1,42)
                     self.assertIn('применён на endpoint',result['message'])

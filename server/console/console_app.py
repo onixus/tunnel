@@ -31,12 +31,8 @@ AGENT=os.environ.get('CONSOLE_SOCKET','/run/vpn-console/agent.sock')
 PORTAL=os.environ.get('CONSOLE_PORTAL','http://trusttunnel-web:8000')
 STOP=threading.Event()
 WRITE_LOCK=threading.Lock()
-# Bound by reference: tests retarget STATE and PORTAL on this module.
-console_store.state_dir = lambda: STATE
-console_portal.portal_url = lambda: PORTAL
-connect = console_store.connect
-init = console_store.init
-audit = console_store.audit
+# Bound to this module: tests retarget its STATE and PORTAL, and a second load stays separate.
+connect, init, audit = console_store.bind(lambda: STATE)
 
 def agent(op,data=None):
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as sock:
@@ -65,28 +61,19 @@ async def body(request):
     if not isinstance(value,dict): raise HTTPException(422,'Ожидается объект')
     return value
 
-PortalRejected = console_portal.PortalRejected
-legacy = console_portal.legacy
-managed_device_revoke = console_portal.managed_device_revoke
-source_user = console_people.source_user
+PortalRejected, legacy, managed_device_revoke, portal_status = console_portal.bind(lambda: PORTAL)
+source_user, person, link, unlink, delete_account, person_perform = console_people.bind(connect, lambda: sys.modules[__name__])
 # One person (nick + contacts) owns at most one account per protocol.
 NICK = console_people.NICK
 NAMES = console_people.NAMES
 console_host = console_people.console_host
 user_domain = console_people.user_domain
 logins = console_people.logins
-person = console_people.person
-link = console_people.link
-unlink = console_people.unlink
-person_perform = console_people.person_perform
-
-console_people.services = sys.modules[__name__]
-
 def perform(action,data,admin):
     if action.startswith('person.'): return person_perform(action,data,admin)
     if action in ('hysteria.delete','amnezia.delete','cdn.delete','trusttunnel.delete'):
         source=action.split('.')[0]
-        console_people.delete_account(source,data['id'],admin)
+        delete_account(source,data['id'],admin)
         return {'message':NAMES[source]+': учётка удалена'}
     if action.startswith(('routes.','updates.','hysteria.','adblock.','amnezia.','cdn.','protocols.')): return agent(action,data)
     if action=='trusttunnel.create':
@@ -612,8 +599,6 @@ def send_campaign(id):
 SETTING_KEYS=('brand_name','cert_mode','panel_domain','connection_hidden','conn_domain','le_email','conn_address','conn_port','conn_sni','conn_protocol','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol','smtp_host','smtp_port','smtp_user','smtp_password','smtp_from','smtp_tls','portal_url')
 CHECKBOX_KEYS={'connection_hidden','registration_enabled','show_address','show_port','show_domain','show_sni','show_username','show_password','show_protocol'}
 SETTING_CHOICES={'cert_mode':('external','letsencrypt'),'conn_protocol':('QUIC','HTTP/2','HTTP/1.1'),'smtp_tls':('starttls','ssl','none')}
-
-portal_status = console_portal.portal_status
 
 def portal_settings(admin_id):
     current=db.get_settings()

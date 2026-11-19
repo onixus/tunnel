@@ -210,6 +210,10 @@ def test_console_installer_keeps_cli_options_after_container_arguments(tmp_path,
         assert not path('/etc/systemd/system/vpn-console-boot.service').exists()
         assert not path('/etc/tmpfiles.d/vpn-console.conf').exists()
         assert not (installer.DEST / 'restore-console.py').exists()
+        # A failed install must not leave a module the restored agent cannot import.
+        for name in installer.AGENT_FILES:
+            if name != 'agent.py' and not (installer.BACK / name).exists():
+                assert not (installer.DEST / name).exists(), name
         if prior_agent:
             assert ['systemctl', 'disable', '--now', 'vpn-console-boot'] in fallback_calls
             assert path('/etc/systemd/system/vpn-console-agent.service').read_text() == 'prior-agent\n'
