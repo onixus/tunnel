@@ -11,6 +11,11 @@ legacy settings and client/profile APIs remain available.
   network and host loopback 18090. Reuses the portal's explicit `SECRET_KEY` and
   administrator table. Persistent jobs, contacts, campaigns and audit are in a
   separate SQLite database at `/opt/vpn-console/data/console.db`.
+  `console_store.py` owns that database, `console_portal.py` calls the owning
+  portal, and `console_people.py` links one account per protocol to a person.
+  The public names stay on `console_app`.
+- `hostexec.py`: fixed-argument host commands and crash-safe writes shared by the
+  root agent and protocol adapters. It never builds a shell command line.
 - `agent.py`: root-owned systemd service with a Unix socket, no network listener.
   Socket is accessible only to root and GID 10001 (the portal/console service UID).
   It exposes a fixed operation set; request parameters cannot choose shell commands,

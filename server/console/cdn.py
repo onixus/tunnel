@@ -18,6 +18,7 @@ import urllib.parse
 import uuid
 
 import amnezia
+import hostexec
 from routing_policy import EXITS, PolicyError
 import trusttunnel_routing as acl_rules
 
@@ -51,10 +52,7 @@ PRIVATE = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0
 
 
 def run(args, timeout=30):
-    p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if p.returncode:
-        raise PolicyError('Операция не завершена: ' + Path(args[0]).name)
-    return p.stdout.strip()
+    return hostexec.run(args, timeout, error=PolicyError)
 
 
 def new_path():
@@ -68,17 +66,9 @@ def new_state(origin_host):
 
 
 def load():
-    try:
-        if STATE.stat().st_size > 1024 * 1024:
-            raise PolicyError('Состояние CDN повреждено')
-        state = json.loads(STATE.read_text())
-    except FileNotFoundError:
-        raise PolicyError('VLESS через CDN не установлен. Установите протокол в разделе «Протоколы».') from None
-    except ValueError:
-        raise PolicyError('Состояние CDN повреждено') from None
-    if state.get('schema') != 1:
-        raise PolicyError('Неподдерживаемая версия состояния CDN')
-    return state
+    return hostexec.load_json_state(
+        STATE, 'VLESS через CDN не установлен. Установите протокол в разделе «Протоколы».',
+        'Состояние CDN повреждено', 'Неподдерживаемая версия состояния CDN', error=PolicyError)
 
 
 def host_name(value, field):

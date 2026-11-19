@@ -123,8 +123,12 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, 'app', portal)
     monkeypatch.setitem(sys.modules, 'app.rtrust_profiles', profiles)
     monkeypatch.setenv('CONSOLE_ORIGIN', 'https://console.example.invalid')
+    # Dependencies are loaded under their real names; only the application itself
+    # keeps the isolated name used by this fixture.
+    sys.path.insert(0, str(CONSOLE))
     spec = importlib.util.spec_from_file_location('console_qr_test_app', CONSOLE / 'console_app.py')
     ui = importlib.util.module_from_spec(spec)
+    sys.modules['console_qr_test_app'] = ui
     spec.loader.exec_module(ui)
     ui.STATE = tmp_path / 'console'
     ui.init()

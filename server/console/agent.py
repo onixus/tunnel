@@ -25,6 +25,8 @@ import urllib.request
 import yaml
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+import hostexec
+
 HUI_DB = Path('/var/lib/h-ui/data/h_ui.db')
 EXITS = Path('/etc/hysteria/exits.json')
 FEED = Path('/opt/rtrust-updates')
@@ -41,10 +43,7 @@ class Rejected(Exception):
     pass
 
 def run(args, timeout=30):
-    p = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    if p.returncode:
-        raise Rejected('Операция не завершена: ' + Path(args[0]).name)
-    return p.stdout.strip()
+    return hostexec.run(args, timeout, error=Rejected)
 
 def read_db(sql, args=()):
     c=sqlite3.connect(f'file:{HUI_DB}?mode=ro', uri=True)
