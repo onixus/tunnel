@@ -5,9 +5,6 @@ import http.client
 import json
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from app.guards import COOKIE as CSRF_COOKIE
-from app.guards import mint as mint_csrf
-
 from app import config, security, webauth
 
 
@@ -36,6 +33,8 @@ def bind(portal_url):
 
     def legacy(actor_id, path, data, timeout=30):
         # Fixed paths constructed from checked integer IDs, session never saved in jobs.
+        from app.guards import COOKIE as CSRF_COOKIE
+        from app.guards import mint as mint_csrf
         cookie, _ = _admin_cookie(actor_id)
         csrf = mint_csrf()
         payload = dict(data)
