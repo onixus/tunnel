@@ -23,6 +23,8 @@ CONTAINER = 'amnezia-awg'
 INTERFACE = 'awg0'
 SUBNET = ipaddress.ip_network('10.8.1.0/24')
 MTU = 1280
+# 15 с: два интервала внутри 30-секундного CGNAT; 25 с не переживает потерю одного keepalive.
+KEEPALIVE = 15
 MAX_PEERS = 250
 # Selected exit and the sing-box router mirroring the Hysteria exceptions; root-only, holds upstream credentials.
 ROUTING = HOME / 'routing.json'
@@ -123,7 +125,7 @@ def render_client(state, peer, host):
                       'PrivateKey = ' + peer['private_key'], f'MTU = {MTU}'] + shared_lines(state) +
                      ['', '[Peer]', 'PublicKey = ' + state['public_key'], 'PresharedKey = ' + peer['psk'],
                       'AllowedIPs = 0.0.0.0/0, ::/0', f'Endpoint = {host}:{state["port"]}',
-                      'PersistentKeepalive = 25']) + '\n'
+                      f'PersistentKeepalive = {KEEPALIVE}']) + '\n'
 
 
 def running():

@@ -650,6 +650,8 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result['port'],4443)
         self.assertTrue(result['reexport'])
         self.assertNotIn('current-secret',json.dumps(result))
+        self.assertIn('maxIdleTimeout: 90s',written[0])
+        self.assertIn('udpIdleTimeout: 120s',written[0])
         self.assertIn(':4443',written[0])
         self.assertTrue(any(path.suffix=='.yaml' for path in root.iterdir()))
         with self.assertRaises(agent.Rejected):agent.apply_hysteria_core({'port':80,'obfs':False,'obfs_password':''})

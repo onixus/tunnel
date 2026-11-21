@@ -38,6 +38,10 @@ ROOT_KEY = Path('/opt/vpn-console/root.pub')
 SOCKET = '/run/vpn-console/agent.sock'
 LOCK = threading.Lock()
 ORIGIN = os.environ.get('CONSOLE_PUBLIC_ORIGIN', 'https://onixus-rf.duckdns.org').rstrip('/')
+# 90s is inside the 4s–120s validator; 120s is the boundary some builds reject.
+QUIC_IDLE = '90s'
+QUIC_KEEPALIVE = '4s'
+UDP_IDLE = '120s'
 
 class Rejected(Exception):
     pass
@@ -86,6 +90,68 @@ def hysteria_core_snapshot():
             'obfs':config.get('obfs',{}).get('type')=='salamander',
             'hop':(hop[0]['value'] if hop else '') or ''}
 
+def ensure_hysteria_hold(config):
+    """Pin QUIC idle and UDP idle. Other quic keys and the rest of the config stay."""
+    if not isinstance(config, dict): raise Rejected('Конфигурация Hysteria повреждена')
+    quic=config.get('quic')
+    if not isinstance(quic, dict):
+        quic={}; config['quic']=quic
+    quic['maxIdleTimeout']=QUIC_IDLE
+    config['udpIdleTimeout']=UDP_IDLE
+    return config
+
+def hysteria_hold_needed(config):
+    if not isinstance(config, dict): return True
+    quic=config.get('quic')
+    idle=quic.get('maxIdleTimeout') if isinstance(quic, dict) else None
+    return idle!=QUIC_IDLE or config.get('udpIdleTimeout')!=UDP_IDLE
+
+def reconcile_hysteria_hold():
+    """Best-effort pin on agent start. Never raises and never logs secrets."""
+    try:
+        if not HUI_DB.is_file(): return
+        try: config=hui_config()
+        except Exception: return
+        if not hysteria_hold_needed(config): return
+        try: switch=module_switch()
+        except Exception: return
+        try: lock_file=HYSTERIA_LOCK.open('a')
+        except Exception: return
+        with lock_file:
+            try: fcntl.flock(lock_file, fcntl.LOCK_EX)
+            except Exception: return
+            try:
+                old=switch.get_config(); current=yaml.safe_load(old)
+            except Exception: return
+            if not hysteria_hold_needed(current) or not isinstance(current, dict): return
+            ensure_hysteria_hold(current)
+            updated=yaml.safe_dump(current, sort_keys=False)
+            if yaml.safe_load(updated)!=current: return
+            try:
+                BACKUPS.mkdir(mode=0o700, exist_ok=True)
+                backup=BACKUPS/(time.strftime('%Y%m%d-%H%M%S')+'-hysteria-hold-'+secrets.token_hex(4)+'.yaml')
+                backup.write_text(old); backup.chmod(0o600)
+            except Exception: return
+            active=False
+            try: active=run(['systemctl','is-active','h-ui'])=='active'
+            except Exception: active=False
+            written=False
+            try:
+                switch.write_config(updated); written=True
+                if active:
+                    run(['systemctl','restart','h-ui'])
+                    if run(['systemctl','is-active','h-ui'])!='active':
+                        raise Rejected('Hysteria не запустилась')
+            except Exception:
+                if written:
+                    try: switch.write_config(old)
+                    except Exception: pass
+                    if active:
+                        try: run(['systemctl','start','h-ui'])
+                        except Exception: pass
+    except Exception:
+        return
+
 def apply_hysteria_core(data):
     """Change listen port and salamander masking. The current password is never returned."""
     port=data.get('port'); enabled=data.get('obfs'); password=data.get('obfs_password','')
@@ -103,6 +169,7 @@ def apply_hysteria_core(data):
         if password: config['obfs']={'type':'salamander','salamander':{'password':password}}
         elif not current: raise Rejected('Для включения маскировки нужен пароль')
     else: config.pop('obfs',None)
+    ensure_hysteria_hold(config)
     updated=yaml.safe_dump(config,sort_keys=False)
     if yaml.safe_load(updated)!=config: raise Rejected('Конфигурация Hysteria не сохраняется без искажений')
     changed=previous!=str(port) or bool(password) or (not enabled and bool(current))
@@ -132,7 +199,10 @@ def apply_hysteria_core(data):
     return {'message':message,'port':port,'obfs':enabled,'reexport':changed}
 
 def hysteria_share(account):
-    """R-TrustTunnel reads a port set in the address; YAML carries hopInterval."""
+    """R-TrustTunnel reads a port set in the address; YAML carries hopInterval.
+
+    YAML несёт QUIC idle/keepalive, URI их не передаёт; клиенту по одной ссылке нужен повторный импорт YAML либо клиент со своим keepalive.
+    """
     host=urllib.parse.urlsplit(ORIGIN).hostname
     config=hui_config()
     rows=read_db('SELECT value FROM config WHERE key=?', ('HYSTERIA2_CONFIG_PORT_HOPPING',))
@@ -155,6 +225,7 @@ def hysteria_share(account):
     lines=['server: '+host+':'+ports,'auth: '+account['con_pass'],'tls:','  sni: '+host]
     if obfs:
         lines+=['obfs:','  type: salamander','  salamander:','    password: '+obfs]
+    lines+=['quic:','  maxIdleTimeout: '+QUIC_IDLE,'  keepAlivePeriod: '+QUIC_KEEPALIVE,'udpIdleTimeout: '+UDP_IDLE]
     if parts:
         lines+=['transport:','  udp:','    hopInterval: 15s']
     return {'content':link,'yaml':'\n'.join(lines)+'\n'}
@@ -583,6 +654,7 @@ class Handler(socketserver.StreamRequestHandler):
 
 if __name__=='__main__':
     os.umask(0o077)
+    reconcile_hysteria_hold()
     Path(SOCKET).parent.mkdir(mode=0o750,exist_ok=True)
     Path(SOCKET).unlink(missing_ok=True)
     with socketserver.ThreadingUnixStreamServer(SOCKET,Handler) as server:

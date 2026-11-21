@@ -60,7 +60,8 @@ max_streams_bidi = 4096
 max_streams_uni = 4096
 max_connection_window = 25165824
 max_stream_window = 16777216
-disable_active_migration = true
+# Active migration keeps an authenticated session across a brief UDP path change (Wi-Fi↔LTE, CGNAT rebind, new source port/IP).
+disable_active_migration = false
 enable_early_data = true
 message_queue_capacity = 4096
 """

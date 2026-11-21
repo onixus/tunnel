@@ -876,11 +876,14 @@ def test_cdn_users_links_and_server_config(host):
     alice, bob = state['users']
     assert link.startswith(f'vless://{alice["uuid"]}@104.16.0.1:443?')
     assert 'sni=cdn.example.com' in link and 'host=cdn.example.com' in link and 'type=ws' in link and '#CDN-alice' in link
+    assert 'keepalive' not in link
     cdn.dispatch('cdn.block', {'id': 2})
     server = json.loads((cdn.RUNTIME / 'config.json').read_text())
     inbound = server['inbounds'][0]
     assert [c['id'] for c in inbound['settings']['clients']] == [alice['uuid']]
     assert inbound['port'] == 2053 and inbound['streamSettings']['security'] == 'tls'
+    assert inbound['streamSettings']['sockopt'] == {'tcpKeepAliveIdle': 15, 'tcpKeepAliveInterval': 5}
+    assert 'streamSettings' not in next(i for i in server['inbounds'] if i['tag'] == 'probe')
     assert '/etc/letsencrypt/live/origin.example.invalid/' in inbound['streamSettings']['tlsSettings']['certificates'][0]['keyFile']
     assert '10.0.0.0/8' in server['routing']['rules'][0]['ip']
     with pytest.raises(PolicyError, match='заблокирован'):

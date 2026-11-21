@@ -208,8 +208,11 @@ def load_routing():
 def render_server(state, routing=None):
     s = state['settings']
     routing = load_routing() if routing is None else routing
+    # Hop-by-hop TCP keepalive on the origin socket only: a short silence behind NAT/CDN
+    # must not look like a dead session. It does not change the vless:// link or xhttp mode.
     stream = {'network': s['transport'], 'security': 'none',
-              ('wsSettings' if s['transport'] == 'ws' else 'xhttpSettings'): {'path': s['path']}}
+              ('wsSettings' if s['transport'] == 'ws' else 'xhttpSettings'): {'path': s['path']},
+              'sockopt': {'tcpKeepAliveIdle': 15, 'tcpKeepAliveInterval': 5}}
     if s['origin_tls']:
         live = f'{LETSENCRYPT}/live/{state["origin_host"]}/'
         stream.update(security='tls', tlsSettings={'minVersion': '1.2', 'certificates': [

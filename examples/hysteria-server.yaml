@@ -29,6 +29,9 @@ auth:
     url: http://127.0.0.1:8081/hui/hysteria2/auth
   type: http
 listen: :443
+quic:
+  maxIdleTimeout: 90s
+udpIdleTimeout: 120s
 obfs:
   salamander:
     password: REPLACE_LOCALLY_OBFS_PASSWORD
