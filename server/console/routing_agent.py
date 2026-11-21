@@ -96,6 +96,8 @@ class Handler(socketserver.StreamRequestHandler):
 
 def main():
     os.umask(0o077)
+    # Production starts this module, not agent.py, so the QUIC hold must run here.
+    agent.reconcile_hysteria_hold()
     if service_routes.PENDING.exists():
         # Recover even if the agent died between journalling and arming the timer.
         try:
