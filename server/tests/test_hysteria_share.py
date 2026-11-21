@@ -18,8 +18,13 @@ def test_hysteria_share_puts_port_set_in_the_address(monkeypatch):
     assert ':443,20000-40000' in shared['content']
     assert 'mport' not in shared['content']
     assert 'obfs-password=A%2Bb%26c' in shared['content']
+    assert 'maxIdleTimeout' not in shared['content']
+    assert 'keepAlivePeriod' not in shared['content']
     assert shared['yaml'].startswith('server: vpn.example.invalid:443,20000-40000\n')
     assert 'hopInterval: 15s' in shared['yaml']
+    assert 'maxIdleTimeout: 90s' in shared['yaml']
+    assert 'keepAlivePeriod: 4s' in shared['yaml']
+    assert 'udpIdleTimeout: 120s' in shared['yaml']
 
 
 def test_hysteria_share_uses_the_configured_listen_port(monkeypatch):
@@ -37,7 +42,12 @@ def test_hysteria_share_without_hopping_stays_on_one_port(monkeypatch):
     monkeypatch.setattr(agent, 'read_db', lambda *args: [{'value': ''}])
     shared = agent.hysteria_share({'con_pass': 'fixture-secret', 'username': 'user'})
     assert '@vpn.example.invalid:443/?' in shared['content']
+    assert 'maxIdleTimeout' not in shared['content']
+    assert 'keepAlivePeriod' not in shared['content']
     assert 'hopInterval' not in shared['yaml']
+    assert 'maxIdleTimeout: 90s' in shared['yaml']
+    assert 'keepAlivePeriod: 4s' in shared['yaml']
+    assert 'udpIdleTimeout: 120s' in shared['yaml']
 
 
 def test_hysteria_qr_encodes_the_port_set(monkeypatch):
@@ -75,3 +85,26 @@ def test_hysteria_qr_encodes_the_port_set(monkeypatch):
     assert rendered['qr_error'] is None
     assert captured == [shared['content'].encode()]
     assert b':443,20000-40000' in captured[0]
+
+
+def test_hysteria_hold_needed_and_ensure_keep_neighbor_quic_keys():
+    pinned = {
+        'quic': {'maxIdleTimeout': '90s', 'disablePathMTUDiscovery': True},
+        'udpIdleTimeout': '120s',
+        'listen': ':443',
+    }
+    assert agent.hysteria_hold_needed(pinned) is False
+    assert agent.hysteria_hold_needed({}) is True
+    config = {'listen': ':443', 'quic': {'disablePathMTUDiscovery': True}}
+    agent.ensure_hysteria_hold(config)
+    assert config['quic']['disablePathMTUDiscovery'] is True
+    assert config['quic']['maxIdleTimeout'] == '90s'
+    assert config['udpIdleTimeout'] == '120s'
+    assert config['listen'] == ':443'
+    try:
+        agent.ensure_hysteria_hold(None)
+    except agent.Rejected:
+        rejected = True
+    else:
+        rejected = False
+    assert rejected

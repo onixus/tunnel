@@ -37,6 +37,8 @@ def build_client_toml(info: dict, killswitch: bool = False) -> str:
         custom_sni=_q(custom_sni),
         username=_q(info["username"]),
         password=_q(info["password"]),
+        # HTTP/3 переживает смену UDP-пути, только если сервер не запретил миграцию.
+        # Интервал keepalive задаёт клиент; в официальном TOML такого поля нет.
         upstream=_q(_upstream_protocol(info.get("protocol", "QUIC"))),
     )
 

@@ -12,6 +12,11 @@
       "password": "REPLACE_LOCALLY_OBFS_PASSWORD"
     }
   },
+  "quic": {
+    "maxIdleTimeout": "90s",
+    "keepAlivePeriod": "4s"
+  },
+  "udpIdleTimeout": "120s",
   "socks5": {
     "listen": "127.0.0.1:18080"
   }

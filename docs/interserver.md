@@ -12,7 +12,7 @@ umask 077
 wg genkey | tee /etc/wireguard/wg-private.key | wg pubkey > /etc/wireguard/wg-private.pub
 ```
 
-Приватный ключ остаётся на своём узле. Передайте только публичный ключ партнёру. Заполните [шаблон входного узла](../examples/wireguard/ingress.conf) и [шаблон выходного узла](../examples/wireguard/exit.conf); установите как `/etc/wireguard/wg-private.conf`, права `0600`, владелец root.
+Приватный ключ остаётся на своём узле. Передайте только публичный ключ партнёру. Заполните [шаблон входного узла](../examples/wireguard/ingress.conf) и [шаблон выходного узла](../examples/wireguard/exit.conf); установите как `/etc/wireguard/wg-private.conf`, права `0600`, владелец root. В шаблонах `PersistentKeepalive = 15`: оба пира имеют Endpoint, и 15 с укладывает два keepalive в типичное 30-секундное окно NAT. Уже установленный `wg-private.conf` сам не обновится — интервал нужно перенести вручную и перезапустить `wg-quick@wg-private`.
 
 До старта разрешите UDP 51830 только от публичного адреса партнёра. На входном сервере с UFW:
 
