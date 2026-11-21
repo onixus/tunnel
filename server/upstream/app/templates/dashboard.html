@@ -69,6 +69,7 @@
     Откройте в приложении «Подключить по QR» и наведите камеру на код.
   </p>
   <form method="post" action="/devices/enroll-qr" style="margin-bottom:14px;">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
     <button type="submit" class="btn primary">{{ icon('plus', 16) }} <span>Подключить устройство по QR</span></button>
   </form>
 
@@ -81,6 +82,7 @@
     <code>{% if d.last_seen_at %}активно {{ d.last_seen_at }}{% else %}ещё не выходило на связь{% endif %}</code>
     <form method="post" action="/devices/{{ d.id }}/revoke"
           onsubmit="return confirm('Отозвать устройство «{{ d.name }}»? Его VPN перестанет работать.');">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <button type="submit" class="ghost">Отозвать</button>
     </form>
   </div>
@@ -92,6 +94,7 @@
 <div class="card">
   <h2>{{ icon('plus') }} Новый конфиг</h2>
   <form method="post" action="/configs" class="row">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
     <div class="field grow"><label>Метка устройства</label><input name="label" placeholder="Телефон, ноутбук…"></div>
     <button type="submit">{{ icon('plus') }} Создать конфиг</button>
   </form>
@@ -107,6 +110,7 @@
       <div style="display:flex;gap:8px;">
         <a class="btn ghost sm" href="/config/{{ c.id }}/download?fmt=toml">{{ icon('download', 16) }} Скачать TOML</a>
         <form method="post" action="/configs/{{ c.id }}/delete" onsubmit="return confirm('Отозвать конфиг? Подключение перестанет работать.');">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
           <button class="danger sm" type="submit">{{ icon('trash', 16) }} Отозвать</button>
         </form>
       </div>

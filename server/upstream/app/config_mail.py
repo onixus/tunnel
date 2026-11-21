@@ -49,6 +49,8 @@ def send(user_id, config_id=0):
         attachments = []
         for cfg in configs:
             info = conninfo.connection_info(cfg, settings)
+            if not info['deeplink']:
+                raise RuntimeError('deeplink unavailable')
             lines += [str(info['label']), info['deeplink'], '']
             attachments.append((f'trusttunnel-{cfg["id"]}.toml', build_client_toml(info)))
         mailer.send_mail(email, 'Ваши конфигурации TrustTunnel', '\n'.join(lines), attachments=attachments)

@@ -28,6 +28,12 @@ ANDROID_APK_V7 = os.environ.get("ANDROID_APK_V7", "/data/downloads/TrustTunnel-a
 _sha_cache: dict[tuple, str] = {}
 
 
+def _https(request: Request) -> bool:
+    if request.url.scheme == 'https':
+        return True
+    return request.headers.get('x-forwarded-proto', '').split(',', 1)[0].strip() == 'https'
+
+
 def _sha256(path: str) -> str | None:
     try:
         st = os.stat(path)
@@ -262,7 +268,7 @@ def login(request: Request, email: str = Form(), password: str = Form(), next: s
     resp = RedirectResponse(_safe_next(next), 302)
     resp.set_cookie(
         webauth.USER_COOKIE, security.create_session_token(str(user["id"]), "user"),
-        httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30,
+        httponly=True, samesite="lax", secure=_https(request), max_age=60 * 60 * 24 * 30,
     )
     return resp
 
@@ -282,7 +288,7 @@ def register_form(request: Request):
         request, "register.html",
         {"brand": _brand(), "error": None, "captcha_a": a, "captcha_b": b},
     )
-    resp.set_cookie("captcha_hash", h, max_age=300, httponly=True, samesite="lax")
+    resp.set_cookie("captcha_hash", h, max_age=300, httponly=True, samesite="lax", secure=_https(request))
     return resp
 
 
@@ -307,7 +313,7 @@ def register(request: Request, email: str = Form(), password: str = Form(), capt
             {"brand": _brand(), "error": "Неверный ответ на проверочный вопрос", "captcha_a": a, "captcha_b": b},
             status_code=400,
         )
-        resp.set_cookie("captcha_hash", new_hash, max_age=300, httponly=True, samesite="lax")
+        resp.set_cookie("captcha_hash", new_hash, max_age=300, httponly=True, samesite="lax", secure=_https(request))
         return resp
 
     email = email.strip().lower()
@@ -321,7 +327,7 @@ def register(request: Request, email: str = Form(), password: str = Form(), capt
             {"brand": _brand(), "error": "Пароль слишком короткий (мин. 6)", "captcha_a": a, "captcha_b": b},
             status_code=400,
         )
-        resp.set_cookie("captcha_hash", new_hash, max_age=300, httponly=True, samesite="lax")
+        resp.set_cookie("captcha_hash", new_hash, max_age=300, httponly=True, samesite="lax", secure=_https(request))
         return resp
 
     if db.get_user_by_email(email):
@@ -334,7 +340,7 @@ def register(request: Request, email: str = Form(), password: str = Form(), capt
             {"brand": _brand(), "error": "Такой e-mail уже зарегистрирован", "captcha_a": a, "captcha_b": b},
             status_code=400,
         )
-        resp.set_cookie("captcha_hash", new_hash, max_age=300, httponly=True, samesite="lax")
+        resp.set_cookie("captcha_hash", new_hash, max_age=300, httponly=True, samesite="lax", secure=_https(request))
         return resp
 
     db.create_user(email, security.hash_password(password), status="pending")
@@ -355,7 +361,7 @@ def forgot_form(request: Request):
     return templates.TemplateResponse(request, "forgot.html", {"brand": _brand(), "sent": False})
 
 
-@router.post("/forgot")
+@router.post("/forgot/submit")
 def forgot(request: Request, email: str = Form()):
     email = email.strip().lower()
     user = db.get_user_by_email(email)

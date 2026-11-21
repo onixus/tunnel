@@ -12,6 +12,7 @@
 <div class="card">
   {% if error %}<div class="alert warn">{{ icon('zap') }} {{ error }}</div>{% endif %}
   <form method="post" action="/admin/login">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
     <div class="field" style="margin-bottom:12px;">
       <label>Логин</label>
       <input name="email" type="text" required autofocus placeholder="Логин или e-mail администратора">

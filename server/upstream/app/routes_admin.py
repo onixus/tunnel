@@ -8,6 +8,12 @@ from .templating import templates
 router = APIRouter(prefix="/admin")
 
 
+def _https(request: Request) -> bool:
+    if request.url.scheme == 'https':
+        return True
+    return request.headers.get('x-forwarded-proto', '').split(',', 1)[0].strip() == 'https'
+
+
 def _brand() -> str:
     return db.get_setting("brand_name", "TrustTunnel")
 
@@ -42,7 +48,7 @@ def login(request: Request, email: str = Form(), password: str = Form()):
     resp = RedirectResponse("/admin/dashboard", 302)
     resp.set_cookie(
         webauth.ADMIN_COOKIE, security.create_session_token(str(admin["id"]), "admin"),
-        httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30,
+        httponly=True, samesite="lax", secure=_https(request), max_age=60 * 60 * 24 * 30,
     )
     return resp
 

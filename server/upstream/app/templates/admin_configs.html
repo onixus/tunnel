@@ -19,6 +19,7 @@
           <td class="mut">{{ c['created_at'][:10] }}</td>
           <td style="text-align:right;">
             <form method="post" action="/admin/configs/{{ c['id'] }}/delete" onsubmit="return confirm('Удалить конфиг?')">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
               <button class="danger sm" type="submit">{{ icon('trash', 16) }}</button>
             </form>
           </td>
