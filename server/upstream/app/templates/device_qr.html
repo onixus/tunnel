@@ -41,6 +41,7 @@
 
   <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:18px;">
     <form method="post" action="/devices/enroll-qr">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <button type="submit" class="btn ghost">Новый код</button>
     </form>
     <a href="/" class="btn ghost">Готово</a>

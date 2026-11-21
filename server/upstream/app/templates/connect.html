@@ -20,6 +20,7 @@
       Устройство можно отозвать в кабинете.
     </p>
     <form method="post" action="/connect/approve" style="margin-top:16px;">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
       <input type="hidden" name="state" value="{{ state }}">
       <input type="hidden" name="name" value="{{ name }}">

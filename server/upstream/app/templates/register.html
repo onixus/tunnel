@@ -13,6 +13,7 @@
   <div class="card">
     {% if error %}<div class="alert warn">{{ icon('zap') }} {{ error }}</div>{% endif %}
     <form method="post" action="/register">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <div class="field" style="margin-bottom:12px;">
         <label>Email</label>
         <input name="email" type="email" required autofocus placeholder="you@example.com">

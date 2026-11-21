@@ -17,7 +17,8 @@
     </div>
     <p style="text-align:center;margin:0;"><a href="/login">← Вернуться ко входу</a></p>
     {% else %}
-    <form method="post" action="/forgot">
+    <form method="post" action="/forgot/submit">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <div class="field" style="margin-bottom:18px;">
         <label>Email вашего аккаунта</label>
         <input name="email" type="email" required autofocus placeholder="you@example.com">

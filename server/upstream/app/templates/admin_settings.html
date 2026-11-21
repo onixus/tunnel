@@ -6,6 +6,7 @@
 {% if err %}<div class="alert warn">{{ icon('zap') }} {{ err }}</div>{% endif %}
 
 <form method="post" action="/admin/settings">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
   <div class="card">
     <h2>{{ icon('sliders') }} Общее</h2>
     <div class="row">

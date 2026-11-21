@@ -54,6 +54,7 @@
     </div>
     <p class="modal-sub">Новый пользователь сразу сможет войти в свой кабинет.</p>
     <form method="post" action="/admin/users/create" style="display:flex; flex-direction:column; gap:16px;">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <div class="field"><label>Email (логин)</label>
         <input name="email" type="email" required placeholder="user@example.com"></div>
       <div class="field"><label>Пароль (мин. 6 символов)</label>

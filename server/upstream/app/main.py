@@ -45,3 +45,7 @@ from .routes_device import router as device_router   # noqa: E402
 app.include_router(admin_router)   # /admin*
 app.include_router(device_router)  # /connect + /portal/v1/device/* (конкретные пути)
 app.include_router(client_router)  # /* (регистрируем последним — самый общий префикс)
+
+from .guards import PortalGuards  # noqa: E402
+
+app.add_middleware(PortalGuards)

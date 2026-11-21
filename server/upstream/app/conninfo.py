@@ -1,6 +1,7 @@
 """Сборка параметров подключения, которые видит клиент (и файл на скачивание)."""
 import json
 import sqlite3
+import subprocess
 
 from . import config, endpoint
 from .deeplink import build_deeplink
@@ -19,7 +20,7 @@ def connection_info(cfg: sqlite3.Row, settings: dict[str, str]) -> dict:
         "username": cfg["tt_username"],
         "password": cfg["tt_password"],
         "protocol": settings.get("conn_protocol", "QUIC"),
-        "deeplink": build_deeplink(cfg["tt_username"], cfg["tt_password"], address or domain, int(port or "8443")),
+        "deeplink": _deeplink(cfg["tt_username"], cfg["tt_password"], address or domain, port),
         # какие поля показывать
         "show_address": settings.get("show_address") == "1",
         "show_port": settings.get("show_port") == "1",
@@ -30,6 +31,14 @@ def connection_info(cfg: sqlite3.Row, settings: dict[str, str]) -> dict:
         "show_protocol": settings.get("show_protocol") == "1",
     }
     return info
+
+
+def _deeplink(username: str, password: str, host: str, port: str) -> str:
+    """A missing exporter must not turn the cabinet into a 500."""
+    try:
+        return build_deeplink(username, password, host, int(port or "8443"))
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
+        return ""
 
 
 def as_download_text(info: dict, brand: str) -> str:

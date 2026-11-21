@@ -27,10 +27,12 @@
   <div class="card grow" style="min-width:280px;">
     <h2>{{ icon('user') }} Данные</h2>
     <form method="post" action="/admin/users/{{ user['id'] }}/email" class="row">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <div class="field grow"><label>Email</label><input type="email" name="email" value="{{ user['email'] }}" required></div>
       <button type="submit" class="ghost">Сохранить</button>
     </form>
     <form method="post" action="/admin/users/{{ user['id'] }}/password" class="row" style="margin-top:12px;">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <div class="field grow"><label>Новый пароль</label><input type="password" name="password" minlength="6" required placeholder="мин. 6"></div>
       <button type="submit" class="ghost">Сбросить</button>
     </form>
@@ -40,22 +42,26 @@
     <h2>{{ icon('sliders') }} Действия</h2>
     {% if user['status'] == 'pending' %}
     <form method="post" action="/admin/users/{{ user['id'] }}/status">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <input type="hidden" name="status" value="active">
       <button type="submit" style="width:100%;">{{ icon('check') }} Одобрить и активировать</button>
     </form>
     {% elif user['status'] == 'active' %}
     <form method="post" action="/admin/users/{{ user['id'] }}/status">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <input type="hidden" name="status" value="blocked">
       <button type="submit" class="ghost" style="width:100%;">Заблокировать (снять креды с VPN)</button>
     </form>
     {% else %}
     <form method="post" action="/admin/users/{{ user['id'] }}/status">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <input type="hidden" name="status" value="active">
       <button type="submit" style="width:100%;">Разблокировать</button>
     </form>
     {% endif %}
     <form method="post" action="/admin/users/{{ user['id'] }}/delete" style="margin-top:12px;"
           onsubmit="return confirm('Удалить пользователя и все его конфиги?')">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <button type="submit" class="danger" style="width:100%;">{{ icon('trash', 16) }} Удалить пользователя</button>
     </form>
   </div>
@@ -65,6 +71,7 @@
   <div class="cfg-head" style="margin-bottom:14px;">
     <h2 style="margin:0;">{{ icon('key') }} Конфиги ({{ configs|length }})</h2>
     <form method="post" action="/admin/users/{{ user['id'] }}/configs" class="row" style="align-items:end;">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <div class="field"><label>Метка</label><input name="label" placeholder="необязательно"></div>
       <button type="submit" class="sm">{{ icon('plus', 16) }} Добавить</button>
     </form>
@@ -72,6 +79,7 @@
   <p class="mut">Отправка на <b>{{ user['email'] }}</b>: TOML-файлы и ссылки импорта TrustTunnel.</p>
   {% if configs and mail_ready and user['status'] == 'active' %}
   <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:14px;" onsubmit="this.querySelector('button').disabled=true">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
     <input type="hidden" name="mail_token" value="{{ mail_token }}">
     <button class="primary" type="submit">{{ icon('mail', 16) }} Отправить все конфиги на email</button>
   </form>
@@ -82,11 +90,13 @@
     <div class="cfg-head" style="margin-bottom:10px;">
       <b>{{ c.label }}</b>
       <form method="post" action="/admin/configs/{{ c.id }}/delete" onsubmit="return confirm('Удалить конфиг?')">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
         <button class="danger sm" type="submit">{{ icon('trash', 16) }}</button>
       </form>
     </div>
     {% if mail_ready and user['status'] == 'active' %}
     <form method="post" action="/admin/users/{{ user['id'] }}/send-configs" style="margin-bottom:10px;" onsubmit="this.querySelector('button').disabled=true">
+      <input type="hidden" name="csrf" value="{{ request.state.csrf }}">
       <input type="hidden" name="mail_token" value="{{ mail_token }}">
       <input type="hidden" name="config_id" value="{{ c.id }}">
       <button class="sm" type="submit">{{ icon('mail', 16) }} Отправить на email</button>

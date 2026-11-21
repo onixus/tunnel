@@ -5,6 +5,9 @@ import http.client
 import json
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from app.guards import COOKIE as CSRF_COOKIE
+from app.guards import mint as mint_csrf
+
 from app import config, security, webauth
 
 
@@ -34,10 +37,14 @@ def bind(portal_url):
     def legacy(actor_id, path, data, timeout=30):
         # Fixed paths constructed from checked integer IDs, session never saved in jobs.
         cookie, _ = _admin_cookie(actor_id)
+        csrf = mint_csrf()
+        payload = dict(data)
+        payload['csrf'] = csrf
         client = _connection(timeout)
         try:
-            client.request('POST', '/admin/' + path, body=urlencode(data),
-                           headers={'Cookie': cookie, 'Content-Type': 'application/x-www-form-urlencoded'})
+            client.request('POST', '/admin/' + path, body=urlencode(payload),
+                           headers={'Cookie': cookie + '; ' + CSRF_COOKIE + '=' + csrf,
+                                    'Content-Type': 'application/x-www-form-urlencoded'})
             response = client.getresponse()
             destination = response.getheader('Location', '')
             response.read(1048576)
