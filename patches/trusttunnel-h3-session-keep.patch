@@ -13,7 +13,8 @@ index aeb4571..c1badde 100644
 +    if error.kind() == ErrorKind::NotConnected || error.kind() == ErrorKind::UnexpectedEof {
 +        return "channel_closed";
 +    }
-+    let Some(rest) = error.to_string().split("QUIC receive failure:").nth(1) else {
++    let text = error.to_string();
++    let Some(rest) = text.split("QUIC receive failure:").nth(1) else {
 +        return "other";
 +    };
 +    match rest
