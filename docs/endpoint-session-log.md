@@ -81,6 +81,6 @@ cargo test -p trusttunnel --lib --test sigterm
 cargo build --release --bin trusttunnel_endpoint
 ```
 
-Патч `trusttunnel-h3-session-keep.patch` накладывается только после журнала, не на чистый тег. Без него живая HTTP/3-сессия рвётся через 600 с без нового запроса, а keepalive закрывается кодом `0x42`. Закрытый канал задачи — это `NotConnected` или `UnexpectedEof`, не текст ошибки; в `CONNECTION_CLOSE` уходит фиксированная фраза, не `error.to_string()`. Официальные v1.1.0 и v1.3.1 этот баг содержат. Подробности для агентов: `AGENTS.md`.
+Патч `trusttunnel-h3-session-keep.patch` накладывается только после журнала, не на чистый тег. Без него живая HTTP/3-сессия рвётся, а keepalive закрывается кодом `0x42`. Патч оставляет соединение (`quic_session_kept`) и поднимает listen заново (`quic_session_restart`). Официальные v1.1.0 и v1.3.1 этот баг содержат. Подробности для агентов: `AGENTS.md`.
 
 Бинарь: `target/release/trusttunnel_endpoint`. Он подменяет официальный при сборке образа по [инструкции](trusttunnel-server.md#подготовить-исходники-и-образ); в [versions](versions.md) нужно записать SHA256 собственной сборки вместо официального архива. Логи смотреть `docker logs trusttunnel-web | grep -E 'Session (closed|timeouts)|Unauthenticated sessions|Shutdown'`.
