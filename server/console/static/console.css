@@ -493,33 +493,43 @@ p {
 /* Tables */
 .table-wrap {
   overflow: auto;
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
+.container-table {
+  width: 100%;
+  max-width: 100%;
+}
 table {
   width: 100%;
+  max-width: 100%;
   border-collapse: collapse;
   font-size: 14px;
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
 }
 th {
   font-weight: 650;
   color: var(--muted);
   background: var(--surface-2);
-  padding: 11px 18px;
+  padding: 8px 12px;
   font-size: 11px;
+  line-height: 1.3;
   text-transform: uppercase;
-  letter-spacing: 0.7px;
+  letter-spacing: 0.4px;
   border-bottom: 1px solid var(--line);
+  white-space: nowrap;
 }
 td {
-  padding: 13px 18px;
+  padding: 6px 10px;
   border-top: 1px solid var(--line);
   vertical-align: middle;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 tbody tr:first-child td {
   border-top: 0;
@@ -533,12 +543,26 @@ td small {
   color: var(--muted);
   font-size: 12px;
 }
-td button {
+td:last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+td button,
+td .btn {
   font-size: 12px;
-  padding: 4px 9px;
-  margin: 2px 2px 2px 0;
+  padding: 3px 8px;
+  margin: 2px 0 2px 4px;
   background: transparent;
   border-color: var(--line-strong);
+  white-space: nowrap;
+}
+td .actions,
+.table-wrap .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  align-items: center;
 }
 td.wrap {
   white-space: normal;
@@ -741,6 +765,46 @@ footer {
   grid-template-columns: 1fr 1fr;
   gap: 22px;
 }
+.route-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+  gap: 18px;
+  align-items: start;
+}
+.route-group,
+.route-device {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.route-group .actions {
+  margin: 0;
+}
+.route-groups .route-group:first-child,
+.route-devices .route-device:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.route-group small,
+.route-device small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.route-device {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+}
+.route-device select,
+.route-device p {
+  grid-column: 2;
+}
+.route-device p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
 @media (max-width: 1100px) {
   aside {
     width: var(--sidebar-width);
@@ -765,32 +829,57 @@ footer {
   .stat {
     padding: 16px;
   }
-  .campaign-layout {
+  .campaign-layout,
+  .route-layout,
+  .route-device,
+  .route-group {
     grid-template-columns: 1fr;
+  }
+  .route-device select,
+  .route-device p {
+    grid-column: 1;
   }
 }
 @media (max-width: 720px) {
   aside {
     position: static;
-    width: auto;
+    width: 100%;
+    max-width: 100%;
     height: auto;
-    padding: 14px 16px;
+    padding: 12px;
+    overflow: hidden;
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
   .nav-label,
-  .sidebar-bottom {
+  .sidebar-bottom,
+  .brand small {
     display: none;
   }
   nav {
     display: flex;
-    overflow: auto;
-    margin-top: 12px;
+    flex-wrap: wrap;
+    overflow: visible;
+    margin-top: 10px;
     gap: 4px;
+    min-width: 0;
   }
   nav button {
-    white-space: nowrap;
-    padding: 7px 10px;
+    position: relative;
+    flex: 1 1 44px;
+    justify-content: center;
+    min-width: 44px;
+    padding: 8px;
+  }
+  nav button span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
   }
   .workspace {
     margin: 0;

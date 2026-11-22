@@ -487,20 +487,38 @@ function campaigns() {
     `<div class="note">Получатели добавляются через «Контакт» в разделе пользователей с явным согласием. Доставка каждого адресата фиксируется отдельно; после неоднозначного сбоя автоматического повтора нет.</div>`
   );
 }
+function personByAccount(source, userId) {
+  return (state.people || []).find((p) => p.accounts && p.accounts[source] === userId);
+}
+function contactName(c) {
+  const person = personByAccount(c.source, c.user_id);
+  if (person) return person.nick;
+  if (c.source === "trusttunnel") {
+    const user = (state.users || []).find((u) => u.id === c.user_id);
+    if (user?.email) return user.email.split("@")[0];
+  }
+  return c.source + " #" + c.user_id;
+}
 function telegram() {
   const t = state.telegram || {};
+  const seen = new Set();
+  const rows = (state.contacts || [])
+    .filter((c) => c.chat_id)
+    .filter((c) => {
+      const person = personByAccount(c.source, c.user_id);
+      const key = person ? "person:" + person.id : c.source + ":" + c.user_id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((c) => {
+      const person = personByAccount(c.source, c.user_id);
+      return `<tr><td>${esc(contactName(c))}${person?.email ? `<small>${esc(person.email)}</small>` : ""}</td><td>${c.chat_id}</td><td>${pill(c.consent ? "active" : "blocked", c.consent ? "Получено" : "Нет")}</td></tr>`;
+    });
   return (
     heading("Telegram", "Один приватный бот: управление владельцем и доставка конфигураций.") +
     `<div class="grid"><div class="card"><h2>Бот управления</h2><div class="service"><strong>Служба</strong>${pill(t.running ? "active" : "unknown", t.running ? "Работает" : "Не запущена")}</div><div class="service"><strong>Привязка</strong>${pill(t.configured ? "active" : "unknown", t.configured ? "@" + (t.username || "бот") : "Не привязан")}</div><div class="service"><strong>Владелец</strong><code>${esc(t.owner || "—")}</code></div><div class="note">Токен не читается обратно в браузер. Команды /status, /route и /restart принимает только владелец в личном чате. Это не второй бот и не замена рассылок.</div></div><div class="card"><h2>Привязать бота</h2><form id="telegram-form"><label class="field">Токен BotFather<input name="token" type="password" required autocomplete="off" spellcheck="false"></label><label class="field">Telegram ID владельца<input name="owner" inputmode="numeric" required></label><div class="actions"><button type="submit" class="primary">Привязать</button></div></form><p class="subtitle">Владелец узнаёт свой ID у бота командой /id. Получатели конфигураций по-прежнему задаются в карточке пользователя.</p></div></div><div class="card"><h2>Доставка пользователям</h2><p class="subtitle">ID получателя и согласие задаются в карточке человека. Сам бот только доставляет уже подтверждённую рассылку или конфигурацию.</p>${btn("Открыть рассылки →", "navigate", 'data-target="campaigns"')}</div><h2>Контакты Telegram</h2>` +
-    table(
-      ["Учётная запись", "Telegram ID", "Согласие"],
-      (state.contacts || [])
-        .filter((c) => c.chat_id)
-        .map(
-          (c) =>
-            `<tr><td>${esc(c.source)} #${c.user_id}</td><td>${c.chat_id}</td><td>${pill(c.consent ? "active" : "blocked", c.consent ? "Получено" : "Нет")}</td></tr>`,
-        ),
-    )
+    table(["Пользователь", "Telegram ID", "Согласие"], rows)
   );
 }
 function jobsTable(jobs) {
@@ -539,25 +557,27 @@ function devicesPage() {
       "Политика TUN настольных клиентов R-TrustTunnel на " + esc(hostName()) + ". Это не карта выходов Hysteria.",
     ) +
     `<p id="status" role="status" aria-live="polite"></p>
-     <div class="grid">
-       <section class="card"><h2>Группы</h2><div id="groups"></div></section>
-       <section class="card"><h2 id="editor-title">Новая группа</h2>
-         <form id="editor">
-           <label class="field">Название<input id="name" maxlength="80" required></label>
-           <label class="field">Сети через VPN, до 16 CIDR IPv4<textarea id="include" rows="3" required placeholder="0.0.0.0/0"></textarea></label>
-           <label class="field">Исключения, до 64 CIDR IPv4<textarea id="exclude" rows="3"></textarea></label>
-           <label class="check"><input id="exclude-lan" type="checkbox" checked> Исключить локальные сети</label>
-           <div class="actions"><button type="submit" class="primary">Сохранить</button><button id="cancel" type="button">Сбросить</button></div>
-         </form>
-       </section>
-     </div>
-     <div class="grid">
-       <section class="card"><h2>Привязать устройство</h2>
-         <label class="field">Пользователь<select id="user"></select></label>
-         <div class="actions"><button id="enroll" type="button">Создать одноразовый код</button></div>
-         <output id="code"></output>
-       </section>
-       <section class="card"><h2>Устройства</h2><div class="actions"><button id="refresh-routes" type="button" class="subtle">Обновить</button></div><div id="devices"></div></section>
+     <div class="route-layout">
+       <div class="stack">
+         <section class="card"><h2>Группы</h2><div id="groups" class="route-groups"></div></section>
+         <section class="card"><h2>Устройства</h2><div class="actions"><button id="refresh-routes" type="button" class="subtle">Обновить</button></div><div id="devices" class="route-devices"></div></section>
+       </div>
+       <div class="stack">
+         <section class="card"><h2 id="editor-title">Новая группа</h2>
+           <form id="editor">
+             <label class="field">Название<input id="name" maxlength="80" required></label>
+             <label class="field">Сети через VPN, до 16 CIDR IPv4<textarea id="include" rows="4" required placeholder="0.0.0.0/0"></textarea></label>
+             <label class="field">Исключения, до 64 CIDR IPv4<textarea id="exclude" rows="4"></textarea></label>
+             <label class="check"><input id="exclude-lan" type="checkbox" checked> Исключить локальные сети</label>
+             <div class="actions"><button type="submit" class="primary">Сохранить</button><button id="cancel" type="button">Сбросить</button></div>
+           </form>
+         </section>
+         <section class="card"><h2>Привязать устройство</h2>
+           <label class="field">Пользователь<select id="user"></select></label>
+           <div class="actions"><button id="enroll" type="button">Создать одноразовый код</button></div>
+           <output id="code"></output>
+         </section>
+       </div>
      </div>`
   );
 }
