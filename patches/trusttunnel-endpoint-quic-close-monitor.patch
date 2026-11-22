@@ -1,0 +1,67 @@
+diff --git a/lib/src/quic_multiplexer.rs b/lib/src/quic_multiplexer.rs
+index 5181900..5272842 100644
+--- a/lib/src/quic_multiplexer.rs
++++ b/lib/src/quic_multiplexer.rs
+@@ -26,6 +26,36 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
+ 
+ const QUIC_CONNECTION_CLOSE_CODE: u64 = 0x42;
+ 
++fn quic_close_class(error: &io::Error) -> &'static str {
++    let text = error.to_string();
++    if text.contains("Channel closed") || text.contains("channel closed") {
++        return "channel_closed";
++    }
++    let Some(rest) = text.split("QUIC receive failure:").nth(1) else {
++        return "other";
++    };
++    match rest
++        .trim()
++        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
++        .next()
++    {
++        Some("InvalidPacket") => "invalid_packet",
++        Some("InvalidFrame") => "invalid_frame",
++        Some("CryptoFail") => "crypto_fail",
++        Some("FlowControl") => "flow_control",
++        Some("FinalSize") => "final_size",
++        Some("KeyUpdate") => "key_update",
++        Some("Done") => "done",
++        Some("BufferTooShort") => "buffer_too_short",
++        Some("InvalidState") => "invalid_state",
++        Some("InvalidStreamState") => "invalid_stream_state",
++        Some("TlsFail") => "tls_fail",
++        Some(_) => "quic_recv_other",
++        None => "quic_recv_other",
++    }
++}
++
++
+ type QuicConnection = quiche::Connection;
+ 
+ pub(crate) struct QuicMultiplexer {
+@@ -277,6 +307,12 @@ impl QuicMultiplexer {
+ 
+             let mut quic_conn = entry.conn.lock().unwrap();
+             if let Err(e) = result {
++                log_id!(
++                    info,
++                    self.id,
++                    "quic_processing_close code=0x42 class={}",
++                    quic_close_class(&e)
++                );
+                 let _ =
+                     quic_conn.close(false, QUIC_CONNECTION_CLOSE_CODE, e.to_string().as_bytes());
+             }
+@@ -376,6 +412,12 @@ impl QuicMultiplexer {
+                 header,
+                 err
+             );
++            log_id!(
++                info,
++                self.id,
++                "quic_processing_close code=0x42 class={}",
++                quic_close_class(&err)
++            );
+             let _ = quic_conn.close(
+                 false,
+                 QUIC_CONNECTION_CLOSE_CODE,

@@ -75,8 +75,13 @@ git clone --branch v1.1.0 https://github.com/TrustTunnel/TrustTunnel.git
 cd TrustTunnel
 git apply --check /абсолютный/путь/к/patches/trusttunnel-endpoint-session-close-log.patch
 git apply /абсолютный/путь/к/patches/trusttunnel-endpoint-session-close-log.patch
+git apply --check /абсолютный/путь/к/patches/trusttunnel-h3-session-keep.patch
+git apply /абсолютный/путь/к/patches/trusttunnel-h3-session-keep.patch
 cargo test -p trusttunnel --lib --test sigterm
 cargo build --release --bin trusttunnel_endpoint
 ```
+
+
+Патч `trusttunnel-h3-session-keep.patch` обязателен при каждом обновлении endpoint. Без него живая HTTP/3-сессия рвётся через 600 с без нового запроса, а keepalive закрывается кодом `0x42`. Официальные v1.1.0 и v1.3.1 этот баг содержат. Подробности для агентов: `AGENTS.md`.
 
 Бинарь: `target/release/trusttunnel_endpoint`. Он подменяет официальный при сборке образа по [инструкции](trusttunnel-server.md#подготовить-исходники-и-образ); в [versions](versions.md) нужно записать SHA256 собственной сборки вместо официального архива. Логи смотреть `docker logs trusttunnel-web | grep -E 'Session (closed|timeouts)|Unauthenticated sessions|Shutdown'`.

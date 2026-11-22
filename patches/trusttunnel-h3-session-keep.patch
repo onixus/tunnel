@@ -1,0 +1,158 @@
+diff --git a/lib/src/quic_multiplexer.rs b/lib/src/quic_multiplexer.rs
+index 5181900..d8e7ce2 100644
+--- a/lib/src/quic_multiplexer.rs
++++ b/lib/src/quic_multiplexer.rs
+@@ -26,6 +26,36 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
+ 
+ const QUIC_CONNECTION_CLOSE_CODE: u64 = 0x42;
+ 
++fn quic_close_class(error: &io::Error) -> &'static str {
++    let text = error.to_string();
++    if text.contains("Channel closed") || text.contains("channel closed") {
++        return "channel_closed";
++    }
++    let Some(rest) = text.split("QUIC receive failure:").nth(1) else {
++        return "other";
++    };
++    match rest
++        .trim()
++        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
++        .next()
++    {
++        Some("InvalidPacket") => "invalid_packet",
++        Some("InvalidFrame") => "invalid_frame",
++        Some("CryptoFail") => "crypto_fail",
++        Some("FlowControl") => "flow_control",
++        Some("FinalSize") => "final_size",
++        Some("KeyUpdate") => "key_update",
++        Some("Done") => "done",
++        Some("BufferTooShort") => "buffer_too_short",
++        Some("InvalidState") => "invalid_state",
++        Some("InvalidStreamState") => "invalid_stream_state",
++        Some("TlsFail") => "tls_fail",
++        Some(_) => "quic_recv_other",
++        None => "quic_recv_other",
++    }
++}
++
++
+ type QuicConnection = quiche::Connection;
+ 
+ pub(crate) struct QuicMultiplexer {
+@@ -277,8 +307,25 @@ impl QuicMultiplexer {
+ 
+             let mut quic_conn = entry.conn.lock().unwrap();
+             if let Err(e) = result {
+-                let _ =
+-                    quic_conn.close(false, QUIC_CONNECTION_CLOSE_CODE, e.to_string().as_bytes());
++                if quic_close_class(&e) == "channel_closed" {
++                    // The session task already finished. This is not a protocol
++                    // failure: close once with NO_ERROR so the client does not
++                    // treat a leftover keepalive as a reconnect.
++                    log_id!(info, self.id, "quic_session_gone code=0x0 class=channel_closed");
++                    let _ = quic_conn.close(false, 0, b"session ended");
++                } else {
++                    log_id!(
++                        info,
++                        self.id,
++                        "quic_processing_close code=0x42 class={}",
++                        quic_close_class(&e)
++                    );
++                    let _ = quic_conn.close(
++                        false,
++                        QUIC_CONNECTION_CLOSE_CODE,
++                        e.to_string().as_bytes(),
++                    );
++                }
+             }
+ 
+             if let Some(timeout) = quic_conn.timeout() {
+@@ -376,6 +423,12 @@ impl QuicMultiplexer {
+                 header,
+                 err
+             );
++            log_id!(
++                info,
++                self.id,
++                "quic_processing_close code=0x42 class={}",
++                quic_close_class(&err)
++            );
+             let _ = quic_conn.close(
+                 false,
+                 QUIC_CONNECTION_CLOSE_CODE,
+diff --git a/lib/src/tunnel.rs b/lib/src/tunnel.rs
+index a6c2aaa..4174ecb 100644
+--- a/lib/src/tunnel.rs
++++ b/lib/src/tunnel.rs
+@@ -6,6 +6,7 @@ use crate::downstream::{
+ };
+ use crate::forwarder::Forwarder;
+ use crate::pipe::DuplexPipe;
++use crate::tls_demultiplexer::Protocol;
+ use crate::{
+     authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, pipe, udp_pipe,
+ };
+@@ -124,34 +125,49 @@ impl Tunnel {
+         }
+     }
+ 
++    /// HTTP/3 stays up while QUIC is alive. Applying the listener timeout
++    /// there ends the session task and the next keepalive is closed as 0x42.
++    /// TCP still uses the timeout: it has no separate keepalive path.
++    async fn next_request(
++        &mut self,
++    ) -> io::Result<Option<Box<dyn downstream::PendingMultiplexedRequest>>> {
++        if self.downstream.protocol() == Protocol::Http3 {
++            return self.downstream.listen().await;
++        }
++        match tokio::time::timeout(
++            self.context.settings.client_listener_timeout,
++            self.downstream.listen(),
++        )
++        .await
++        {
++            Ok(result) => result,
++            Err(_) => Err(io::Error::from(ErrorKind::TimedOut)),
++        }
++    }
++
+     async fn listen_inner(&mut self) -> io::Result<()> {
+         loop {
+             log_id!(trace, self.id, "Tunnel waiting for request");
+-            let request = match tokio::time::timeout(
+-                self.context.settings.client_listener_timeout,
+-                self.downstream.listen(),
+-            )
+-            .await
+-            {
+-                Ok(Ok(None)) => {
++            let request = match self.next_request().await {
++                Ok(None) => {
+                     log_id!(debug, self.id, "Tunnel closed gracefully");
+                     return Ok(());
+                 }
+-                Ok(Ok(Some(r))) => {
++                Ok(Some(r)) => {
+                     log_id!(trace, self.id, "Tunnel received request");
+                     r
+                 }
+-                Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => {
++                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                     log_id!(debug, self.id, "Tunnel closed gracefully");
+                     return Ok(());
+                 }
+-                Ok(Err(e)) => {
+-                    log_id!(trace, self.id, "Tunnel listen error: {}", e);
++                Err(e) if e.kind() == ErrorKind::TimedOut => {
++                    log_id!(trace, self.id, "Tunnel listen timeout");
+                     return Err(e);
+                 }
+-                Err(_) => {
+-                    log_id!(trace, self.id, "Tunnel listen timeout");
+-                    return Err(io::Error::from(ErrorKind::TimedOut));
++                Err(e) => {
++                    log_id!(trace, self.id, "Tunnel listen error: {}", e);
++                    return Err(e);
+                 }
+             };
+ 
