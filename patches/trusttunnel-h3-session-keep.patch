@@ -2,7 +2,7 @@ diff --git a/lib/src/quic_multiplexer.rs b/lib/src/quic_multiplexer.rs
 index aeb4571..c1badde 100644
 --- a/lib/src/quic_multiplexer.rs
 +++ b/lib/src/quic_multiplexer.rs
-@@ -27,6 +27,37 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
+@@ -27,6 +27,38 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
  
  const QUIC_CONNECTION_CLOSE_CODE: u64 = 0x42;
  
