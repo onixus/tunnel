@@ -57,7 +57,7 @@ python3 scripts/build-installer.py --target centos-stream --client-source /пу�
 воспроизводимой. Проверка SHA-256 обнаруживает повреждение файла, но требует
 доверия к источнику самого файла контрольной суммы.
 
-Готовый образ ревизии `d18aac6` опубликован в [versions.md](versions.md): `ghcr.io/onixus/tunnel-fresh-portal:d18aac6`. В нём и портал, и консоль. Это не `main` и не замена работающих контейнеров.
+Готовый образ ревизии `ad8f3fc` опубликован в [versions.md](versions.md): `ghcr.io/onixus/tunnel-fresh-portal:ad8f3fc`. В нём и портал, и консоль. Это `main` и не замена работающих контейнеров.
 
 ### Пакет с готовыми образами
 
