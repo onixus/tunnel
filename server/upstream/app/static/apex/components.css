@@ -7,12 +7,18 @@ code, pre, output, .mono, .eyebrow, .nav-label, .node-kicker { font-family: var(
 input, select, textarea { font-family: inherit; border-color: var(--border-control); }
 input::placeholder, textarea::placeholder { color: var(--text-muted); opacity: 1; }
 :focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-nav svg, .ic { width: 20px; height: 20px; opacity: 1; }
+nav svg, .ic { width: 20px; height: 20px; opacity: 1; flex: none; }
+button svg, .btn svg, a.btn svg { width: 16px; height: 16px; }
+.table-wrap { max-width: 100%; min-width: 0; }
+.table-wrap > table { width: 100%; }
+th, td { line-height: 1.35; vertical-align: middle; }
+td .btn, td a.btn, td button { white-space: nowrap; }
 .theme-switch { display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
 .theme-switch select { width: auto; min-width: 0; padding: 6px 8px !important; border: 1px solid var(--border-control); border-radius: 8px; background: var(--surface-2); color: var(--text-primary); font: inherit; appearance: auto; }
 .auth-theme-header { height: var(--header-height); display: flex; justify-content: flex-end; padding: 0 24px; align-items: center; background: var(--surface-1); border-bottom: 1px solid var(--border-subtle); }
 .auth-theme-header + .auth-wrap { min-height: calc(100vh - var(--header-height)); }
-.pill::before { content: ''; width: 16px; height: 16px; flex: none; background: currentColor; border-radius: 0; mask: var(--icon-check) center / contain no-repeat; }
+.pill { line-height: 1.2; padding: 2px 8px; gap: 4px; }
+.pill::before { content: ''; width: 12px; height: 12px; flex: none; background: currentColor; border-radius: 0; mask: var(--icon-check) center / contain no-repeat; }
 .pill.warn::before, .pill.amber::before { mask-image: var(--icon-warning); }
 .pill.red::before { mask-image: var(--icon-error); }
 .pill.gray::before, .pill.blue::before, .pill.acc::before { mask-image: var(--icon-info); }

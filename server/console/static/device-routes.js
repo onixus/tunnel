@@ -78,19 +78,11 @@ window.DeviceRoutes = {
         $("groups").append(node("p", "Групп пока нет."));
       for (const g of state.groups) {
         const row = node("div");
-        row.className = "card";
-        row.append(node("strong", g.name + " · ревизия " + g.revision));
-        row.append(
-          node(
-            "p",
-            "VPN: " +
-              g.include.join(", ") +
-              ". Исключения: " +
-              (g.exclude.join(", ") || "нет") +
-              ". LAN: " +
-              (g.exclude_lan ? "исключён" : "включён"),
-          ),
-        );
+        row.className = "route-group";
+        const title = node("div");
+        title.append(node("strong", g.name));
+        title.append(node("small", "VPN " + g.include.length + " · исключения " + g.exclude.length + (g.exclude_lan ? " · без LAN" : "")));
+        row.append(title);
         const actions = node("div");
         actions.className = "actions";
         actions.append(
@@ -126,19 +118,14 @@ window.DeviceRoutes = {
         $("devices").append(node("p", "Устройств пока нет."));
       for (const d of state.devices) {
         const row = node("div");
-        row.className = "card";
-        row.append(node("strong", d.name + " · " + d.email + " · " + d.platform));
-        row.append(
-          node(
-            "p",
-            d.fetched_at
-              ? "Последнее получение: " +
-                  new Date(d.fetched_at * 1000).toLocaleString() +
-                  "; ревизия: " +
-                  (d.fetched_revision || "без политики")
-              : "Политика ещё не запрашивалась",
-          ),
-        );
+        row.className = "route-device";
+        const title = node("div");
+        title.append(node("strong", d.name));
+        const fetched = d.fetched_at
+          ? "получена " + new Date(d.fetched_at * 1000).toLocaleString()
+          : "ещё не запрашивалась";
+        title.append(node("small", d.email + " · " + d.platform + " · " + fetched));
+        row.append(title);
         const select = node("select");
         select.setAttribute("aria-label", "Группа для " + d.name);
         const none = node("option", "Пользовательская политика");
@@ -157,12 +144,7 @@ window.DeviceRoutes = {
           !["windows", "macos", "linux"].includes(d.platform);
         if (unavailable) {
           select.dataset.unavailable = "true";
-          row.append(
-            node(
-              "p",
-              "Назначение недоступно: нужен активный настольный клиент с действующей привязкой.",
-            ),
-          );
+          select.title = "Нужен активный настольный клиент с действующей привязкой.";
         }
         select.addEventListener("change", () => {
           const target = select.value === "" ? null : Number(select.value);
