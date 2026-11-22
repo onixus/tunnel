@@ -9,17 +9,17 @@
 Перед каждой сборкой или обновлением endpoint применяй оба патча к тому тегу, который выкатывается, и проверяй, что они легли. Если upstream сдвинул контекст, перенеси смысл, не выбрасывай патч.
 
 1. `patches/trusttunnel-endpoint-session-close-log.patch` — журнал закрытия сессий.
-2. `patches/trusttunnel-h3-session-keep.patch` — HTTP/3 не рвётся таймером отсутствия новых запросов; закрытый канал задачи закрывается `NO_ERROR` (`quic_session_gone`), а `0x42` остаётся только для настоящей ошибки `recv`.
+2. `patches/trusttunnel-h3-session-keep.patch` — только после журнала, не на чистый тег. HTTP/3 не рвётся таймером отсутствия новых запросов; закрытый канал (`NotConnected` или `UnexpectedEof`, не текст ошибки) закрывается `NO_ERROR` (`quic_session_gone`). `0x42` остаётся для настоящей ошибки `recv`, и в кадр уходит фиксированная фраза, не сырой текст.
 
 ```sh
 git clone --branch <тег> https://github.com/TrustTunnel/TrustTunnel.git
 cd TrustTunnel
 git apply --check /абсолютный/путь/patches/trusttunnel-endpoint-session-close-log.patch
-git apply --check /абсолютный/путь/patches/trusttunnel-h3-session-keep.patch
 git apply /абсолютный/путь/patches/trusttunnel-endpoint-session-close-log.patch
+git apply --check /абсолютный/путь/patches/trusttunnel-h3-session-keep.patch
 git apply /абсолютный/путь/patches/trusttunnel-h3-session-keep.patch
 ```
 
 Сборка — Linux x86_64. После замены бинарника проверь, что в нём есть `quic_session_gone`. Боевой файл: `/opt/trusttunnel-web/trusttunnel_endpoint.monitor`, он смонтирован в контейнер `trusttunnel-web` как `/opt/trusttunnel/trusttunnel_endpoint`. Перезапись файла без пересоздания контейнера не подхватывается: процесс держит старый inode.
 
-Не откатывай эти патчи ради совпадения с официальным SHA. Не логируй адреса, имена пользователей и сырой текст ошибок.
+Не откатывай эти патчи ради совпадения с официальным SHA. Не логируй адреса, имена пользователей и сырой текст ошибок. Не возвращай `patches/trusttunnel-endpoint-quic-close-monitor.patch`: он закрывает тот же канал кодом `0x42`.

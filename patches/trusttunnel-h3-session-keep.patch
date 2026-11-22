@@ -1,17 +1,19 @@
 diff --git a/lib/src/quic_multiplexer.rs b/lib/src/quic_multiplexer.rs
-index 5181900..d8e7ce2 100644
+index aeb4571..c1badde 100644
 --- a/lib/src/quic_multiplexer.rs
 +++ b/lib/src/quic_multiplexer.rs
-@@ -26,6 +26,36 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
+@@ -27,6 +27,37 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
  
  const QUIC_CONNECTION_CLOSE_CODE: u64 = 0x42;
  
 +fn quic_close_class(error: &io::Error) -> &'static str {
-+    let text = error.to_string();
-+    if text.contains("Channel closed") || text.contains("channel closed") {
++    // Session task already dropped its channel. Kind, not Display: the session
++    // log patch turns that drop into UnexpectedEof, and the raw try_send path
++    // is NotConnected ("Channel closed"). Neither is a protocol failure.
++    if error.kind() == ErrorKind::NotConnected || error.kind() == ErrorKind::UnexpectedEof {
 +        return "channel_closed";
 +    }
-+    let Some(rest) = text.split("QUIC receive failure:").nth(1) else {
++    let Some(rest) = error.to_string().split("QUIC receive failure:").nth(1) else {
 +        return "other";
 +    };
 +    match rest
@@ -35,20 +37,20 @@ index 5181900..d8e7ce2 100644
 +    }
 +}
 +
-+
  type QuicConnection = quiche::Connection;
  
  pub(crate) struct QuicMultiplexer {
-@@ -277,8 +307,25 @@ impl QuicMultiplexer {
+@@ -279,8 +310,22 @@ impl QuicMultiplexer {
  
              let mut quic_conn = entry.conn.lock().unwrap();
              if let Err(e) = result {
 -                let _ =
 -                    quic_conn.close(false, QUIC_CONNECTION_CLOSE_CODE, e.to_string().as_bytes());
-+                if quic_close_class(&e) == "channel_closed" {
-+                    // The session task already finished. This is not a protocol
-+                    // failure: close once with NO_ERROR so the client does not
-+                    // treat a leftover keepalive as a reconnect.
++                let class = quic_close_class(&e);
++                if class == "channel_closed" {
++                    // The session task already finished. Close once with NO_ERROR
++                    // so a leftover keepalive is not a reconnect. The phrase is
++                    // fixed: the error text can carry a peer address.
 +                    log_id!(info, self.id, "quic_session_gone code=0x0 class=channel_closed");
 +                    let _ = quic_conn.close(false, 0, b"session ended");
 +                } else {
@@ -56,43 +58,57 @@ index 5181900..d8e7ce2 100644
 +                        info,
 +                        self.id,
 +                        "quic_processing_close code=0x42 class={}",
-+                        quic_close_class(&e)
++                        class
 +                    );
-+                    let _ = quic_conn.close(
-+                        false,
-+                        QUIC_CONNECTION_CLOSE_CODE,
-+                        e.to_string().as_bytes(),
-+                    );
++                    let _ = quic_conn.close(false, QUIC_CONNECTION_CLOSE_CODE, b"receive error");
 +                }
              }
  
              if let Some(timeout) = quic_conn.timeout() {
-@@ -376,6 +423,12 @@ impl QuicMultiplexer {
+@@ -378,11 +423,13 @@ impl QuicMultiplexer {
                  header,
                  err
              );
+-            let _ = quic_conn.close(
+-                false,
+-                QUIC_CONNECTION_CLOSE_CODE,
+-                err.to_string().as_bytes(),
 +            log_id!(
 +                info,
 +                self.id,
 +                "quic_processing_close code=0x42 class={}",
 +                quic_close_class(&err)
-+            );
-             let _ = quic_conn.close(
-                 false,
-                 QUIC_CONNECTION_CLOSE_CODE,
+             );
++            let _ = quic_conn.close(false, QUIC_CONNECTION_CLOSE_CODE, b"receive error");
+         }
+ 
+         Some(Either::with_right(BackgroundConnection::with_conn(
+diff --git a/lib/src/session_log.rs b/lib/src/session_log.rs
+index bad8d40..18b2b13 100644
+--- a/lib/src/session_log.rs
++++ b/lib/src/session_log.rs
+@@ -412,7 +412,7 @@ fn user_tag_with_key(key: &ring::hmac::Key, username: &str) -> String {
+ /// Describe the timeouts which may close an idle client session
+ pub(crate) fn timeouts_line(settings: &Settings) -> String {
+     format!(
+-        "Session timeouts: client_listener_timeout={}s (closes h2/h3 sessions without new tunnel requests), quic_max_idle_timeout={}s (h3 sessions without packets are closed after the smaller of this and the client's value), tls_handshake_timeout={}s, tcp_connections_timeout={}s, udp_connections_timeout={}s, tcp_keepalive=on ({})",
++        "Session timeouts: client_listener_timeout={}s (closes h2 sessions without new tunnel requests; h3 stays up until QUIC idle or peer close), quic_max_idle_timeout={}s (h3 sessions without packets are closed after the smaller of this and the client's value), tls_handshake_timeout={}s, tcp_connections_timeout={}s, udp_connections_timeout={}s, tcp_keepalive=on ({})",
+         settings.client_listener_timeout.as_secs(),
+         settings.client_listener_timeout.as_secs(),
+         settings.tls_handshake_timeout.as_secs(),
 diff --git a/lib/src/tunnel.rs b/lib/src/tunnel.rs
-index a6c2aaa..4174ecb 100644
+index ae56826..5bc0a05 100644
 --- a/lib/src/tunnel.rs
 +++ b/lib/src/tunnel.rs
-@@ -6,6 +6,7 @@ use crate::downstream::{
- };
+@@ -7,6 +7,7 @@ use crate::downstream::{
  use crate::forwarder::Forwarder;
  use crate::pipe::DuplexPipe;
+ use crate::session_log::{CloseReason, SessionRecord};
 +use crate::tls_demultiplexer::Protocol;
  use crate::{
      authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, pipe, udp_pipe,
  };
-@@ -124,34 +125,49 @@ impl Tunnel {
+@@ -158,40 +159,55 @@ impl Tunnel {
          }
      }
  
@@ -129,6 +145,7 @@ index a6c2aaa..4174ecb 100644
 +            let request = match self.next_request().await {
 +                Ok(None) => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
+                     self.close_reason = Some(CloseReason::PeerClosed { code: None });
                      return Ok(());
                  }
 -                Ok(Ok(Some(r))) => {
@@ -139,19 +156,26 @@ index a6c2aaa..4174ecb 100644
 -                Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => {
 +                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
+                     self.close_reason = Some(CloseReason::from_io_error(&e));
                      return Ok(());
                  }
 -                Ok(Err(e)) => {
 -                    log_id!(trace, self.id, "Tunnel listen error: {}", e);
-+                Err(e) if e.kind() == ErrorKind::TimedOut => {
-+                    log_id!(trace, self.id, "Tunnel listen timeout");
-                     return Err(e);
-                 }
+-                    self.close_reason = Some(CloseReason::from_io_error(&e));
+-                    return Err(e);
+-                }
 -                Err(_) => {
--                    log_id!(trace, self.id, "Tunnel listen timeout");
++                Err(e) if e.kind() == ErrorKind::TimedOut => {
+                     log_id!(trace, self.id, "Tunnel listen timeout");
+                     self.close_reason = Some(CloseReason::IdleTimeout(
+                         self.context.settings.client_listener_timeout,
+                     ));
 -                    return Err(io::Error::from(ErrorKind::TimedOut));
++                    return Err(e);
++                }
 +                Err(e) => {
-+                    log_id!(trace, self.id, "Tunnel listen error: {}", e);
++                    log_id!(trace, self.id, "Tunnel listen error");
++                    self.close_reason = Some(CloseReason::from_io_error(&e));
 +                    return Err(e);
                  }
              };

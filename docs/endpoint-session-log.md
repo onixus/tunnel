@@ -9,12 +9,12 @@
 При запуске:
 
 ```text
-Session timeouts: client_listener_timeout=600s (closes h2/h3 sessions without new tunnel requests), quic_max_idle_timeout=600s (h3 sessions without packets are closed after the smaller of this and the client's value), tls_handshake_timeout=10s, tcp_connections_timeout=604800s, udp_connections_timeout=300s, tcp_keepalive=on (idle=7200s interval=75s probes=9)
+Session timeouts: client_listener_timeout=600s (closes h2 sessions without new tunnel requests; h3 stays up until QUIC idle or peer close), quic_max_idle_timeout=600s (h3 sessions without packets are closed after the smaller of this and the client's value), tls_handshake_timeout=10s, tcp_connections_timeout=604800s, udp_connections_timeout=300s, tcp_keepalive=on (idle=7200s interval=75s probes=9)
 ```
 
 `client_listener_timeout_secs` (в `vpn.toml` панели — 600) одновременно:
 
-- закрывает сессию h2/h3, если за это время клиент не открыл ни одного нового соединения в туннеле, даже когда старые соединения ещё передают данные;
+- закрывает сессию h1/h2, если за это время клиент не открыл ни одного нового соединения в туннеле, даже когда старые соединения ещё передают данные. HTTP/3 этим таймером не закрывается: сессия живёт, пока жив QUIC. Иначе задача сессии завершается, а следующий keepalive закрывается кодом `0x42`;
 - задаёт серверный QUIC `max_idle_timeout`. Действует меньшее из серверного и клиентского значений (RFC 9000, §10.1); клиент R-TrustTunnel объявляет 30 с и шлёт QUIC keepalive каждые 10 с, поэтому `quic_idle_timeout after=30s` означает, что от клиента 30 с не доходило ни одного пакета. Удлинить этот клиентский допуск с сервера нельзя.
 - `disable_active_migration = false` разрешает уже аутентифицированной сессии сменить UDP-путь (Wi-Fi↔LTE, новый source port, перепривязка CGNAT), не открывая туннель заново. Шаблон `vpn.toml` читается только при старте endpoint: смена применяется при следующем рестарте, не по SIGHUP.
 
@@ -50,7 +50,7 @@ Unauthenticated sessions closed: 1000 (auth_rejected=750 closed_by_peer=250)
 | --- | --- | --- |
 | `closed_by_peer` | `code=` если клиент прислал код (GOAWAY/CONNECTION_CLOSE NO_ERROR) | клиент штатно закрыл соединение (EOF, GOAWAY, CONNECTION_CLOSE без ошибки) |
 | `reset_by_peer` | — | TCP RST, обрыв записи (ECONNRESET, EPIPE, ECONNABORTED) |
-| `idle_timeout` | `after=600s` | нет новых запросов в туннеле за `client_listener_timeout` |
+| `idle_timeout` | `after=600s` | нет новых запросов в TCP-туннеле (h1/h2) за `client_listener_timeout`. Для h3 этой причины нет |
 | `quic_idle_timeout` | `after=` эффективный таймаут | от клиента не было QUIC-пакетов за min(серверный, клиентский `max_idle_timeout`) |
 | `keepalive_timeout` | — | TCP ETIMEDOUT: нет ответа на keepalive или повторные передачи |
 | `tls_error` | `by=client code=` — TLS alert от клиента; `by=server` — ошибку TLS обнаружил сервер; для QUIC `code=` 0x100–0x1ff | ошибка TLS |
@@ -81,7 +81,6 @@ cargo test -p trusttunnel --lib --test sigterm
 cargo build --release --bin trusttunnel_endpoint
 ```
 
-
-Патч `trusttunnel-h3-session-keep.patch` обязателен при каждом обновлении endpoint. Без него живая HTTP/3-сессия рвётся через 600 с без нового запроса, а keepalive закрывается кодом `0x42`. Официальные v1.1.0 и v1.3.1 этот баг содержат. Подробности для агентов: `AGENTS.md`.
+Патч `trusttunnel-h3-session-keep.patch` накладывается только после журнала, не на чистый тег. Без него живая HTTP/3-сессия рвётся через 600 с без нового запроса, а keepalive закрывается кодом `0x42`. Закрытый канал задачи — это `NotConnected` или `UnexpectedEof`, не текст ошибки; в `CONNECTION_CLOSE` уходит фиксированная фраза, не `error.to_string()`. Официальные v1.1.0 и v1.3.1 этот баг содержат. Подробности для агентов: `AGENTS.md`.
 
 Бинарь: `target/release/trusttunnel_endpoint`. Он подменяет официальный при сборке образа по [инструкции](trusttunnel-server.md#подготовить-исходники-и-образ); в [versions](versions.md) нужно записать SHA256 собственной сборки вместо официального архива. Логи смотреть `docker logs trusttunnel-web | grep -E 'Session (closed|timeouts)|Unauthenticated sessions|Shutdown'`.
