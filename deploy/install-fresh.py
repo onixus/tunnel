@@ -195,6 +195,59 @@ PORTAL_IMAGE = 'tunnel-fresh-portal:local'
 PORTAL_REGISTRY = 'ghcr.io/onixus/tunnel-fresh-portal'
 
 
+PORTAL_SOURCES = ('server/console/', 'server/overlay/', 'server/upstream/')
+PORTAL_FILES = ('deploy/console.Dockerfile', 'deploy/install-console.py', 'deploy/apply-design-system.py',
+                'deploy/portal_patch.py', 'deploy/portal-nginx.conf')
+
+
+def package_revision():
+    manifest = ROOT / 'manifest.json'
+    if manifest.is_file():
+        head = json.loads(manifest.read_text()).get('server_head') or ''
+        if re.fullmatch(r'[0-9a-f]{40}', head):
+            return head
+        raise ValueError('В manifest.json нет ревизии пакета')
+    if not (ROOT / '.git').exists():
+        raise ValueError('Нет ревизии пакета для сверки с тегом образа')
+    if not shutil.which('git'):
+        raise ValueError('Для сверки checkout с тегом образа нужен git')
+    return subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+
+
+def same_revision(head, tag):
+    return head == tag or head.startswith(tag) or tag.startswith(head)
+
+
+def portal_sources_changed(tag):
+    probe = subprocess.run(['git', '-C', str(ROOT), 'merge-base', '--is-ancestor', tag, 'HEAD'])
+    if probe.returncode != 0:
+        return None
+    changed = subprocess.check_output(['git', '-C', str(ROOT), 'diff', '--name-only', f'{tag}...HEAD'], text=True)
+    return [path for path in changed.splitlines()
+            if path.startswith(PORTAL_SOURCES) or path in PORTAL_FILES]
+
+
+def require_image_revision(tag):
+    head = package_revision()
+    if same_revision(head, tag):
+        return
+    if (ROOT / 'manifest.json').is_file() or not (ROOT / '.git').exists():
+        raise ValueError(f'Ревизия пакета {head[:12]} не совпадает с тегом образа {tag}')
+    changed = portal_sources_changed(tag)
+    if changed is None:
+        raise ValueError(f'Тег образа {tag} не входит в ревизию пакета {head[:12]}')
+    if changed:
+        raise ValueError('После тега образа изменены исходники портала или консоли: ' + ', '.join(changed[:5]))
+
+
+def remember_portal_image(settings):
+    if settings.get('portal_image') in ('ghcr', 'build'):
+        return settings
+    settings['portal_image'] = 'build'
+    write(STATE / 'settings.json', json.dumps(settings))
+    return settings
+
+
 def pinned_portal():
     text = (ROOT / 'docs/versions.md').read_text()
     match = re.search(
@@ -244,6 +297,7 @@ def prepare_portal_image(source):
         run(['docker', 'build', '-f', ROOT / 'deploy/fresh-portal.Dockerfile', '-t', PORTAL_IMAGE, ROOT])
         return
     tag, digest = pinned_portal()
+    require_image_revision(tag)
     index = PORTAL_REGISTRY + '@' + digest
     # The published digest is an image index. Pulling it leaves an empty OS on a
     # containerd store, and its RepoDigest is not the linux/amd64 manifest.
@@ -385,8 +439,7 @@ def main():
         if args.resume:
             if args.address or args.email or args.portal_image:
                 raise ValueError('--resume использует сохранённые настройки, без --address, --email и --portal-image')
-            settings = json.loads((STATE / 'settings.json').read_text())
-            settings.setdefault('portal_image', 'build')
+            settings = remember_portal_image(json.loads((STATE / 'settings.json').read_text()))
             if (STATE / 'complete').exists():
                 print('Установка уже завершена. Доступ: sudo cat /opt/tunnel-installer/access.json')
                 return 0

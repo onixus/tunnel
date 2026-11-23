@@ -347,10 +347,11 @@ def test_pinned_portal_reads_versions_table():
     assert tag in text and digest in text
 
 
-def _portal_versions(tmp_path, digest):
+def _portal_versions(tmp_path, digest, head='ad8f3fc' + 'a' * 33):
     (tmp_path / 'docs').mkdir()
     (tmp_path / 'docs/versions.md').write_text(
         f'| ghcr.io/onixus/tunnel-fresh-portal | `ad8f3fc` | `{digest}` |\n')
+    (tmp_path / 'manifest.json').write_text(json.dumps({'server_head': head}))
 
 
 def _index(index_digest, children):
@@ -414,6 +415,48 @@ def test_embedded_images_reject_registry_pull(tmp_path, monkeypatch):
     assert calls == []
     fresh.prepare_portal_image('build')
     assert calls == ['load']
+
+
+def test_ghcr_refuses_other_package_revision(tmp_path, monkeypatch):
+    _portal_versions(tmp_path, 'sha256:' + 'ab' * 32, head='b' * 40)
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    with pytest.raises(ValueError, match='не совпадает'):
+        fresh.prepare_portal_image('ghcr')
+
+
+def test_checkout_allows_docs_after_image_tag(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh.shutil, 'which', lambda name: '/usr/bin/git')
+
+    def check_output(args, **kwargs):
+        if args[-2:] == ['rev-parse', 'HEAD']:
+            return 'c' * 40 + '\n'
+        assert args[-1] == 'ad8f3fc...HEAD'
+        return 'docs/installation.md\n'
+
+    monkeypatch.setattr(fresh.subprocess, 'check_output', check_output)
+    monkeypatch.setattr(fresh.subprocess, 'run', lambda *args, **kwargs: __import__('types').SimpleNamespace(returncode=0))
+    fresh.require_image_revision('ad8f3fc')
+
+
+def test_checkout_refuses_console_changes_after_image_tag(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh.shutil, 'which', lambda name: '/usr/bin/git')
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda args, **kwargs: (
+        'c' * 40 + '\n' if args[-2:] == ['rev-parse', 'HEAD'] else 'server/console/agent.py\n'))
+    monkeypatch.setattr(fresh.subprocess, 'run', lambda *args, **kwargs: __import__('types').SimpleNamespace(returncode=0))
+    with pytest.raises(ValueError, match='исходники портала'):
+        fresh.require_image_revision('ad8f3fc')
+
+
+def test_resume_records_missing_portal_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(fresh, 'STATE', tmp_path)
+    saved = fresh.remember_portal_image({'email': 'admin@example.com'})
+    assert saved['portal_image'] == 'build'
+    assert json.loads((tmp_path / 'settings.json').read_text())['portal_image'] == 'build'
+    assert fresh.remember_portal_image({'portal_image': 'ghcr'})['portal_image'] == 'ghcr'
 
 
 def test_checkout_without_client_source_allows_only_ghcr(tmp_path, monkeypatch):
