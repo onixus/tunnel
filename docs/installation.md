@@ -93,8 +93,8 @@ sudo bash tunnel-installer-ubuntu24-amd64.run \
 ```
 
 Для CentOS имя файла — `tunnel-installer-centos-stream-amd64.run`, флаг тот же.
-Мастер скачивает образ по digest из `docs/versions.md`, проверяет `linux/amd64`
-и помечает его `tunnel-fresh-portal:local`. Сборка портала и crates.io для неё
+Мастер сверяет индекс по digest из `docs/versions.md`, скачивает из него манифест
+`linux/amd64` и помечает образ `tunnel-fresh-portal:local`. Сборка портала и crates.io для неё
 не нужны. `nginx:1.28-alpine` по-прежнему берётся с Docker Hub, если пакет собран
 без `--with-images`. Консоль собирается на сервере из исходников пакета.
 
@@ -117,7 +117,8 @@ python3 scripts/build-installer.py --target ubuntu24 --with-images --client-sour
 ```
 
 Результат — `tunnel-installer-<ОС>-amd64-images.run` и `.sha256`; запускается так же,
-как обычный. Мастер проверяет SHA-256 архива образов по `manifest.json`, выполняет
+как обычный. Не добавляйте `--portal-image ghcr`: вложенные образы уже проверены,
+и мастер откажется качать другой. Мастер проверяет SHA-256 архива образов по `manifest.json`, выполняет
 `docker load` вместо сборки и отклоняет образы не под `linux/amd64`. На сервере
 не нужны crates.io и Docker Hub для портала; репозитории ОС, Docker и (на CentOS)
 PyPI по-прежнему нужны. Образы консоли и VPN-протоколов, как и раньше, собираются на сервере.

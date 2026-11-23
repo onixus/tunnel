@@ -205,17 +205,37 @@ def pinned_portal():
     return match.group(1), match.group(2)
 
 
-def image_ref_digest(ref):
-    got = subprocess.check_output(
-        ['docker', 'image', 'inspect', '--format', '{{index .RepoDigests 0}}', ref], text=True).strip()
-    marker = '@sha256:'
-    if marker not in got:
-        raise ValueError('У загруженного образа нет digest')
-    return 'sha256:' + got.split(marker, 1)[1]
+def registry_index(ref):
+    raw = subprocess.check_output(
+        ['docker', 'buildx', 'imagetools', 'inspect', '--format', '{{json .}}', ref], text=True)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError('Не разобран индекс образа портала') from error
+
+
+def amd64_manifest_digest(info, index_digest):
+    manifest = info.get('manifest') or {}
+    if manifest.get('digest') != index_digest:
+        raise ValueError('Digest образа портала не совпал с docs/versions.md')
+    children = manifest.get('manifests') or []
+    if not children:
+        return index_digest
+    chosen = [item.get('digest') for item in children
+              if (item.get('platform') or {}).get('os') == 'linux'
+              and (item.get('platform') or {}).get('architecture') == 'amd64'
+              and not (item.get('platform') or {}).get('variant')]
+    if len(chosen) != 1 or not chosen[0]:
+        raise ValueError('В индексе образа нет единственного linux/amd64')
+    return chosen[0]
 
 
 def prepare_portal_image(source):
+    if source not in ('build', 'ghcr'):
+        raise ValueError('Источник образа портала: ghcr или build')
     if (ROOT / 'images').is_dir():
+        if source == 'ghcr':
+            raise ValueError('Пакет уже содержит образы; уберите --portal-image ghcr или соберите пакет без --with-images')
         print('[3/6] Загрузка готовых образов портала и nginx', flush=True)
         load_images()
         return
@@ -223,19 +243,17 @@ def prepare_portal_image(source):
         print('[3/6] Сборка портала и Rust codec (первый раз — несколько минут)', flush=True)
         run(['docker', 'build', '-f', ROOT / 'deploy/fresh-portal.Dockerfile', '-t', PORTAL_IMAGE, ROOT])
         return
-    if source != 'ghcr':
-        raise ValueError('Источник образа портала: ghcr или build')
     tag, digest = pinned_portal()
-    ref = PORTAL_REGISTRY + '@' + digest
+    index = PORTAL_REGISTRY + '@' + digest
+    # The published digest is an image index. Pulling it leaves an empty OS on a
+    # containerd store, and its RepoDigest is not the linux/amd64 manifest.
+    ref = PORTAL_REGISTRY + '@' + amd64_manifest_digest(registry_index(index), digest)
     print(f'[3/6] Загрузка образа портала {PORTAL_REGISTRY}:{tag}', flush=True)
     run(['docker', 'pull', '--platform', 'linux/amd64', ref])
-    got = image_ref_digest(ref)
-    if got != digest:
-        raise ValueError('Digest образа портала не совпал с docs/versions.md')
     arch = subprocess.check_output(
         ['docker', 'image', 'inspect', '--format', '{{.Os}}/{{.Architecture}}', ref], text=True).strip()
     if arch != 'linux/amd64':
-        raise ValueError(f'Образ портала собран для {arch}, нужен linux/amd64')
+        raise ValueError(f'Образ портала собран для {arch or "неизвестной платформы"}, нужен linux/amd64')
     run(['docker', 'tag', ref, PORTAL_IMAGE])
 
 

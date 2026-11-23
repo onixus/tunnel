@@ -347,49 +347,72 @@ def test_pinned_portal_reads_versions_table():
     assert tag in text and digest in text
 
 
-def test_ghcr_portal_pulled_by_pinned_digest(tmp_path, monkeypatch):
-    tag, digest = 'ad8f3fc', 'sha256:' + 'ab' * 32
+def _portal_versions(tmp_path, digest):
     (tmp_path / 'docs').mkdir()
     (tmp_path / 'docs/versions.md').write_text(
-        f'| [ghcr.io/onixus/tunnel-fresh-portal](https://example.invalid) | `{tag}` | `{digest}` |\n')
+        f'| ghcr.io/onixus/tunnel-fresh-portal | `ad8f3fc` | `{digest}` |\n')
+
+
+def _index(index_digest, children):
+    return json.dumps({'manifest': {'digest': index_digest, 'manifests': children}})
+
+
+def test_ghcr_portal_pulls_amd64_manifest_from_index(tmp_path, monkeypatch):
+    index, child = 'sha256:' + 'ab' * 32, 'sha256:' + 'cd' * 32
+    _portal_versions(tmp_path, index)
     calls = []
     monkeypatch.setattr(fresh, 'ROOT', tmp_path)
     monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: calls.append(args))
 
     def check_output(args, **kwargs):
-        fmt = args[4]
-        if 'RepoDigests' in fmt:
-            return f'ghcr.io/onixus/tunnel-fresh-portal@{digest}\n'
+        if args[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
+            assert args[-1] == 'ghcr.io/onixus/tunnel-fresh-portal@' + index
+            return _index(index, [
+                {'digest': child, 'platform': {'os': 'linux', 'architecture': 'amd64'}},
+                {'digest': 'sha256:' + 'ef' * 32, 'platform': {'os': 'unknown', 'architecture': 'unknown'}}])
+        assert args[:3] == ['docker', 'image', 'inspect']
         return 'linux/amd64\n'
 
     monkeypatch.setattr(fresh.subprocess, 'check_output', check_output)
     fresh.prepare_portal_image('ghcr')
-    ref = 'ghcr.io/onixus/tunnel-fresh-portal@' + digest
+    ref = 'ghcr.io/onixus/tunnel-fresh-portal@' + child
     assert calls == [
         ['docker', 'pull', '--platform', 'linux/amd64', ref],
         ['docker', 'tag', ref, 'tunnel-fresh-portal:local']]
 
 
-def test_ghcr_portal_rejects_unexpected_digest(tmp_path, monkeypatch):
-    digest = 'sha256:' + 'ab' * 32
-    (tmp_path / 'docs').mkdir()
-    (tmp_path / 'docs/versions.md').write_text(
-        f'| ghcr.io/onixus/tunnel-fresh-portal | `ad8f3fc` | `{digest}` |\n')
+def test_ghcr_portal_rejects_index_digest_mismatch(tmp_path, monkeypatch):
+    pinned = 'sha256:' + 'ab' * 32
+    _portal_versions(tmp_path, pinned)
     calls = []
     monkeypatch.setattr(fresh, 'ROOT', tmp_path)
     monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: calls.append(args))
-    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda *args, **kwargs: 'ghcr.io/onixus/tunnel-fresh-portal@sha256:' + 'cd' * 32 + '\n')
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda *args, **kwargs: _index('sha256:' + 'cd' * 32, []))
     with pytest.raises(ValueError, match='Digest'):
         fresh.prepare_portal_image('ghcr')
-    assert calls == [['docker', 'pull', '--platform', 'linux/amd64', 'ghcr.io/onixus/tunnel-fresh-portal@' + digest]]
+    assert calls == []
 
 
-def test_embedded_images_skip_registry_pull(tmp_path, monkeypatch):
+def test_ghcr_portal_rejects_index_without_amd64(tmp_path, monkeypatch):
+    pinned = 'sha256:' + 'ab' * 32
+    _portal_versions(tmp_path, pinned)
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: None)
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda *args, **kwargs: _index(pinned, [
+        {'digest': 'sha256:' + 'ef' * 32, 'platform': {'os': 'linux', 'architecture': 'arm64'}}]))
+    with pytest.raises(ValueError, match='linux/amd64'):
+        fresh.prepare_portal_image('ghcr')
+
+
+def test_embedded_images_reject_registry_pull(tmp_path, monkeypatch):
     (tmp_path / 'images').mkdir()
     calls = []
     monkeypatch.setattr(fresh, 'ROOT', tmp_path)
     monkeypatch.setattr(fresh, 'load_images', lambda: calls.append('load'))
-    fresh.prepare_portal_image('ghcr')
+    with pytest.raises(ValueError, match='уже содержит'):
+        fresh.prepare_portal_image('ghcr')
+    assert calls == []
+    fresh.prepare_portal_image('build')
     assert calls == ['load']
 
 
