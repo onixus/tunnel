@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 
 import pytest
 
@@ -336,3 +337,64 @@ def test_prebuilt_images_verified_before_and_after_load(tmp_path, monkeypatch, t
     else:
         fresh.load_images()
         assert calls == [['docker', 'load', '-i', archive]]
+
+
+def test_pinned_portal_reads_versions_table():
+    tag, digest = fresh.pinned_portal()
+    text = (fresh.ROOT / 'docs/versions.md').read_text()
+    assert re.fullmatch(r'[0-9a-f]{7,40}', tag)
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+    assert tag in text and digest in text
+
+
+def test_ghcr_portal_pulled_by_pinned_digest(tmp_path, monkeypatch):
+    tag, digest = 'ad8f3fc', 'sha256:' + 'ab' * 32
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'docs/versions.md').write_text(
+        f'| [ghcr.io/onixus/tunnel-fresh-portal](https://example.invalid) | `{tag}` | `{digest}` |\n')
+    calls = []
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: calls.append(args))
+
+    def check_output(args, **kwargs):
+        fmt = args[4]
+        if 'RepoDigests' in fmt:
+            return f'ghcr.io/onixus/tunnel-fresh-portal@{digest}\n'
+        return 'linux/amd64\n'
+
+    monkeypatch.setattr(fresh.subprocess, 'check_output', check_output)
+    fresh.prepare_portal_image('ghcr')
+    ref = 'ghcr.io/onixus/tunnel-fresh-portal@' + digest
+    assert calls == [
+        ['docker', 'pull', '--platform', 'linux/amd64', ref],
+        ['docker', 'tag', ref, 'tunnel-fresh-portal:local']]
+
+
+def test_ghcr_portal_rejects_unexpected_digest(tmp_path, monkeypatch):
+    digest = 'sha256:' + 'ab' * 32
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'docs/versions.md').write_text(
+        f'| ghcr.io/onixus/tunnel-fresh-portal | `ad8f3fc` | `{digest}` |\n')
+    calls = []
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: calls.append(args))
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda *args, **kwargs: 'ghcr.io/onixus/tunnel-fresh-portal@sha256:' + 'cd' * 32 + '\n')
+    with pytest.raises(ValueError, match='Digest'):
+        fresh.prepare_portal_image('ghcr')
+    assert calls == [['docker', 'pull', '--platform', 'linux/amd64', 'ghcr.io/onixus/tunnel-fresh-portal@' + digest]]
+
+
+def test_embedded_images_skip_registry_pull(tmp_path, monkeypatch):
+    (tmp_path / 'images').mkdir()
+    calls = []
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'load_images', lambda: calls.append('load'))
+    fresh.prepare_portal_image('ghcr')
+    assert calls == ['load']
+
+
+def test_checkout_without_client_source_allows_only_ghcr(tmp_path, monkeypatch):
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    fresh.require_client_source('ghcr')
+    with pytest.raises(ValueError, match='client-source'):
+        fresh.require_client_source('build')
