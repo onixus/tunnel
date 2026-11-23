@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 
 import pytest
 
@@ -336,3 +337,130 @@ def test_prebuilt_images_verified_before_and_after_load(tmp_path, monkeypatch, t
     else:
         fresh.load_images()
         assert calls == [['docker', 'load', '-i', archive]]
+
+
+def test_pinned_portal_reads_versions_table():
+    tag, digest = fresh.pinned_portal()
+    text = (fresh.ROOT / 'docs/versions.md').read_text()
+    assert re.fullmatch(r'[0-9a-f]{7,40}', tag)
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+    assert tag in text and digest in text
+
+
+def _portal_versions(tmp_path, digest, head='ad8f3fc' + 'a' * 33):
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'docs/versions.md').write_text(
+        f'| ghcr.io/onixus/tunnel-fresh-portal | `ad8f3fc` | `{digest}` |\n')
+    (tmp_path / 'manifest.json').write_text(json.dumps({'server_head': head}))
+
+
+def _index(index_digest, children):
+    return json.dumps({'manifest': {'digest': index_digest, 'manifests': children}})
+
+
+def test_ghcr_portal_pulls_amd64_manifest_from_index(tmp_path, monkeypatch):
+    index, child = 'sha256:' + 'ab' * 32, 'sha256:' + 'cd' * 32
+    _portal_versions(tmp_path, index)
+    calls = []
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: calls.append(args))
+
+    def check_output(args, **kwargs):
+        if args[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
+            assert args[-1] == 'ghcr.io/onixus/tunnel-fresh-portal@' + index
+            return _index(index, [
+                {'digest': child, 'platform': {'os': 'linux', 'architecture': 'amd64'}},
+                {'digest': 'sha256:' + 'ef' * 32, 'platform': {'os': 'unknown', 'architecture': 'unknown'}}])
+        assert args[:3] == ['docker', 'image', 'inspect']
+        return 'linux/amd64\n'
+
+    monkeypatch.setattr(fresh.subprocess, 'check_output', check_output)
+    fresh.prepare_portal_image('ghcr')
+    ref = 'ghcr.io/onixus/tunnel-fresh-portal@' + child
+    assert calls == [
+        ['docker', 'pull', '--platform', 'linux/amd64', ref],
+        ['docker', 'tag', ref, 'tunnel-fresh-portal:local']]
+
+
+def test_ghcr_portal_rejects_index_digest_mismatch(tmp_path, monkeypatch):
+    pinned = 'sha256:' + 'ab' * 32
+    _portal_versions(tmp_path, pinned)
+    calls = []
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: calls.append(args))
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda *args, **kwargs: _index('sha256:' + 'cd' * 32, []))
+    with pytest.raises(ValueError, match='Digest'):
+        fresh.prepare_portal_image('ghcr')
+    assert calls == []
+
+
+def test_ghcr_portal_rejects_index_without_amd64(tmp_path, monkeypatch):
+    pinned = 'sha256:' + 'ab' * 32
+    _portal_versions(tmp_path, pinned)
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'run', lambda args, **kwargs: None)
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda *args, **kwargs: _index(pinned, [
+        {'digest': 'sha256:' + 'ef' * 32, 'platform': {'os': 'linux', 'architecture': 'arm64'}}]))
+    with pytest.raises(ValueError, match='linux/amd64'):
+        fresh.prepare_portal_image('ghcr')
+
+
+def test_embedded_images_reject_registry_pull(tmp_path, monkeypatch):
+    (tmp_path / 'images').mkdir()
+    calls = []
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh, 'load_images', lambda: calls.append('load'))
+    with pytest.raises(ValueError, match='уже содержит'):
+        fresh.prepare_portal_image('ghcr')
+    assert calls == []
+    fresh.prepare_portal_image('build')
+    assert calls == ['load']
+
+
+def test_ghcr_refuses_other_package_revision(tmp_path, monkeypatch):
+    _portal_versions(tmp_path, 'sha256:' + 'ab' * 32, head='b' * 40)
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    with pytest.raises(ValueError, match='не совпадает'):
+        fresh.prepare_portal_image('ghcr')
+
+
+def test_checkout_allows_docs_after_image_tag(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh.shutil, 'which', lambda name: '/usr/bin/git')
+
+    def check_output(args, **kwargs):
+        if args[-2:] == ['rev-parse', 'HEAD']:
+            return 'c' * 40 + '\n'
+        assert args[-1] == 'ad8f3fc...HEAD'
+        return 'docs/installation.md\n'
+
+    monkeypatch.setattr(fresh.subprocess, 'check_output', check_output)
+    monkeypatch.setattr(fresh.subprocess, 'run', lambda *args, **kwargs: __import__('types').SimpleNamespace(returncode=0))
+    fresh.require_image_revision('ad8f3fc')
+
+
+def test_checkout_refuses_console_changes_after_image_tag(tmp_path, monkeypatch):
+    (tmp_path / '.git').mkdir()
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    monkeypatch.setattr(fresh.shutil, 'which', lambda name: '/usr/bin/git')
+    monkeypatch.setattr(fresh.subprocess, 'check_output', lambda args, **kwargs: (
+        'c' * 40 + '\n' if args[-2:] == ['rev-parse', 'HEAD'] else 'server/console/agent.py\n'))
+    monkeypatch.setattr(fresh.subprocess, 'run', lambda *args, **kwargs: __import__('types').SimpleNamespace(returncode=0))
+    with pytest.raises(ValueError, match='исходники портала'):
+        fresh.require_image_revision('ad8f3fc')
+
+
+def test_resume_records_missing_portal_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(fresh, 'STATE', tmp_path)
+    saved = fresh.remember_portal_image({'email': 'admin@example.com'})
+    assert saved['portal_image'] == 'build'
+    assert json.loads((tmp_path / 'settings.json').read_text())['portal_image'] == 'build'
+    assert fresh.remember_portal_image({'portal_image': 'ghcr'})['portal_image'] == 'ghcr'
+
+
+def test_checkout_without_client_source_allows_only_ghcr(tmp_path, monkeypatch):
+    monkeypatch.setattr(fresh, 'ROOT', tmp_path)
+    fresh.require_client_source('ghcr')
+    with pytest.raises(ValueError, match='client-source'):
+        fresh.require_client_source('build')

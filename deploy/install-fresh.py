@@ -68,7 +68,13 @@ def wait_health(url):
     raise RuntimeError('Служба не отвечает: ' + url)
 
 
-def preflight(resume):
+def require_client_source(portal_image):
+    # The published image already contains the codec. A source build still needs the bundle.
+    if portal_image != 'ghcr' and not (ROOT / 'client-source/Cargo.lock').is_file():
+        raise ValueError('Используйте собранный архив инсталлятора: отсутствует client-source')
+
+
+def preflight(resume, portal_image='build'):
     if os.geteuid() != 0:
         raise ValueError('Запустите через sudo bash deploy/install.sh')
     host_platform.platform_id()
@@ -76,8 +82,7 @@ def preflight(resume):
         raise ValueError('Поддерживается только x86_64')
     if not Path('/run/systemd/system').is_dir():
         raise ValueError('Нужен сервер с systemd; обычный Docker-контейнер не подходит')
-    if not (ROOT / 'client-source/Cargo.lock').is_file():
-        raise ValueError('Используйте собранный архив инсталлятора: отсутствует client-source')
+    require_client_source(portal_image)
     if resume:
         if not (STATE / 'settings.json').is_file():
             raise ValueError('Нет прерванной установки для --resume')
@@ -186,6 +191,126 @@ def dependencies(host):
     return str(venv / 'bin/python3')
 
 
+PORTAL_IMAGE = 'tunnel-fresh-portal:local'
+PORTAL_REGISTRY = 'ghcr.io/onixus/tunnel-fresh-portal'
+
+
+PORTAL_SOURCES = ('server/console/', 'server/overlay/', 'server/upstream/')
+PORTAL_FILES = ('deploy/console.Dockerfile', 'deploy/install-console.py', 'deploy/apply-design-system.py',
+                'deploy/portal_patch.py', 'deploy/portal-nginx.conf')
+
+
+def package_revision():
+    manifest = ROOT / 'manifest.json'
+    if manifest.is_file():
+        head = json.loads(manifest.read_text()).get('server_head') or ''
+        if re.fullmatch(r'[0-9a-f]{40}', head):
+            return head
+        raise ValueError('В manifest.json нет ревизии пакета')
+    if not (ROOT / '.git').exists():
+        raise ValueError('Нет ревизии пакета для сверки с тегом образа')
+    if not shutil.which('git'):
+        raise ValueError('Для сверки checkout с тегом образа нужен git')
+    return subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+
+
+def same_revision(head, tag):
+    return head == tag or head.startswith(tag) or tag.startswith(head)
+
+
+def portal_sources_changed(tag):
+    probe = subprocess.run(['git', '-C', str(ROOT), 'merge-base', '--is-ancestor', tag, 'HEAD'])
+    if probe.returncode != 0:
+        return None
+    changed = subprocess.check_output(['git', '-C', str(ROOT), 'diff', '--name-only', f'{tag}...HEAD'], text=True)
+    return [path for path in changed.splitlines()
+            if path.startswith(PORTAL_SOURCES) or path in PORTAL_FILES]
+
+
+def require_image_revision(tag):
+    head = package_revision()
+    if same_revision(head, tag):
+        return
+    if (ROOT / 'manifest.json').is_file() or not (ROOT / '.git').exists():
+        raise ValueError(f'Ревизия пакета {head[:12]} не совпадает с тегом образа {tag}')
+    changed = portal_sources_changed(tag)
+    if changed is None:
+        raise ValueError(f'Тег образа {tag} не входит в ревизию пакета {head[:12]}')
+    if changed:
+        raise ValueError('После тега образа изменены исходники портала или консоли: ' + ', '.join(changed[:5]))
+
+
+def remember_portal_image(settings):
+    if settings.get('portal_image') in ('ghcr', 'build'):
+        return settings
+    settings['portal_image'] = 'build'
+    write(STATE / 'settings.json', json.dumps(settings))
+    return settings
+
+
+def pinned_portal():
+    text = (ROOT / 'docs/versions.md').read_text()
+    match = re.search(
+        r'ghcr\.io/onixus/tunnel-fresh-portal[^\n]*\|\s*`([0-9a-f]{7,40})`\s*\|\s*`(sha256:[0-9a-f]{64})`',
+        text)
+    if not match:
+        raise ValueError('В docs/versions.md нет закреплённого образа портала')
+    return match.group(1), match.group(2)
+
+
+def registry_index(ref):
+    raw = subprocess.check_output(
+        ['docker', 'buildx', 'imagetools', 'inspect', '--format', '{{json .}}', ref], text=True)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError('Не разобран индекс образа портала') from error
+
+
+def amd64_manifest_digest(info, index_digest):
+    manifest = info.get('manifest') or {}
+    if manifest.get('digest') != index_digest:
+        raise ValueError('Digest образа портала не совпал с docs/versions.md')
+    children = manifest.get('manifests') or []
+    if not children:
+        return index_digest
+    chosen = [item.get('digest') for item in children
+              if (item.get('platform') or {}).get('os') == 'linux'
+              and (item.get('platform') or {}).get('architecture') == 'amd64'
+              and not (item.get('platform') or {}).get('variant')]
+    if len(chosen) != 1 or not chosen[0]:
+        raise ValueError('В индексе образа нет единственного linux/amd64')
+    return chosen[0]
+
+
+def prepare_portal_image(source):
+    if source not in ('build', 'ghcr'):
+        raise ValueError('Источник образа портала: ghcr или build')
+    if (ROOT / 'images').is_dir():
+        if source == 'ghcr':
+            raise ValueError('Пакет уже содержит образы; уберите --portal-image ghcr или соберите пакет без --with-images')
+        print('[3/6] Загрузка готовых образов портала и nginx', flush=True)
+        load_images()
+        return
+    if source == 'build':
+        print('[3/6] Сборка портала и Rust codec (первый раз — несколько минут)', flush=True)
+        run(['docker', 'build', '-f', ROOT / 'deploy/fresh-portal.Dockerfile', '-t', PORTAL_IMAGE, ROOT])
+        return
+    tag, digest = pinned_portal()
+    require_image_revision(tag)
+    index = PORTAL_REGISTRY + '@' + digest
+    # The published digest is an image index. Pulling it leaves an empty OS on a
+    # containerd store, and its RepoDigest is not the linux/amd64 manifest.
+    ref = PORTAL_REGISTRY + '@' + amd64_manifest_digest(registry_index(index), digest)
+    print(f'[3/6] Загрузка образа портала {PORTAL_REGISTRY}:{tag}', flush=True)
+    run(['docker', 'pull', '--platform', 'linux/amd64', ref])
+    arch = subprocess.check_output(
+        ['docker', 'image', 'inspect', '--format', '{{.Os}}/{{.Architecture}}', ref], text=True).strip()
+    if arch != 'linux/amd64':
+        raise ValueError(f'Образ портала собран для {arch or "неизвестной платформы"}, нужен linux/amd64')
+    run(['docker', 'tag', ref, PORTAL_IMAGE])
+
+
 def load_images():
     # The archive digest comes from the manifest inside the already verified payload.
     images = json.loads((ROOT / 'manifest.json').read_text()).get('images') or {}
@@ -243,7 +368,7 @@ def install(settings):
         if host_platform.selinux_enabled():
             env['CONSOLE_SELINUX_TYPE'] = 'vpn_console_t'
     write(HOME / '.env', ''.join(f'{k}={v}\n' for k, v in env.items()))
-    portal = {'image': 'tunnel-fresh-portal:local', 'container_name': 'trusttunnel-web',
+    portal = {'image': PORTAL_IMAGE, 'container_name': 'trusttunnel-web',
               'env_file': '.env', 'restart': 'unless-stopped', 'user': '10001:10001',
               'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'read_only': True,
               'tmpfs': ['/tmp:size=32m,mode=1777'],
@@ -270,12 +395,7 @@ def install(settings):
     write(HOME / 'nginx.conf', nginx_text, 0o644)
     for shared in (HOME / 'data', HOME / 'nginx.conf', Path('/etc/letsencrypt')):
         host_platform.restore_labels(shared)
-    if (ROOT / 'images').is_dir():
-        print('[3/6] Загрузка готовых образов портала и nginx', flush=True)
-        load_images()
-    else:
-        print('[3/6] Сборка портала и Rust codec (первый раз — несколько минут)', flush=True)
-        run(['docker', 'build', '-f', ROOT / 'deploy/fresh-portal.Dockerfile', '-t', 'tunnel-fresh-portal:local', ROOT])
+    prepare_portal_image(settings.get('portal_image', 'build'))
     print('[4/6] Закрытая регистрация и создание администратора', flush=True)
     init = '''from app import db\nimport os\ndb.init_db()\ndb.set_settings({'panel_domain': os.environ['PUBLIC_ADDRESS'], 'conn_domain': os.environ['PUBLIC_ADDRESS'], 'conn_address': os.environ['PUBLIC_ADDRESS'], 'conn_port': '8443', 'cert_mode': 'external', 'registration_enabled': '0', 'brand_name': 'VPN', 'portal_url': 'https://localhost:18443'})\n'''
     compose('run', '--rm', '-T', '--no-deps', 'trusttunnel-web', 'python', '-', input=init, text=True)
@@ -306,14 +426,20 @@ def main():
     parser.add_argument('--ssh-port', type=int, default=int(ssh[3]) if len(ssh) == 4 else 22)
     parser.add_argument('--non-interactive', action='store_true')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--portal-image', choices=('ghcr', 'build'),
+                        help='ghcr: скачать закреплённый образ из docs/versions.md; build: собрать на сервере')
     args = parser.parse_args()
     os.umask(0o077)
     try:
-        preflight(args.resume)
+        if args.resume and (STATE / 'settings.json').is_file():
+            portal_image = json.loads((STATE / 'settings.json').read_text()).get('portal_image', 'build')
+        else:
+            portal_image = args.portal_image or 'build'
+        preflight(args.resume, portal_image)
         if args.resume:
-            if args.address or args.email:
-                raise ValueError('--resume использует сохранённые настройки, без --address/--email')
-            settings = json.loads((STATE / 'settings.json').read_text())
+            if args.address or args.email or args.portal_image:
+                raise ValueError('--resume использует сохранённые настройки, без --address, --email и --portal-image')
+            settings = remember_portal_image(json.loads((STATE / 'settings.json').read_text()))
             if (STATE / 'complete').exists():
                 print('Установка уже завершена. Доступ: sudo cat /opt/tunnel-installer/access.json')
                 return 0
@@ -326,7 +452,8 @@ def main():
             if not re.fullmatch(r'[A-Za-z0-9._+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}', email) or not 1 <= args.ssh_port <= 65535:
                 raise ValueError('Проверьте e-mail и SSH-порт')
             settings = dict(address=host, email=email, ssh_port=args.ssh_port,
-                            password=secrets.token_urlsafe(24), secret=secrets.token_hex(48))
+                            password=secrets.token_urlsafe(24), secret=secrets.token_hex(48),
+                            portal_image=args.portal_image or 'build')
             STATE.mkdir(mode=0o700)
             write(STATE / 'settings.json', json.dumps(settings))
         install(settings)

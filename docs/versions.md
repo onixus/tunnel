@@ -22,11 +22,11 @@ Docker base `python:3.12-slim` и транзитивные Python-зависим
 
 Один образ содержит и портал, и консоль. Портал стартует командой образа и владеет endpoint. Консоль — второй процесс того же образа: `uvicorn routing_app:app --host 0.0.0.0 --port 8000`. Платформа `linux/amd64`. Публикация не заменяет работающие контейнеры.
 
-Опубликовано 22.11.2026 из `ad8f3fc` (`main`, merge #52 и #53). Предыдущий тег `d18aac6` остаётся в реестре и не подменяется. Слои Python совпадают с `deploy/fresh-portal.Dockerfile`. `rtrust-codec` собран тем же Rust 1.98.1 и `cargo build --locked --release` кросс-компиляцией в `x86_64-unknown-linux-gnu`: на машине сборки `rustc` под QEMU падает. Публикация не заменяет работающие контейнеры.
+Опубликовано 22.11.2026 из `ad8f3fc` (`main`, merge #52 и #53). Предыдущий тег `d18aac6` остаётся в реестре и не подменяется. Пакет приватный и опубликован на пользователя, а не на репозиторий: страница Packages репозитория его не показывает. Установка этим образом — в [гайде](installation.md#установка-с-готовым-образом). Слои Python совпадают с `deploy/fresh-portal.Dockerfile`. `rtrust-codec` собран тем же Rust 1.98.1 и `cargo build --locked --release` кросс-компиляцией в `x86_64-unknown-linux-gnu`: на машине сборки `rustc` под QEMU падает. Публикация не заменяет работающие контейнеры.
 
 | Образ | Тег | Digest |
 |---|---|---|
-| [ghcr.io/onixus/tunnel-fresh-portal](https://github.com/onixus/tunnel/pkgs/container/tunnel-fresh-portal) | `ad8f3fc` | `sha256:053676d0513de674fed5ae26d90ef9805891e261c5e8b61db5d4788323107b6f` |
+| [ghcr.io/onixus/tunnel-fresh-portal](https://github.com/users/onixus/packages/container/package/tunnel-fresh-portal) | `ad8f3fc` | `sha256:053676d0513de674fed5ae26d90ef9805891e261c5e8b61db5d4788323107b6f` |
 
 ## Технические первоисточники
 

@@ -3,8 +3,9 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-    echo 'Установка: sudo bash tunnel-installer-<ubuntu24|centos-stream>-amd64.run [--address АДРЕС --email ЛОГИН --non-interactive] [--ssh-port ПОРТ]'
+    echo 'Установка: sudo bash tunnel-installer-<ubuntu24|centos-stream>-amd64.run [--address АДРЕС --email ЛОГИН --non-interactive] [--ssh-port ПОРТ] [--portal-image ghcr|build]'
     echo 'Продолжить прерванную установку: sudo bash <инсталлятор.run> --resume'
+    echo '--portal-image ghcr качает закреплённый образ из GHCR (docker login ghcr.io от root). По умолчанию портал собирается на сервере.'
     echo 'Нужна чистая Ubuntu 24.04 или CentOS Stream 9/10 x86_64 с systemd.'
     exit 0
 fi
