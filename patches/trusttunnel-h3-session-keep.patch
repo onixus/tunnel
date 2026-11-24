@@ -102,7 +102,7 @@ index ae56826..22c09e2 100644
  use crate::{
      authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, pipe, udp_pipe,
  };
-@@ -102,15 +103,30 @@ impl Tunnel {
+@@ -102,15 +103,32 @@ impl Tunnel {
              let shutdown = self.context.shutdown.lock().unwrap();
              (shutdown.notification_handler(), shutdown.completion_guard())
          };
@@ -127,8 +127,10 @@ index ae56826..22c09e2 100644
 +            // here keeps the same QUIC connection; returning would drop the
 +            // session channel and the next keepalive would force a reconnect.
 +            // The session is not closed, so a reason recorded for this attempt
-+            // must not label the later close.
-+            if self.downstream.protocol() == Protocol::Http3
++            // must not label the later close. Shutdown must still leave: the
++            // completion guard is held until listen returns.
++            if !matches!(self.close_reason, Some(CloseReason::Shutdown))
++                && self.downstream.protocol() == Protocol::Http3
 +                && result.as_ref().is_err_and(|e| e.kind() != ErrorKind::UnexpectedEof)
 +            {
 +                self.close_reason = None;
@@ -140,7 +142,7 @@ index ae56826..22c09e2 100644
          };
          let reason = self.close_reason.take().unwrap_or_else(|| match &result {
              Ok(()) => CloseReason::PeerClosed { code: None },
-@@ -158,40 +174,55 @@ impl Tunnel {
+@@ -158,40 +176,55 @@ impl Tunnel {
          }
      }
  

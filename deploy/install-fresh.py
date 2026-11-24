@@ -23,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'server/console'))
 import host_platform
 HOME = Path('/opt/trusttunnel-web')
+# setsockopt argument from patches/trusttunnel-endpoint-udp-buffer.patch.
+# The kernel doubles it; a lower netns ceiling clamps the socket silently.
+UDP_BUFFER_SYSCTLS = {'net.core.rmem_max': 7 << 20, 'net.core.wmem_max': 7 << 20}
 STATE = Path('/opt/tunnel-installer')
 MANAGED = (HOME, Path('/opt/vpn-console'), Path('/opt/amneziawg'), Path('/opt/xray-cdn'),
            Path('/var/lib/h-ui'), Path('/etc/systemd/system/h-ui.service'))
@@ -371,6 +374,7 @@ def install(settings):
     portal = {'image': PORTAL_IMAGE, 'container_name': 'trusttunnel-web',
               'env_file': '.env', 'restart': 'unless-stopped', 'user': '10001:10001',
               'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'], 'read_only': True,
+              'sysctls': dict(UDP_BUFFER_SYSCTLS),
               'tmpfs': ['/tmp:size=32m,mode=1777'],
               'ports': ['127.0.0.1:18082:8000', '8443:8443/tcp', '8443:8443/udp'],
               'volumes': ['./data:/data', '/etc/letsencrypt:/certs:ro'],

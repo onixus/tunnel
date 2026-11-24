@@ -7,6 +7,11 @@ services:
     user: "10001:10001"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    # SO_RCVBUF is clamped to the container netns ceiling. 7 MiB is the
+    # setsockopt argument; the kernel doubles it to 14680064.
+    sysctls:
+      net.core.rmem_max: 7340032
+      net.core.wmem_max: 7340032
     read_only: true
     tmpfs: ["/tmp:size=32m,mode=1777"]
     ports:

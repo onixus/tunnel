@@ -10,7 +10,7 @@
 
 1. `patches/trusttunnel-endpoint-session-close-log.patch` — журнал закрытия сессий. На чистый тег.
 2. `patches/trusttunnel-h3-session-keep.patch` — только после журнала, не на чистый тег. HTTP/3 не рвётся таймером отсутствия новых запросов; если listen завершился без закрытия QUIC, задача поднимается заново (`quic_session_restart`). Закрытый канал не получает `CONNECTION_CLOSE` (`quic_session_kept`). `0x42` остаётся только для настоящей ошибки `recv`, и в кадр уходит фиксированная фраза.
-3. `patches/trusttunnel-endpoint-udp-buffer.patch` — после двух предыдущих, ложится и на чистый тег. До `bind` ставит `SO_RCVBUF`/`SO_SNDBUF`. Не `SO_RCVBUFFORCE` и не `UDP_GRO`.
+3. `patches/trusttunnel-endpoint-udp-buffer.patch` — после двух предыдущих, ложится и на чистый тег. До `bind` ставит `SO_RCVBUF`/`SO_SNDBUF` на 7 МиБ. Не `SO_RCVBUFFORCE` и не `UDP_GRO`. Без `net.core.rmem_max` и `net.core.wmem_max` не ниже 7340032 в netns контейнера ядро молча обрежет буфер до дефолта. Потолок задаёт compose (`sysctls`), не capability.
 
 ```sh
 git clone --branch <тег> https://github.com/TrustTunnel/TrustTunnel.git
