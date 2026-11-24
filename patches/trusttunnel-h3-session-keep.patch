@@ -1,21 +1,15 @@
 diff --git a/lib/src/quic_multiplexer.rs b/lib/src/quic_multiplexer.rs
-index 5181900..59daf63 100644
+index aeb4571..47aa89f 100644
 --- a/lib/src/quic_multiplexer.rs
 +++ b/lib/src/quic_multiplexer.rs
-@@ -1,4 +1,5 @@
- use crate::http_codec::{RequestHeaders, ResponseHeaders};
-+use crate::session_log::{self, QuicCloseInfo};
- use crate::settings::Settings;
- use crate::tls_demultiplexer::TlsDemux;
- use crate::utils::Either;
-@@ -26,6 +27,38 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
+@@ -27,6 +27,38 @@ const SOCKET_ID_FMT: &str = "QSOCK={}";
  
  const QUIC_CONNECTION_CLOSE_CODE: u64 = 0x42;
  
 +fn quic_close_class(error: &io::Error) -> &'static str {
 +    // Session task already dropped its channel. Kind, not Display: the session
 +    // log patch turns that drop into UnexpectedEof, and the raw try_send path
-+    // is NotConnected ("Channel closed"). Neither is a protocol failure.
++    // is NotConnected. Neither is a protocol failure.
 +    if error.kind() == ErrorKind::NotConnected || error.kind() == ErrorKind::UnexpectedEof {
 +        return "channel_closed";
 +    }
@@ -47,15 +41,14 @@ index 5181900..59daf63 100644
  type QuicConnection = quiche::Connection;
  
  pub(crate) struct QuicMultiplexer {
-@@ -58,6 +91,7 @@ pub(crate) struct QuicSocket {
-     tls_connection_meta: tls_demultiplexer::ConnectionMeta,
-     /// TLS client_random extracted from QUIC handshake
-     client_random: Vec<u8>,
-+    idle_timeout: Duration,
- }
- 
- pub(crate) enum QuicSocketEvent {
-@@ -277,8 +311,21 @@ impl QuicMultiplexer {
+@@ -273,14 +305,27 @@ impl QuicMultiplexer {
+                     // multiple `poll` messages in the queue
+                     Ok(_) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+                     Err(mpsc::error::TrySendError::Closed(_)) => {
+-                        Err(io::Error::other("Channel closed"))
++                        Err(io::Error::from(ErrorKind::NotConnected))
+                     }
+                 });
  
              let mut quic_conn = entry.conn.lock().unwrap();
              if let Err(e) = result {
@@ -79,7 +72,7 @@ index 5181900..59daf63 100644
              }
  
              if let Some(timeout) = quic_conn.timeout() {
-@@ -376,11 +423,13 @@ impl QuicMultiplexer {
+@@ -378,11 +423,13 @@ impl QuicMultiplexer {
                  header,
                  err
              );
@@ -97,120 +90,25 @@ index 5181900..59daf63 100644
          }
  
          Some(Either::with_right(BackgroundConnection::with_conn(
-@@ -561,6 +610,7 @@ impl QuicMultiplexer {
-             )),
-             tls_connection_meta: conn.tls_connection_meta,
-             client_random: extracted_client_random,
-+            idle_timeout: self.core_settings.client_listener_timeout,
-         })
-     }
- 
-@@ -916,6 +966,7 @@ impl QuicSocket {
- 
-     pub async fn listen(&self) -> io::Result<QuicSocketEvent> {
-         loop {
-+            let mut channel_closed = false;
-             let event = loop {
-                 match self.process_pending_h3_events()? {
-                     None => {
-@@ -943,16 +994,13 @@ impl QuicSocket {
-                     Some(event) => break Some(event),
-                 }
- 
--                match self
--                    .conn_rx
--                    .lock()
--                    .await
--                    .recv()
--                    .await
--                    .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?
--                {
--                    MultiplexerMessage::PollH3 => (),
--                    MultiplexerMessage::Close => break None,
-+                match self.conn_rx.lock().await.recv().await {
-+                    Some(MultiplexerMessage::PollH3) => (),
-+                    Some(MultiplexerMessage::Close) => break None,
-+                    None => {
-+                        channel_closed = true;
-+                        break None;
-+                    }
-                 }
-             };
- 
-@@ -963,6 +1011,20 @@ impl QuicSocket {
-                     .lock()
-                     .unwrap()
-                     .try_send(SocketMessage::Close(quic_conn.source_id().into_owned()));
-+                return Err(QuicCloseInfo {
-+                    timed_out: quic_conn.is_timed_out(),
-+                    idle_timeout: session_log::effective_quic_idle_timeout(
-+                        self.idle_timeout,
-+                        quic_conn
-+                            .peer_transport_params()
-+                            .map_or(0, |p| p.max_idle_timeout),
-+                    ),
-+                    peer_error: quic_conn.peer_error().map(|e| (e.is_app, e.error_code)),
-+                    local_error: quic_conn.local_error().map(|e| (e.is_app, e.error_code)),
-+                }
-+                .into_io_error());
-+            }
-+            if channel_closed {
-                 return Err(io::Error::from(ErrorKind::UnexpectedEof));
-             }
- 
 diff --git a/lib/src/tunnel.rs b/lib/src/tunnel.rs
-index a6c2aaa..bfe3c59 100644
+index ae56826..22c09e2 100644
 --- a/lib/src/tunnel.rs
 +++ b/lib/src/tunnel.rs
-@@ -6,6 +6,8 @@ use crate::downstream::{
- };
+@@ -7,6 +7,7 @@ use crate::downstream::{
  use crate::forwarder::Forwarder;
  use crate::pipe::DuplexPipe;
-+use crate::session_log::{CloseReason, SessionRecord};
+ use crate::session_log::{CloseReason, SessionRecord};
 +use crate::tls_demultiplexer::Protocol;
  use crate::{
      authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, pipe, udp_pipe,
  };
-@@ -14,6 +16,7 @@ use base64::Engine;
- use std::fmt::{Display, Formatter};
- use std::io;
- use std::io::ErrorKind;
-+use std::sync::atomic::Ordering;
- use std::sync::{Arc, Mutex};
- 
- /// Extract the username from base64-encoded `username:password` credentials.
-@@ -44,6 +47,8 @@ pub(crate) struct Tunnel {
-     /// or lazily on the first authenticated request for proxy-basic connections.
-     connection_guard: Option<ConnectionGuard>,
-     id: log_utils::IdChain<u64>,
-+    session: SessionRecord,
-+    close_reason: Option<CloseReason>,
- }
- 
- #[derive(Debug)]
-@@ -79,6 +84,7 @@ impl Tunnel {
-         authentication_policy: AuthenticationPolicy<'static>,
-         connection_guard: Option<ConnectionGuard>,
-         id: log_utils::IdChain<u64>,
-+        session: SessionRecord,
-     ) -> Self {
-         Self {
-             context,
-@@ -87,6 +93,8 @@ impl Tunnel {
-             authentication_policy,
-             connection_guard,
-             id,
-+            session,
-+            close_reason: None,
-         }
-     }
- 
-@@ -95,15 +103,34 @@ impl Tunnel {
+@@ -102,15 +103,30 @@ impl Tunnel {
              let shutdown = self.context.shutdown.lock().unwrap();
              (shutdown.notification_handler(), shutdown.completion_guard())
          };
--        tokio::select! {
+-        let result = tokio::select! {
 -            x = shutdown_notification.wait() => {
+-                self.close_reason = Some(CloseReason::Shutdown);
 -                match x {
 -                    Ok(_) => self.downstream.graceful_shutdown().await,
 -                    Err(e) => Err(io::Error::other(format!("{}", e))),
@@ -228,49 +126,24 @@ index a6c2aaa..bfe3c59 100644
 +            // A live HTTP/3 tunnel must outlast one idle listen. Restarting
 +            // here keeps the same QUIC connection; returning would drop the
 +            // session channel and the next keepalive would force a reconnect.
++            // The session is not closed, so a reason recorded for this attempt
++            // must not label the later close.
 +            if self.downstream.protocol() == Protocol::Http3
 +                && result.as_ref().is_err_and(|e| e.kind() != ErrorKind::UnexpectedEof)
 +            {
++                self.close_reason = None;
 +                log_id!(info, self.id, "quic_session_restart class=listen_ended");
 +                continue;
              }
 -            x = self.listen_inner() => x,
--        }
 +            break result;
-+        };
-+        let reason = self.close_reason.take().unwrap_or_else(|| match &result {
-+            Ok(()) => CloseReason::PeerClosed { code: None },
-+            Err(e) => CloseReason::from_io_error(e),
-+        });
-+        self.session.close(reason);
-+        result
-     }
- 
-     fn resolve_username(
-@@ -124,37 +151,81 @@ impl Tunnel {
+         };
+         let reason = self.close_reason.take().unwrap_or_else(|| match &result {
+             Ok(()) => CloseReason::PeerClosed { code: None },
+@@ -158,40 +174,55 @@ impl Tunnel {
          }
      }
  
-+    /// Mark the session as authenticated as soon as a request carries valid credentials,
-+    /// before the session may close, so that short sessions are not reported as anonymous
-+    fn mark_session_authenticated(&self, request: &dyn downstream::PendingMultiplexedRequest) {
-+        if self.session.stats.is_authenticated() {
-+            return;
-+        }
-+        let Some(authenticator) = self.context.authenticator.as_ref() else {
-+            return;
-+        };
-+        if let Ok(Some(source)) = request.auth_info() {
-+            if authenticator.authenticate(&source, &self.id) == Status::Pass {
-+                let username = match &source {
-+                    authentication::Source::ProxyBasic(s) => decode_username(s.as_ref()),
-+                    authentication::Source::Sni(s) => decode_username(s.as_ref()),
-+                };
-+                self.session.stats.on_authenticated(username.as_deref());
-+            }
-+        }
-+    }
-+
 +    /// HTTP/3 stays up while QUIC is alive. Applying the listener timeout
 +    /// there ends the session task and the next keepalive is closed as 0x42.
 +    /// TCP still uses the timeout: it has no separate keepalive path.
@@ -304,7 +177,7 @@ index a6c2aaa..bfe3c59 100644
 +            let request = match self.next_request().await {
 +                Ok(None) => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
-+                    self.close_reason = Some(CloseReason::PeerClosed { code: None });
+                     self.close_reason = Some(CloseReason::PeerClosed { code: None });
                      return Ok(());
                  }
 -                Ok(Ok(Some(r))) => {
@@ -315,21 +188,23 @@ index a6c2aaa..bfe3c59 100644
 -                Ok(Err(e)) if e.kind() == ErrorKind::UnexpectedEof => {
 +                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                      log_id!(debug, self.id, "Tunnel closed gracefully");
-+                    self.close_reason = Some(CloseReason::from_io_error(&e));
+                     self.close_reason = Some(CloseReason::from_io_error(&e));
                      return Ok(());
                  }
 -                Ok(Err(e)) => {
 -                    log_id!(trace, self.id, "Tunnel listen error: {}", e);
-+                Err(e) if e.kind() == ErrorKind::TimedOut => {
-+                    log_id!(trace, self.id, "Tunnel listen timeout");
-+                    self.close_reason = Some(CloseReason::IdleTimeout(
-+                        self.context.settings.client_listener_timeout,
-+                    ));
-                     return Err(e);
-                 }
+-                    self.close_reason = Some(CloseReason::from_io_error(&e));
+-                    return Err(e);
+-                }
 -                Err(_) => {
--                    log_id!(trace, self.id, "Tunnel listen timeout");
++                Err(e) if e.kind() == ErrorKind::TimedOut => {
+                     log_id!(trace, self.id, "Tunnel listen timeout");
+                     self.close_reason = Some(CloseReason::IdleTimeout(
+                         self.context.settings.client_listener_timeout,
+                     ));
 -                    return Err(io::Error::from(ErrorKind::TimedOut));
++                    return Err(e);
++                }
 +                Err(e) => {
 +                    log_id!(trace, self.id, "Tunnel listen error");
 +                    self.close_reason = Some(CloseReason::from_io_error(&e));
@@ -337,48 +212,3 @@ index a6c2aaa..bfe3c59 100644
                  }
              };
  
-+            self.session.stats.streams.fetch_add(1, Ordering::Relaxed);
-+            self.mark_session_authenticated(request.as_ref());
-+
-             let context = self.context.clone();
-             let forwarder = self.forwarder.clone();
-             let tls_domain = self.downstream.tls_domain().to_string();
-@@ -166,13 +237,21 @@ impl Tunnel {
-             } else {
-                 None
-             };
-+            let session_stats = self.session.stats.clone();
-             let update_metrics = {
-                 let metrics = context.metrics.clone();
-+                let session_stats = session_stats.clone();
-                 move |direction, n| match direction {
-                     pipe::SimplexDirection::Incoming => {
-+                        session_stats
-+                            .bytes_down
-+                            .fetch_add(n as u64, Ordering::Relaxed);
-                         metrics.add_inbound_bytes(protocol, username.as_deref(), n)
-                     }
-                     pipe::SimplexDirection::Outgoing => {
-+                        session_stats
-+                            .bytes_up
-+                            .fetch_add(n as u64, Ordering::Relaxed);
-                         metrics.add_outbound_bytes(protocol, username.as_deref(), n)
-                     }
-                 }
-@@ -213,6 +292,8 @@ impl Tunnel {
-                                     request.fail_request(ConnectionError::Authentication(
-                                         "Connection limit exceeded".to_string(),
-                                     ));
-+                                    self.close_reason =
-+                                        Some(CloseReason::AuthRejected("connection limit"));
-                                     return Err(io::Error::new(
-                                         ErrorKind::PermissionDenied,
-                                         "Connection limit exceeded",
-@@ -250,6 +331,7 @@ impl Tunnel {
-                         match authenticator.authenticate(&source, &log_id) {
-                             Status::Pass => Some(source),
-                             Status::Reject => {
-+                                session_stats.auth_failures.fetch_add(1, Ordering::Relaxed);
-                                 let err = ConnectionError::Authentication(
-                                     "Authentication failed".to_string(),
-                                 );

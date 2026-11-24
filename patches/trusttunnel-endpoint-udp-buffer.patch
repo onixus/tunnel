@@ -1,0 +1,19 @@
+diff --git a/lib/src/core.rs b/lib/src/core.rs
+index adeb055..69880ba 100644
+--- a/lib/src/core.rs
++++ b/lib/src/core.rs
+@@ -344,6 +344,14 @@ impl Core {
+                 socket.set_only_v6(false)?;
+             }
+             socket.set_nonblocking(true)?;
++            // H1: raise UDP buffers before bind. socket2 0.5 sets SO_RCVBUF /
++            // SO_SNDBUF, not SO_RCVBUFFORCE. Without CAP_NET_ADMIN the kernel
++            // clamps to rmem_max / wmem_max. A failed setsockopt must not keep
++            // the listener down. UDP_GRO is not set: quiche recv is one
++            // datagram at a time.
++            const UDP_SOCKET_BUFFER: usize = 7 << 20;
++            let _ = socket.set_recv_buffer_size(UDP_SOCKET_BUFFER);
++            let _ = socket.set_send_buffer_size(UDP_SOCKET_BUFFER);
+             socket.bind(&addr.into())?;
+             UdpSocket::from_std(socket.into())?
+         };
