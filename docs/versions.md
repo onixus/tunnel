@@ -22,11 +22,11 @@ Docker base `python:3.12-slim` и транзитивные Python-зависим
 
 Один образ содержит и портал, и консоль. Портал стартует командой образа и владеет endpoint. Консоль — второй процесс того же образа: `uvicorn routing_app:app --host 0.0.0.0 --port 8000`. Платформа `linux/amd64`. Публикация не заменяет работающие контейнеры.
 
-Опубликовано 22.11.2026 из `ad8f3fc` (`main`, merge #52 и #53). Предыдущий тег `d18aac6` остаётся в реестре и не подменяется. С 23.11.2026 пакет публичный: анонимный pull отдаёт индекс и слои `linux/amd64`, учётка GitHub не нужна. Страница пакета — у репозитория. Установка этим образом — в [гайде](installation.md#установка-с-готовым-образом). Слои Python совпадают с `deploy/fresh-portal.Dockerfile`. `rtrust-codec` собран тем же Rust 1.98.1 и `cargo build --locked --release` кросс-компиляцией в `x86_64-unknown-linux-gnu`: на машине сборки `rustc` под QEMU падает. Публикация не заменяет работающие контейнеры.
+Опубликовано 24.11.2026 из `980b5e5` (`main`). Предыдущие теги `ad8f3fc` и `d18aac6` остаются в реестре и не подменяются. С 23.11.2026 пакет публичный: анонимный pull отдаёт индекс и слои `linux/amd64`, учётка GitHub не нужна. Страница пакета — у репозитория. Установка этим образом — в [гайде](installation.md#установка-с-готовым-образом). Слои Python совпадают с `deploy/fresh-portal.Dockerfile`. `rtrust-codec` собран тем же Rust 1.98.1 и `cargo build --locked --release` кросс-компиляцией в `x86_64-unknown-linux-gnu`: на машине сборки `rustc` под QEMU падает. Публикация не заменяет работающие контейнеры.
 
 | Образ | Тег | Digest |
 |---|---|---|
-| [ghcr.io/onixus/tunnel-fresh-portal](https://github.com/onixus/tunnel/pkgs/container/tunnel-fresh-portal) | `ad8f3fc` | `sha256:053676d0513de674fed5ae26d90ef9805891e261c5e8b61db5d4788323107b6f` |
+| [ghcr.io/onixus/tunnel-fresh-portal](https://github.com/onixus/tunnel/pkgs/container/tunnel-fresh-portal) | `980b5e5` | `sha256:e42608ff62bee2d0955b684c2e664ad61445c735c9cacc72f7c00fd48bcb64c3` |
 
 ## Технические первоисточники
 

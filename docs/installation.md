@@ -61,7 +61,7 @@ python3 scripts/build-installer.py --target centos-stream --client-source /пу�
 ### Установка с готовым образом
 
 Мастер может не собирать портал, а скачать закреплённый образ. Тег и digest —
-в [versions.md](versions.md): сейчас это `ghcr.io/onixus/tunnel-fresh-portal:ad8f3fc`.
+в [versions.md](versions.md): сейчас это `ghcr.io/onixus/tunnel-fresh-portal:980b5e5`.
 В образе и портал, и консоль, платформа `linux/amd64`. Образ публичный: учётка GitHub
 и `docker login` не нужны. Страница пакета:
 [onixus/tunnel/pkgs/container/tunnel-fresh-portal](https://github.com/onixus/tunnel/pkgs/container/tunnel-fresh-portal).
