@@ -62,27 +62,12 @@ python3 scripts/build-installer.py --target centos-stream --client-source /пу�
 
 Мастер может не собирать портал, а скачать закреплённый образ. Тег и digest —
 в [versions.md](versions.md): сейчас это `ghcr.io/onixus/tunnel-fresh-portal:ad8f3fc`.
-В образе и портал, и консоль, платформа `linux/amd64`. Пакет приватный и не привязан
-к репозиторию, поэтому на странице Packages репозитория его нет. Анонимный
-`docker pull` не сработает.
+В образе и портал, и консоль, платформа `linux/amd64`. Образ публичный: учётка GitHub
+и `docker login` не нужны. Страница пакета:
+[onixus/tunnel/pkgs/container/tunnel-fresh-portal](https://github.com/onixus/tunnel/pkgs/container/tunnel-fresh-portal).
 
 Образ не заменяет работающие контейнеры. Мастер по-прежнему требует чистый сервер
 с systemd. Обычный контейнер вместо сервера не подходит.
-
-До запуска войдите в GHCR **от root**. Токен GitHub — с правом `read:packages`,
-от владельца пакета. Не передавайте токен аргументом команды.
-
-На Ubuntu Docker можно поставить заранее, чтобы логин пережил запуск мастера:
-
-```sh
-sudo apt-get update
-sudo apt-get install -y docker.io
-printf '%s' "$GHCR_TOKEN" | sudo docker login ghcr.io -u onixus --password-stdin
-```
-
-На CentOS мастер сам подключает репозиторий Docker и проверяет ключ подписи.
-Не ставьте Docker вручную до него. Если загрузка образа остановится на отказе
-входа, выполните `docker login` от root и повторите тот же `.run` с `--resume`.
 
 Запуск, например на Ubuntu:
 
