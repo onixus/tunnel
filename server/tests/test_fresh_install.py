@@ -13,6 +13,14 @@ spec.loader.exec_module(fresh)
 
 
 @pytest.mark.parametrize('value', ['vpn.example.org', '203.0.113.10', 'VPN.Example.org'])
+def test_endpoint_udp_buffer_ceiling_matches_compose():
+    ceiling = 7 << 20
+    assert fresh.UDP_BUFFER_SYSCTLS == {'net.core.rmem_max': ceiling, 'net.core.wmem_max': ceiling}
+    compose = (ROOT / 'examples/trusttunnel-compose.yaml').read_text()
+    assert f'net.core.rmem_max: {ceiling}' in compose
+    assert f'net.core.wmem_max: {ceiling}' in compose
+
+
 def test_public_address(value):
     assert fresh.address(value) == value.lower()
 

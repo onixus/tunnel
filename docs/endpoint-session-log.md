@@ -77,10 +77,12 @@ git apply --check /абсолютный/путь/к/patches/trusttunnel-endpoint
 git apply /абсолютный/путь/к/patches/trusttunnel-endpoint-session-close-log.patch
 git apply --check /абсолютный/путь/к/patches/trusttunnel-h3-session-keep.patch
 git apply /абсолютный/путь/к/patches/trusttunnel-h3-session-keep.patch
+git apply --check /абсолютный/путь/к/patches/trusttunnel-endpoint-udp-buffer.patch
+git apply /абсолютный/путь/к/patches/trusttunnel-endpoint-udp-buffer.patch
 cargo test -p trusttunnel --lib --test sigterm
 cargo build --release --bin trusttunnel_endpoint
 ```
 
-Патч `trusttunnel-h3-session-keep.patch` накладывается только после журнала, не на чистый тег. Без него живая HTTP/3-сессия рвётся, а keepalive закрывается кодом `0x42`. Патч оставляет соединение (`quic_session_kept`) и поднимает listen заново (`quic_session_restart`). Официальные v1.1.0 и v1.3.1 этот баг содержат. Подробности для агентов: `AGENTS.md`.
+Патч `trusttunnel-h3-session-keep.patch` накладывается только после журнала, не на чистый тег. Без него живая HTTP/3-сессия рвётся, а keepalive закрывается кодом `0x42`. Патч оставляет соединение (`quic_session_kept`) и поднимает listen заново (`quic_session_restart`). `trusttunnel-endpoint-udp-buffer.patch` ложится и на чистый тег, и после двух предыдущих: до `bind` ставит `SO_RCVBUF`/`SO_SNDBUF` на 7 МиБ. Ядро удваивает значение (`ss` покажет `14680064`) и молча обрезает его до `net.core.rmem_max` / `net.core.wmem_max` контейнера. В compose эти sysctl должны быть не ниже 7340032; `SO_RCVBUFFORCE` не используется. Официальные v1.1.0 и v1.3.1 баг сессии содержат. Подробности для агентов: `AGENTS.md`.
 
 Бинарь: `target/release/trusttunnel_endpoint`. Он подменяет официальный при сборке образа по [инструкции](trusttunnel-server.md#подготовить-исходники-и-образ); в [versions](versions.md) нужно записать SHA256 собственной сборки вместо официального архива. Логи смотреть `docker logs trusttunnel-web | grep -E 'Session (closed|timeouts)|Unauthenticated sessions|Shutdown'`.

@@ -1,0 +1,36 @@
+diff --git a/lib/src/core.rs b/lib/src/core.rs
+index adeb055..69880ba 100644
+--- a/lib/src/core.rs
++++ b/lib/src/core.rs
+@@ -344,6 +344,31 @@ impl Core {
+                 socket.set_only_v6(false)?;
+             }
+             socket.set_nonblocking(true)?;
++            // Raise UDP buffers before bind. socket2 0.5 sets SO_RCVBUF /
++            // SO_SNDBUF, not SO_RCVBUFFORCE. The kernel doubles the argument,
++            // so 7 MiB shows up as rb/tb 14680064. setsockopt still succeeds
++            // when the kernel clamps the value to rmem_max / wmem_max.
++            // A failed setsockopt must not keep the listener down.
++            // UDP_GRO is not set: quiche recv is one datagram at a time.
++            const UDP_SOCKET_BUFFER: usize = 7 << 20;
++            if socket.set_recv_buffer_size(UDP_SOCKET_BUFFER).is_ok() {
++                if let Ok(size) = socket.recv_buffer_size() {
++                    if size < UDP_SOCKET_BUFFER {
++                        warn!("UDP receive buffer clamped below 7MiB; raise net.core.rmem_max");
++                    }
++                }
++            } else {
++                warn!("UDP receive buffer unchanged");
++            }
++            if socket.set_send_buffer_size(UDP_SOCKET_BUFFER).is_ok() {
++                if let Ok(size) = socket.send_buffer_size() {
++                    if size < UDP_SOCKET_BUFFER {
++                        warn!("UDP send buffer clamped below 7MiB; raise net.core.wmem_max");
++                    }
++                }
++            } else {
++                warn!("UDP send buffer unchanged");
++            }
+             socket.bind(&addr.into())?;
+             UdpSocket::from_std(socket.into())?
+         };
